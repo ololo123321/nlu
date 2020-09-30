@@ -1,0 +1,4 @@
+tensorflow==1.14
+numpy
+pytest==5.3.2
+rusenttokenize==0.0.5
