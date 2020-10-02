@@ -60,6 +60,8 @@ def infer_entities_bounds(label_ids: tf.Tensor, bound_ids: tf.Tensor) -> tf.Tens
     :param bound_ids: tf.Tensor of shape [num_bound_ids] - айдишники, обозначающие начало или конец сущности
     :return: res: tf.Tensor of shape [num_entities_sum, 2], где num_entities_sum - общее число сущностей
              в батче. (i, j) - начало или конец сущности, где 0 <= i < N; 0 < j < T
+    TODO: рассмотреть случай неизвестных лейблов токенов. вообще говоря, модель может в качестве первого
+     или последнего лейбла сущности предсказать что-то другое (например, I_ORG вместо L_ORG)
     """
     labels_3d = tf.tile(label_ids[:, :, None], [1, 1, tf.shape(bound_ids)[0]])  # [N, T, num_bound_ids]
     mask_3d = tf.equal(labels_3d, bound_ids[None, None, :])  # [N, T, num_bound_ids]

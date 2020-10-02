@@ -113,7 +113,6 @@ class Example(ReprMixin):
 
         sent_starts = [0] + list(accumulate(lengths))
 
-        filename = self.filename  # чтоб self не прокидывать в аргумент ф-ии add_example
         sent_cum = ""
         entities_sorted = sorted(self.entities, key=lambda x: x.start_token_id)
         entities_cum = []
@@ -121,14 +120,16 @@ class Example(ReprMixin):
         labels_cum = []
         res = []
 
-        def add_example():
+        def add_example(self):
+            entity_ids = {x.id for x in entities_cum}
+            arcs = [x for x in self.arcs if x.head in entity_ids and x.dep in entity_ids]
             example_new = Example(
-                filename=filename,
+                filename=self.filename,
                 text=sent_cum,
                 tokens=tokens_cum.copy(),
                 labels=labels_cum.copy(),
                 entities=entities_cum.copy(),
-                arcs=None
+                arcs=arcs
             )
             res.append(example_new)
             tokens_cum.clear()
@@ -149,11 +150,11 @@ class Example(ReprMixin):
                 continue
             flag = True
             for entity in entities_sorted:
-                print(start, end, entity)
+                # print(start, end, entity)
 
                 # вся сущность в предложении
                 if start <= entity.start_token_id <= entity.end_token_id < end:
-                    print(entity)
+                    # print(entity)
                     entities_cum.append(entity)
 
                 # нет смысла бежать по сущностям, которые находятся дальше по тексту
@@ -162,19 +163,19 @@ class Example(ReprMixin):
 
                 # одна часть сущности в одном предложении, другая - в другом
                 if entity.start_token_id < start <= entity.end_token_id:
-                    print("entity start:", entity.start_token_id)
-                    print("entity end:", entity.end_token_id)
-                    print("sent start:", start)
-                    print("id sent:", i)
+                    # print("entity start:", entity.start_token_id)
+                    # print("entity end:", entity.end_token_id)
+                    # print("sent start:", start)
+                    # print("id sent:", i)
                     sent_cum += ' ' + sent_curr
                     entities_cum.append(entity)
                     flag = False
                     break
             if flag:
-                add_example()
+                add_example(self)
                 sent_cum = sent_curr
 
-        add_example()
+        add_example(self)
 
         # print("init num sentences:", len(sent_candidates))
         # print("new num sentences:", len(res))
