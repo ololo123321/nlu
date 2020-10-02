@@ -506,7 +506,7 @@ class RelationExtractor:
         config_re_span_emb = self.config["model"]["re"]["span_embeddings"]
 
         start_ids = infer_entities_bounds(label_ids, bound_ids=tf.constant(config_re_span_emb["ner_entity_start_ids"]))
-        end_ids = infer_entities_bounds(label_ids, bound_ids=config_re_span_emb["ner_entity_end_ids"])
+        end_ids = infer_entities_bounds(label_ids, bound_ids=tf.constant(config_re_span_emb["ner_entity_end_ids"]))
 
         batch_size = tf.shape(x)[0]
         emb_type = config_re_span_emb["type"]
