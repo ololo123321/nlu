@@ -1,6 +1,7 @@
 import os
 import re
 import tqdm
+from copy import deepcopy
 from typing import List
 from itertools import accumulate
 from collections import namedtuple
@@ -445,6 +446,9 @@ class ExampleEncoder:
             label = self.vocab_ner.get_id(self.ner_label_other)
             labels_encoded = [label] + labels_encoded + [label]
         example_enc.labels = labels_encoded
+
+        # entities
+        example_enc.entities = deepcopy(example.entities)
 
         # arcs
         id2index = {x.id: i for i, x in enumerate(sorted(example.entities, key=lambda x: x.start_token_id))}
