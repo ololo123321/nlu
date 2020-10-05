@@ -4,7 +4,7 @@ import tensorflow as tf
 from src.utils import infer_entities_bounds
 
 
-sess = tf.InteractiveSession()
+sess = tf.Session()
 BOUND_IDS = tf.constant([1, 2, 5])
 
 
@@ -30,5 +30,5 @@ BOUND_IDS = tf.constant([1, 2, 5])
 ])
 def test_infer_entities_bounds(label_ids, expected):
     actual = infer_entities_bounds(label_ids=label_ids, bound_ids=BOUND_IDS)
-    actual = actual.eval()
+    actual = sess.run(actual)
     assert np.allclose(actual, expected)

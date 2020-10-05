@@ -1,8 +1,9 @@
 import os
 import re
 import tqdm
-from copy import deepcopy
+from typing import List
 from itertools import accumulate
+from collections import namedtuple
 from rusenttokenize import ru_sent_tokenize
 
 TOKENS_EXPRESSION = re.compile(r"\w+|[^\w\s]")
@@ -83,9 +84,12 @@ class Vocab(ReprMixin):
         return self._value2id[value]
 
 
+SpanInfo = namedtuple("Span", ["span_chunks", "span_tokens"])
+
+
 class Example(ReprMixin):
-    def __init__(self, filename=None, text=None, tokens=None, labels=None, entities=None, arcs=None):
-        self.filename = filename
+    def __init__(self, id=None, text=None, tokens=None, labels=None, entities=None, arcs=None):
+        self.id = id
         self.text = text
         self.tokens = tokens
         self.labels = labels
@@ -102,131 +106,71 @@ class Example(ReprMixin):
 
     @property
     def chunks(self):
-        """
-        фикс. разделения на предложения: если начало сущности находится в одном предложении,
-        а конец - в другом, то что-то не так с разделением на предложения, и соседние кусочки нужно склеить.
-        по итогу должно гарантироваться, что одной сущности соответствует ровно одно предложение.
-        """
+        if not self.text:
+            print(f"[{self.id} WARNING]: empty text")
+            return [Example(**self.__dict__)]
         sent_candidates = ru_sent_tokenize(self.text)
         lengths = [len(TOKENS_EXPRESSION.findall(sent)) for sent in sent_candidates]
         assert sum(lengths) == len(self.tokens)
 
-        sent_starts = [0] + list(accumulate(lengths))
+        spans = self._get_spans(lengths)
 
-        sent_cum = ""
-        entities_sorted = sorted(self.entities, key=lambda x: x.start_token_id)
-        entities_cum = []
-        tokens_cum = []
-        labels_cum = []
         res = []
-
-        def add_example(self):
-            entity_ids = {x.id for x in entities_cum}
-            arcs = [x for x in self.arcs if x.head in entity_ids and x.dep in entity_ids]
-            example_new = Example(
-                filename=self.filename,
-                text=sent_cum,
-                tokens=tokens_cum.copy(),
-                labels=labels_cum.copy(),
-                entities=entities_cum.copy(),
+        for i, span in enumerate(spans):
+            _id = self.id + "_" + str(i)
+            start, end = span.span_chunks
+            text = ' '.join(sent_candidates[start:end])
+            start, end = span.span_tokens
+            tokens = self.tokens[start:end]
+            labels = self.labels[start:end]
+            entities = [x for x in self.entities if start <= x.start_token_id <= x.end_token_id < end]
+            entity_ids = {x.id for x in entities}
+            arcs = [x for x in self.arcs if (x.head in entity_ids) and (x.dep in entity_ids)]
+            x = Example(
+                id=_id,
+                text=text,
+                tokens=tokens,
+                labels=labels,
+                entities=entities,
                 arcs=arcs
             )
-            res.append(example_new)
-            tokens_cum.clear()
-            labels_cum.clear()
-            entities_cum.clear()
-
-        for i in range(len(sent_candidates)):
-            sent_curr = sent_candidates[i]
-            start = sent_starts[i]
-            end = sent_starts[i + 1]
-            tokens_cum += self.tokens[start:end]
-            labels_cum += self.labels[start:end]
-            # print("i:", i)
-            # print("curr sent:", curr_sent)
-            # print("cum sent:", cum_sent)
-            if i == 0:
-                sent_cum += sent_curr
-                continue
-            flag = True
-            for entity in entities_sorted:
-                # print(start, end, entity)
-
-                # вся сущность в предложении
-                if start <= entity.start_token_id <= entity.end_token_id < end:
-                    # print(entity)
-                    entities_cum.append(entity)
-
-                # нет смысла бежать по сущностям, которые находятся дальше по тексту
-                if entity.start_token_id >= end:
-                    break
-
-                # одна часть сущности в одном предложении, другая - в другом
-                if entity.start_token_id < start <= entity.end_token_id:
-                    # print("entity start:", entity.start_token_id)
-                    # print("entity end:", entity.end_token_id)
-                    # print("sent start:", start)
-                    # print("id sent:", i)
-                    sent_cum += ' ' + sent_curr
-                    entities_cum.append(entity)
-                    flag = False
-                    break
-            if flag:
-                add_example(self)
-                sent_cum = sent_curr
-
-        add_example(self)
-
-        # print("init num sentences:", len(sent_candidates))
-        # print("new num sentences:", len(res))
+            res.append(x)
         return res
 
-    # @property
-    # def chunks(self):
-    #     """
-    #     разделение исходного примера на несколько по предложениям.
-    #     отношения такие, что одна сущность содержится в одном предложении, а другая - в другом, удаляются.
-    #     """
-    #     sentences = self.sentences_fixed
-    #     lengths = [len(TOKENS_EXPRESSION.findall(sent)) for sent in sentences]
-    #     assert sum(lengths) == len(self.tokens)
-    #
-    #     sent_starts = [0] + list(accumulate(lengths))
-    #
-    #     res = []
-    #     entity_ptr = 0
-    #     for i in range(len(sentences)):
-    #         start = sent_starts[i]
-    #         end = sent_starts[i + 1]
-    #
-    #         entities_i = []
-    #         for entity in self.entities[entity_ptr:]:
-    #             if entity.start_token_id > entity_ptr
-    #             if start <= entity.start_token_id <= entity.end_token_id < end:
-    #                 entities_i.append(entity)
-    #
-    #         example = Example(
-    #             filename=self.filename,
-    #             text=sentences[i],
-    #             tokens=self.tokens[start:end],
-    #             labels=self.labels[start:end],
-    #             entities=None,
-    #             arcs=None
-    #         )
-    #         res.append(example)
-    #     return res
+    def _get_spans(self, lengths) -> List[SpanInfo]:
+        # entity_ptr = 0
+        sent_starts = [0] + list(accumulate(lengths))
+        spans = []
+        start = 0  # начало накопленной последовательности
+        start_chunk = 0
+        for i in range(len(lengths)):
+            is_bad_split = False
+            start_next = sent_starts[i + 1]
+            start_next_chunk = i + 1
+            for entity in self.entities:
+                if entity.start_token_id >= start_next:
+                    break
+                if entity.start_token_id < start_next <= entity.end_token_id:
+                    is_bad_split = True
+                    break
+            if not is_bad_split:
+                span_chunks = start_chunk, start_next_chunk
+                span_tokens = start, start_next
+                span = SpanInfo(span_chunks=span_chunks, span_tokens=span_tokens)
+                spans.append(span)
+                start = start_next
+                start_chunk = i + 1
+        return spans
 
 
 class ParserRuREBus:
     """
     https://github.com/dialogue-evaluation/RuREBus
     """
-    NER_LABEL_OTHER = '0'
-    RE_LABEL_OTHER = 'O'
-
-    def __init__(self, ner_encoding):
+    def __init__(self, ner_encoding, ner_label_other="O"):
         assert ner_encoding in {"bio", "bilou"}
         self.ner_encoding = ner_encoding
+        self.ner_label_other = ner_label_other
 
     def parse(self, data_dir, n=None, ner_encoding="bilou"):
         """
@@ -253,113 +197,6 @@ class ParserRuREBus:
                 print(e)
         print(f"num parsed examples: {len(examples)}")
         return examples
-
-    def check_example(self, example: Example):
-        """
-        NER:
-        * число токенов равно числу лейблов
-        * entity.start >= entity.end
-        * начало сущности >= 0, конец сущности < len(tokens)
-        RE:
-        * оба аргумента отношений есть в entities
-        """
-        assert len(example.tokens) == len(example.labels), \
-            f"[{example.filename}] tokens and labels mismatch, {len(example.tokens)} != {len(example.labels)}"
-
-        entity_ids = set()
-        for entity in example.entities:
-            assert entity.start_token_id <= entity.end_token_id, \
-                f"[{example.filename}] strange entity span, start = {entity.start_token_id}, end = {entity.end_token_id}"
-            assert entity.start_token_id >= 0, f"[{example.filename}] strange entity start: {entity.start_token_id}"
-            assert entity.end_token_id < len(example.tokens), \
-                f"[{example.filename}] strange entity end: {entity.end_token_id}, but num tokens is {len(example.tokens)}"
-            entity_ids.add(entity.id)
-
-        for arc in example.arcs:
-            assert arc.head in entity_ids, \
-                f"[{example.filename}] something is wrong with arc {arc.id}: head {arc.head} is unknown"
-            assert arc.dep in entity_ids, \
-                f"[{example.filename}] something is wrong with arc {arc.id}: dep {arc.dep} is unknown"
-
-        arcs = [(arc.head, arc.dep, arc.rel) for arc in example.arcs]
-        assert len(arcs) == len(set(arcs)), f"[{example.filename}] there duplicates in arcs"
-
-        if self.ner_encoding == "bilou":
-            num_start_ids = sum(x.startswith("B") for x in example.labels)
-            num_end_ids = sum(x.startswith("L") for x in example.labels)
-            assert num_start_ids == num_end_ids, \
-                f"[{example.filename}]: num start ids: {num_start_ids}, num end ids: {num_end_ids}"
-
-    @classmethod
-    def encode_example(cls, example: Example, vocab_ner: Vocab, vocab_re: Vocab, add_bounds: bool = False):
-        """
-        Кодирование категориальных атрибутов примеров:
-        * tokens - List[str] (остаётся неизменным)
-        * labels - List[int]
-        * entities - List[Tuple[start, end]]
-        * arcs - List[Tuple[head, dep, id_relation]]
-        """
-
-        try:
-            example_enc = deepcopy(example)
-
-            # tokens
-            if add_bounds:
-                example_enc.tokens = ["[START]"] + example_enc.tokens + ["[END]"]
-
-            # labels
-            labels_encoded = []
-            for label in example.labels:
-                label_enc = vocab_ner.get_id(label)
-                labels_encoded.append(label_enc)
-            if add_bounds:
-                label = vocab_ner.get_id(cls.NER_LABEL_OTHER)
-                labels_encoded = [label] + labels_encoded + [label]
-            example_enc.labels = labels_encoded
-
-            # arcs
-            id2index = {x.id: i for i, x in enumerate(sorted(example.entities, key=lambda x: x.start))}
-            arcs_encoded = []
-            for arc in example.arcs:
-                head = id2index[arc.head]
-                dep = id2index[arc.dep]
-                rel = vocab_re.get_id(arc.rel)
-                arcs_encoded.append((head, dep, rel))
-            example_enc.arcs = arcs_encoded
-            return example_enc
-
-        except Exception as e:
-            print(e)
-            print(f"strange example: {example.filename}")
-
-    def fit_vocabs(self, examples):
-        # labels vocab
-        vocab_ner = set()
-        prefixes = {"B", "I"}
-        if self.ner_encoding == "bilou":
-            prefixes |= {"L", "U"}
-        for x in examples:
-            for label in x.labels:
-                if "_" in label:
-                    # предполагаем, что каждая сущность может состоять из нескольких токенов
-                    label = label.split("_")[-1]
-                    for prefix in prefixes:
-                        vocab_ner.add(prefix + "_" + label)
-                        vocab_ner.add(prefix + "_" + label)
-                else:
-                    vocab_ner.add(label)
-        vocab_ner.add(self.NER_LABEL_OTHER)
-        vocab_ner = Vocab(vocab_ner)
-
-        # arcs vocab
-        vocab_re = set()
-        for x in examples:
-            for arc in x.arcs:
-                vocab_re.add(arc.rel)
-        vocab_re.add(self.RE_LABEL_OTHER)
-        vocab_re = Vocab(vocab_re)
-
-        return vocab_ner, vocab_re
 
     def _parse_example(self, data_dir, filename: str):
         """
@@ -391,7 +228,7 @@ class ParserRuREBus:
             start2index[m.span()[0]] = i
 
         # .ann
-        ner_labels = [self.NER_LABEL_OTHER] * len(text_tokens)
+        ner_labels = [self.ner_label_other] * len(text_tokens)
         entities = []
         arcs = []
         arcs_used = set()  # в арках бывают дубликаты, пример: R35, R36 в 31339011023601075299026_18_part_1.ann
@@ -526,7 +363,7 @@ class ParserRuREBus:
                     raise Exception(f"invalid line: {line}")
 
         example = Example(
-            filename=filename,
+            id=filename,
             text=text,
             tokens=text_tokens,
             labels=ner_labels,
@@ -535,3 +372,125 @@ class ParserRuREBus:
         )
 
         return example
+
+
+class ExampleEncoder:
+    def __init__(self, ner_encoding, ner_label_other="O", re_label_other="O", add_seq_bounds=True):
+        assert ner_encoding in {"bio", "bilou"}
+        self.ner_encoding = ner_encoding
+        self.ner_label_other = ner_label_other
+        self.re_label_other = re_label_other
+        self.add_seq_bounds = add_seq_bounds
+
+        self.vocab_ner = None
+        self.vocab_re = None
+
+    def fit_transform(self, examples):
+        self.fit(examples)
+        return self.transform(examples)
+
+    def fit(self, examples):
+        vocab_ner = set()
+        prefixes = {"B", "I"}
+        if self.ner_encoding == "bilou":
+            prefixes |= {"L", "U"}
+        for x in examples:
+            for label in x.labels:
+                if "_" in label:
+                    # предполагаем, что каждая сущность может состоять из нескольких токенов
+                    label = label.split("_")[-1]
+                    for prefix in prefixes:
+                        vocab_ner.add(prefix + "_" + label)
+                        vocab_ner.add(prefix + "_" + label)
+                else:
+                    vocab_ner.add(label)
+        vocab_ner.add(self.ner_label_other)
+        self.vocab_ner = Vocab(vocab_ner)
+
+        # arcs vocab
+        vocab_re = set()
+        for x in examples:
+            for arc in x.arcs:
+                vocab_re.add(arc.rel)
+        vocab_re.add(self.re_label_other)
+        self.vocab_re = Vocab(vocab_re)
+
+    def transform(self, examples):
+        res = []
+        for x in examples:
+            x_enc = self.transform_example(x)
+            res.append(x_enc)
+        return res
+
+    def transform_example(self, example):
+        """
+        Кодирование категориальных атрибутов примеров:
+        * tokens - List[str] (остаётся неизменным)
+        * labels - List[int]
+        * entities - List[Tuple[start, end]]
+        * arcs - List[Tuple[head, dep, id_relation]]
+        """
+        example_enc = Example()
+
+        # tokens
+        if self.add_seq_bounds:
+            example_enc.tokens = ["[START]"] + example.tokens + ["[END]"]
+
+        # labels
+        labels_encoded = []
+        for label in example.labels:
+            label_enc = self.vocab_ner.get_id(label)
+            labels_encoded.append(label_enc)
+        if self.add_seq_bounds:
+            label = self.vocab_ner.get_id(self.ner_label_other)
+            labels_encoded = [label] + labels_encoded + [label]
+        example_enc.labels = labels_encoded
+
+        # arcs
+        id2index = {x.id: i for i, x in enumerate(sorted(example.entities, key=lambda x: x.start))}
+        arcs_encoded = []
+        for arc in example.arcs:
+            head = id2index[arc.head]
+            dep = id2index[arc.dep]
+            rel = self.vocab_re.get_id(arc.rel)
+            arcs_encoded.append((head, dep, rel))
+        example_enc.arcs = arcs_encoded
+        return example_enc
+
+
+def check_example(example: Example, ner_encoding):
+    """
+    NER:
+    * число токенов равно числу лейблов
+    * entity.start >= entity.end
+    * начало сущности >= 0, конец сущности < len(tokens)
+    RE:
+    * оба аргумента отношений есть в entities
+    """
+    assert ner_encoding in {"bio", "bilou"}, f"expected ner_encoding in {{bio, bilou}}, got {ner_encoding}"
+    assert len(example.tokens) == len(example.labels), \
+        f"[{example.id}] tokens and labels mismatch, {len(example.tokens)} != {len(example.labels)}"
+
+    entity_ids = set()
+    for entity in example.entities:
+        assert entity.start_token_id <= entity.end_token_id, \
+            f"[{example.id}] strange entity span, start = {entity.start_token_id}, end = {entity.end_token_id}"
+        # assert entity.start_token_id >= 0, f"[{example.filename}] strange entity start: {entity.start_token_id}"
+        # assert entity.end_token_id < len(example.tokens), \
+        #     f"[{example.filename}] strange entity end: {entity.end_token_id}, but num tokens is {len(example.tokens)}"
+        entity_ids.add(entity.id)
+
+    for arc in example.arcs:
+        assert arc.head in entity_ids, \
+            f"[{example.id}] something is wrong with arc {arc.id}: head {arc.head} is unknown"
+        assert arc.dep in entity_ids, \
+            f"[{example.id}] something is wrong with arc {arc.id}: dep {arc.dep} is unknown"
+
+    arcs = [(arc.head, arc.dep, arc.rel) for arc in example.arcs]
+    assert len(arcs) == len(set(arcs)), f"[{example.id}] there duplicates in arcs"
+
+    if ner_encoding == "bilou":
+        num_start_ids = sum(x.startswith("B") for x in example.labels)
+        num_end_ids = sum(x.startswith("L") for x in example.labels)
+        assert num_start_ids == num_end_ids, \
+            f"[{example.id}]: num start ids: {num_start_ids}, num end ids: {num_end_ids}"
