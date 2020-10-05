@@ -4,7 +4,7 @@ import tqdm
 from copy import deepcopy
 from typing import List
 from itertools import accumulate
-from collections import namedtuple
+from collections import namedtuple, Counter
 from rusenttokenize import ru_sent_tokenize
 
 TOKENS_EXPRESSION = re.compile(r"\w+|[^\w\s]")
@@ -122,10 +122,19 @@ class Example(ReprMixin):
             start, end = span.span_chunks
             text = ' '.join(sent_candidates[start:end])
             start, end = span.span_tokens
+            if start == end:
+                continue
             tokens = self.tokens[start:end]
             labels = self.labels[start:end]
-            entities = [x for x in self.entities if start <= x.start_token_id <= x.end_token_id < end]
-            entity_ids = {x.id for x in entities}
+            entities = []
+            entity_ids = set()
+            for x in self.entities:
+                if start <= x.start_token_id <= x.end_token_id < end:
+                    x_copy = deepcopy(x)
+                    x_copy.start_token_id -= start
+                    x_copy.end_token_id -= start
+                    entities.append(x_copy)
+                    entity_ids.add(x.id)
             arcs = [x for x in self.arcs if (x.head in entity_ids) and (x.dep in entity_ids)]
             x = Example(
                 id=_id,
@@ -356,7 +365,8 @@ class ParserRuREBus:
                         dep=arg2.split(":")[1],
                         rel=re_label
                     )
-                    arc_triple = arc.head, arc.dep, arc.rel
+                    # arc_triple = arc.head, arc.dep, arc.rel
+                    arc_triple = arc.head, arc.dep
                     if arc_triple not in arcs_used:
                         arcs.append(arc)
                         arcs_used.add(arc_triple)
@@ -431,7 +441,7 @@ class ExampleEncoder:
         * entities - List[Tuple[start, end]]
         * arcs - List[Tuple[head, dep, id_relation]]
         """
-        example_enc = Example()
+        example_enc = Example(id=example.id)
 
         # tokens
         if self.add_seq_bounds:
@@ -462,7 +472,7 @@ class ExampleEncoder:
         return example_enc
 
 
-def check_example(example: Example, ner_encoding):
+def check_example(example: Example, ner_encoding="bilou", ner_label_other="O"):
     """
     NER:
     * число токенов равно числу лейблов
@@ -471,30 +481,45 @@ def check_example(example: Example, ner_encoding):
     RE:
     * оба аргумента отношений есть в entities
     """
+    prefix = f"[{example.id}]: "
+
     assert ner_encoding in {"bio", "bilou"}, f"expected ner_encoding in {{bio, bilou}}, got {ner_encoding}"
     assert len(example.tokens) == len(example.labels), \
-        f"[{example.id}] tokens and labels mismatch, {len(example.tokens)} != {len(example.labels)}"
+        prefix + f"tokens and labels mismatch, {len(example.tokens)} != {len(example.labels)}"
 
     entity_ids = set()
     for entity in example.entities:
         assert entity.start_token_id <= entity.end_token_id, \
-            f"[{example.id}] strange entity span, start = {entity.start_token_id}, end = {entity.end_token_id}"
-        # assert entity.start_token_id >= 0, f"[{example.filename}] strange entity start: {entity.start_token_id}"
-        # assert entity.end_token_id < len(example.tokens), \
-        #     f"[{example.filename}] strange entity end: {entity.end_token_id}, but num tokens is {len(example.tokens)}"
+            prefix + f"strange entity span, start = {entity.start_token_id}, end = {entity.end_token_id}"
+        assert entity.start_token_id >= 0, prefix + f"strange entity start: {entity.start_token_id}"
+        assert entity.end_token_id < len(example.tokens), \
+            prefix + f"strange entity end: {entity.end_token_id}, but num tokens is {len(example.tokens)}"
+        expected_tokens = example.tokens[entity.start_token_id:entity.end_token_id + 1]
+        assert expected_tokens == entity.tokens, \
+            prefix + f"entity tokens and example tokens mismatch: {entity.tokens} != {expected_tokens}"
+        expected_labels = example.labels[entity.start_token_id:entity.end_token_id + 1]
+        assert expected_labels == entity.labels, \
+            prefix + f"entity labels and example labels mismatch: {entity.labels} != {expected_labels}"
         entity_ids.add(entity.id)
 
+    if len(entity_ids) == 0:
+        assert set(example.labels) == {ner_label_other}, \
+            prefix + f"ner labels and named entities mismatch: ner labels are {set(example.labels)}, " \
+            f"but there are no entities in example."
+
+    arc_args = []
     for arc in example.arcs:
         assert arc.head in entity_ids, \
-            f"[{example.id}] something is wrong with arc {arc.id}: head {arc.head} is unknown"
+            prefix + f"something is wrong with arc {arc.id}: head {arc.head} is unknown"
         assert arc.dep in entity_ids, \
-            f"[{example.id}] something is wrong with arc {arc.id}: dep {arc.dep} is unknown"
-
-    arcs = [(arc.head, arc.dep, arc.rel) for arc in example.arcs]
-    assert len(arcs) == len(set(arcs)), f"[{example.id}] there duplicates in arcs"
+            prefix + f"something is wrong with arc {arc.id}: dep {arc.dep} is unknown"
+        arc_args.append((arc.head, arc.dep))
+    if len(arc_args) != len(set(arc_args)):
+        arc_counts = {k: v for k, v in Counter(arc_args).items() if v > 1}
+        raise AssertionError(prefix + f'there duplicates in arc args: {arc_counts}')
 
     if ner_encoding == "bilou":
         num_start_ids = sum(x.startswith("B") for x in example.labels)
         num_end_ids = sum(x.startswith("L") for x in example.labels)
         assert num_start_ids == num_end_ids, \
-            f"[{example.id}]: num start ids: {num_start_ids}, num end ids: {num_end_ids}"
+            prefix + f"num start ids: {num_start_ids}, num end ids: {num_end_ids}"
