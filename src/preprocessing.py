@@ -447,7 +447,7 @@ class ExampleEncoder:
         example_enc.labels = labels_encoded
 
         # arcs
-        id2index = {x.id: i for i, x in enumerate(sorted(example.entities, key=lambda x: x.start))}
+        id2index = {x.id: i for i, x in enumerate(sorted(example.entities, key=lambda x: x.start_token_id))}
         arcs_encoded = []
         for arc in example.arcs:
             head = id2index[arc.head]
