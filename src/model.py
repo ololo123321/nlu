@@ -437,6 +437,7 @@ class RelationExtractor:
             transition_params=self.transition_params
         )
         loss = -tf.reduce_mean(log_likelihood)
+        loss *= self.config["model"]["ner"]["loss_weight"]
         return loss
 
     def _get_re_loss(self, s_type):
