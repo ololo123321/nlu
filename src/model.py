@@ -164,7 +164,7 @@ class RelationExtractor:
         self.loss_re_inference = self._get_re_loss(self.s_type_inference)
 
         self.loss_train = self.loss_ner + self.loss_re_train
-        self.loss_inference = self.loss_ner + self.loss_re_train
+        self.loss_inference = self.loss_ner + self.loss_re_inference
 
         self._set_train_op()
         self.sess.run(tf.global_variables_initializer())
@@ -443,6 +443,9 @@ class RelationExtractor:
         s_type_softmax = tf.nn.softmax(s_type, axis=-1)
         s_type_softmax_gather = tf.gather_nd(s_type_softmax, self.type_ids_ph)
         loss = -tf.reduce_mean(tf.log(s_type_softmax_gather))
+        # ner loss значительно выше из-за crf ->
+        # без данного множителя модель фактически будет учиться только решать ner
+        loss *= self.config["model"]["re"]["loss_weight"]
         return loss
 
     def _set_train_op(self):
