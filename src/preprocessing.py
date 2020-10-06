@@ -506,6 +506,10 @@ def check_example(example: Example, ner_encoding="bilou", ner_label_other="O"):
         assert set(example.labels) == {ner_label_other}, \
             prefix + f"ner labels and named entities mismatch: ner labels are {set(example.labels)}, " \
             f"but there are no entities in example."
+    else:
+        assert set(example.labels) != {ner_label_other}, \
+            prefix + f"ner labels and named entities mismatch: ner labels are {set(example.labels)}, " \
+            f"but there is at least one entity in example."
 
     arc_args = []
     for arc in example.arcs:
