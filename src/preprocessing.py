@@ -3,9 +3,9 @@ import re
 import tqdm
 import json
 from copy import deepcopy
-from typing import List
+from typing import List, Set, Dict
 from itertools import accumulate
-from collections import namedtuple, Counter
+from collections import namedtuple, Counter, defaultdict
 from rusenttokenize import ru_sent_tokenize
 
 from .utils import SpecialSymbols, BertEncodings, NerEncodings
@@ -75,6 +75,17 @@ class Entity(ReprMixin):
         self.end_token_id = end_token_id
         self.sent_id = sent_id
         self.is_event_trigger = is_event_trigger
+
+
+EventArgument = namedtuple("EventArgument", ["id", "role"])
+
+
+class Event:
+    def __init__(self, id=None, id_trigger=None, label=None, arguments: Set[EventArgument] = None):
+        self.id_trigger = id_trigger
+        self.label = label
+        self.arguments = arguments if arguments is not None else set()
+        self.id = id
 
 
 class Vocab(ReprMixin):
@@ -203,15 +214,182 @@ class Example(ReprMixin):
         return spans
 
 
-class ParserRuREBus:
+class ExamplesLoader:
     """
+    * загрузка примеров из brat-формата: пар (filename.txt, filename.ann)
+    * сохранение примров brat-формат: файлы filename.ann
+
+    примеры датасетов в таком (brat) формате:
     https://github.com/dialogue-evaluation/RuREBus
+
     """
-    def __init__(self, ner_encoding, ner_label_other="O", ner_suffix_joiner='_'):
+    def __init__(
+            self,
+            ner_encoding: str = NerEncodings.BILOU,
+            ner_label_other: str = "O",
+            ner_suffix_joiner: str = '-'
+    ):
         assert ner_encoding in {NerEncodings.BIO, NerEncodings.BILOU}
         self.ner_encoding = ner_encoding
         self.ner_label_other = ner_label_other
         self.ner_suffix_joiner = ner_suffix_joiner
+
+    def load_examples(
+            self,
+            data_dir: str,
+            n: int = None,
+            split: bool = True,
+            window: int = 1
+    ) -> List[Example]:
+        examples = []
+        num_bad = 0
+        num_examples = 0
+        for x_raw in self.parse(data_dir=data_dir, n=n):
+            # проверяем целый пример
+            try:
+                self.check_example(example=x_raw)
+            except AssertionError as e:
+                print("[doc]", e)
+                num_bad += 1
+                continue
+
+            if split:
+                for x_raw_chunk in x_raw.chunks(window=window):
+                    num_examples += 1
+                    # проверяем кусок примера
+                    try:
+                        self.check_example(example=x_raw_chunk)
+                        examples.append(x_raw_chunk)
+                    except AssertionError as e:
+                        print("[sent]", e)
+                        num_bad += 1
+            else:
+                num_examples += 1
+                examples.append(x_raw)
+        print(f"{num_bad} / {len(examples)} examples are bad")
+        return examples
+
+    @staticmethod
+    def save_predictions(
+            examples: List[Example],
+            output_dir: str,
+            id2relation: Dict[int, str]
+    ):
+        event_counter = defaultdict(int)
+        for x in examples:
+            with open(os.path.join(output_dir, f"{x.filename}.ann"), "a") as f:
+                events = {}
+                # исходные сущности
+                for entity in x.entities:
+                    line = f"{entity.id}\t{entity.label} {entity.start_index} {entity.end_index}\t{entity.text}\n"
+                    f.write(line)
+                    if entity.is_event_trigger:
+                        if entity.id not in events:
+                            id_event = event_counter[x.filename]
+                            events[entity.id] = Event(
+                                id=id_event,
+                                id_trigger=entity.id,
+                                label=entity.label,
+                                arguments=None,
+                            )
+                            event_counter[x.filename] += 1
+
+                # отношения
+                for arc in x.arcs:
+                    rel = id2relation[arc.rel]
+                    if arc.head in events:
+                        arg = EventArgument(id=arc.dep, role=rel)
+                        events[arc.head].arguments.add(arg)
+                    else:
+                        line = f"R{arc.id}\t{rel} Arg1:{arc.head} Arg2:{arc.dep}\n"
+                        f.write(line)
+
+                # события
+                for event in events.values():
+                    line = f"E{event.id}\t{event.label}:{event.id_trigger}"
+                    role2count = defaultdict(int)
+                    args_str = ""
+                    for arg in event.arguments:
+                        i = role2count[arg.role]
+                        role = arg.role
+                        if i > 0:
+                            role += str(i + 1)
+                        args_str += f"{role}:{arg.id}" + ' '
+                        role2count[arg.role] += 1
+                    args_str = args_str.strip()
+                    if args_str:
+                        line += ' ' + args_str
+                    line += '\n'
+                    f.write(line)
+
+    def check_example(self, example: Example):
+        """
+        NER:
+        * число токенов равно числу лейблов
+        * entity.start >= entity.end
+        * начало сущности >= 0, конец сущности < len(tokens)
+        RE:
+        * оба аргумента отношений есть в entities
+        """
+        assert example.id is not None, f"example {example} has no id!"
+        prefix = f"[{example.id}]: "
+
+        assert self.ner_encoding in {NerEncodings.BIO, NerEncodings.BILOU}, \
+            f"expected ner_encoding {NerEncodings.BIO} or {NerEncodings.BILOU}, got {self.ner_encoding}"
+        assert len(example.tokens) == len(example.labels), \
+            prefix + f"tokens and labels mismatch, {len(example.tokens)} != {len(example.labels)}"
+
+        entity_ids = set()
+        entity_spans = set()
+        for entity in example.entities:
+            assert entity.id is not None, \
+                prefix + f"[{entity}] entity has no id!"
+            assert entity.start_token_id <= entity.end_token_id, \
+                prefix + f"[{entity}] strange entity span"
+            assert entity.start_token_id >= 0, prefix + f"[{entity}] strange start"
+            assert entity.end_token_id < len(example.tokens), \
+                prefix + f"[{entity}] strange entity end: {entity.end_token_id}, but num tokens is {len(example.tokens)}"
+            expected_tokens = example.tokens[entity.start_token_id:entity.end_token_id + 1]
+            assert expected_tokens == entity.tokens, \
+                prefix + f"[{entity}] tokens and example tokens mismatch: {entity.tokens} != {expected_tokens}"
+            expected_labels = example.labels[entity.start_token_id:entity.end_token_id + 1]
+            assert expected_labels == entity.labels, \
+                prefix + f"[{entity}]: labels and example labels mismatch: {entity.labels} != {expected_labels}"
+            entity_ids.add(entity.id)
+            entity_spans.add((entity.start_token_id, entity.end_token_id))
+
+        assert len(example.entities) == len(entity_ids), \
+            prefix + f"entity ids are not unique: {len(example.entities)} != {len(entity_ids)}"
+
+        assert len(example.entities) == len(entity_spans), \
+            prefix + f"there are overlapping entitie: " \
+                f"number of entities is {len(example.entities)}, but number of unique text spans is {len(entity_spans)}"
+
+        if len(entity_ids) == 0:
+            assert set(example.labels) == {self.ner_label_other}, \
+                prefix + f"ner labels and named entities mismatch: ner labels are {set(example.labels)}, " \
+                    f"but there are no entities in example."
+        else:
+            assert set(example.labels) != {self.ner_label_other}, \
+                prefix + f"ner labels and named entities mismatch: ner labels are {set(example.labels)}, " \
+                    f"but there is at least one entity in example."
+
+        arc_args = []
+        for arc in example.arcs:
+            assert arc.head in entity_ids, \
+                prefix + f"something is wrong with arc {arc.id}: head {arc.head} is unknown"
+            assert arc.dep in entity_ids, \
+                prefix + f"something is wrong with arc {arc.id}: dep {arc.dep} is unknown"
+            arc_args.append((arc.head, arc.dep))
+        if len(arc_args) != len(set(arc_args)):
+            arc_counts = {k: v for k, v in Counter(arc_args).items() if v > 1}
+            raise AssertionError(prefix + f'there duplicates in arc args: {arc_counts}')
+
+        if self.ner_encoding == NerEncodings.BILOU:
+            num_start_ids = sum(x.startswith("B") for x in example.labels)
+            num_end_ids = sum(x.startswith("L") for x in example.labels)
+            assert num_start_ids == num_end_ids, \
+                prefix + f"num start ids: {num_start_ids}, num end ids: {num_end_ids}"
 
     def parse(self, data_dir, n=None, ner_encoding=NerEncodings.BILOU):
         """
@@ -575,75 +753,8 @@ class ExampleEncoder:
         
         return enc
 
-        
-def check_example(example: Example, ner_encoding=NerEncodings.BILOU, ner_label_other="O"):
-    """
-    NER:
-    * число токенов равно числу лейблов
-    * entity.start >= entity.end
-    * начало сущности >= 0, конец сущности < len(tokens)
-    RE:
-    * оба аргумента отношений есть в entities
-    """
-    assert example.id is not None, f"example {example} has no id!"
-    prefix = f"[{example.id}]: "
 
-    assert ner_encoding in {NerEncodings.BIO, NerEncodings.BILOU}, \
-        f"expected ner_encoding {NerEncodings.BIO} or {NerEncodings.BILOU}, got {ner_encoding}"
-    assert len(example.tokens) == len(example.labels), \
-        prefix + f"tokens and labels mismatch, {len(example.tokens)} != {len(example.labels)}"
-
-    entity_ids = set()
-    entity_spans = set()
-    for entity in example.entities:
-        assert entity.id is not None, \
-            prefix + f"[{entity}] entity has no id!"
-        assert entity.start_token_id <= entity.end_token_id, \
-            prefix + f"[{entity}] strange entity span"
-        assert entity.start_token_id >= 0, prefix + f"[{entity}] strange start"
-        assert entity.end_token_id < len(example.tokens), \
-            prefix + f"[{entity}] strange entity end: {entity.end_token_id}, but num tokens is {len(example.tokens)}"
-        expected_tokens = example.tokens[entity.start_token_id:entity.end_token_id + 1]
-        assert expected_tokens == entity.tokens, \
-            prefix + f"[{entity}] tokens and example tokens mismatch: {entity.tokens} != {expected_tokens}"
-        expected_labels = example.labels[entity.start_token_id:entity.end_token_id + 1]
-        assert expected_labels == entity.labels, \
-            prefix + f"[{entity}]: labels and example labels mismatch: {entity.labels} != {expected_labels}"
-        entity_ids.add(entity.id)
-        entity_spans.add((entity.start_token_id, entity.end_token_id))
-
-    assert len(example.entities) == len(entity_ids), \
-        prefix + f"entity ids are not unique: {len(example.entities)} != {len(entity_ids)}"
-
-    assert len(example.entities) == len(entity_spans), \
-        prefix + f"there are overlapping entitie: " \
-        f"number of entities is {len(example.entities)}, but number of unique text spans is {len(entity_spans)}"
-
-    if len(entity_ids) == 0:
-        assert set(example.labels) == {ner_label_other}, \
-            prefix + f"ner labels and named entities mismatch: ner labels are {set(example.labels)}, " \
-            f"but there are no entities in example."
-    else:
-        assert set(example.labels) != {ner_label_other}, \
-            prefix + f"ner labels and named entities mismatch: ner labels are {set(example.labels)}, " \
-            f"but there is at least one entity in example."
-
-    arc_args = []
-    for arc in example.arcs:
-        assert arc.head in entity_ids, \
-            prefix + f"something is wrong with arc {arc.id}: head {arc.head} is unknown"
-        assert arc.dep in entity_ids, \
-            prefix + f"something is wrong with arc {arc.id}: dep {arc.dep} is unknown"
-        arc_args.append((arc.head, arc.dep))
-    if len(arc_args) != len(set(arc_args)):
-        arc_counts = {k: v for k, v in Counter(arc_args).items() if v > 1}
-        raise AssertionError(prefix + f'there duplicates in arc args: {arc_counts}')
-
-    if ner_encoding == NerEncodings.BILOU:
-        num_start_ids = sum(x.startswith("B") for x in example.labels)
-        num_end_ids = sum(x.startswith("L") for x in example.labels)
-        assert num_start_ids == num_end_ids, \
-            prefix + f"num start ids: {num_start_ids}, num end ids: {num_end_ids}"
+# преобразование примеров
 
 
 def change_tokens_and_entities(x: Example) -> Example:

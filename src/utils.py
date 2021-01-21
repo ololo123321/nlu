@@ -1,11 +1,4 @@
-import numpy as np
 import tensorflow as tf
-from collections import namedtuple
-from sklearn.metrics import f1_score
-
-
-# REScores = namedtuple("REScores", ["f1_arcs", "f1_arcs_types"])
-# NERScores = namedtuple("NERScores", ["f1_labels", "f1_entities"])
 
 
 def compute_f1(preds, labels):
@@ -33,50 +26,6 @@ def compute_f1(preds, labels):
         else:
             f1 = 0.0
         return {'precision': prec, 'recall': recall, 'f1': f1}
-
-
-# def compute_re_metrics(y_true: np.ndarray, y_pred: np.ndarray, no_rel_id: int) -> REScores:
-#     """
-#     Используются следующие метрики для оценки качества решения задачи relation extraction:
-#     * f1 бинарного классификатора, определяющего наличие произвольного семанического отншения r(i, j) между
-#       именными сущносями i и j.
-#     * f1-micro многоклассового классификтора, определяющего наличие семантического отношения r(i, j) между
-#       именныыми сущносями i и j.
-#
-#     precision = tp / (tp + fp)
-#     recall = tp / (tp + fn)
-#     f1 = 2 * precision * recall / (precision + recall)
-#     """
-#     mask_arcs_true = y_true != no_rel_id
-#     mask_arcs_pred = y_pred != no_rel_id
-#
-#     # f1 {связаны ли семантически сущности i, j}
-#     precision = mask_arcs_true[mask_arcs_pred].mean()
-#     recall = mask_arcs_pred[mask_arcs_true].mean()
-#     f1_arcs = f1(precision, recall)
-#
-#     # f1 {связаны ли семантически сущности i, j отношением r}
-#
-#     # true_pos_sum = mask_arcs_true.sum()  # сколько всего непустых отношений
-#     # pred_pos_sum = mask_arcs_pred.sum()  # сколько раз предсказали непустое отношени
-#     # # как много раз верно предсказали истинное непустое отношение:
-#     # tp_sum = ((y_true == y_pred) & mask_arcs_true).sum()
-#     # # расчёт f1:
-#     # precision = tp_sum / pred_pos_sum
-#     # recall = tp_sum / true_pos_sum
-#     # f1_arcs_types = f1(precision, recall)
-#
-#     f1_arcs_types = compute_f1_micro_wo_trivial(y_true=y_true, y_pred=y_pred, no_rel_id=no_rel_id)
-#     return REScores(f1_arcs=f1_arcs, f1_arcs_types=f1_arcs_types)
-#
-#
-# def compute_ner_metrics(y_true: np.ndarray, y_pred: np.ndarray, other_label_id: int):
-#     """
-#     Используются следующие метрики для оценки качества решения задачи NER:
-#     * f1 многоклассового классификатора, сопоставляющего каждому токену лейбл именной сущности
-#     * поспановая f1 качества предсказания именных сущностей
-#     """
-#     pass
 
 
 def infer_entities_bounds(label_ids: tf.Tensor, bound_ids: tf.Tensor) -> tf.Tensor:

@@ -1,53 +1,36 @@
-import random
-import sys
 import json
 import os
 from argparse import ArgumentParser
-from copy import deepcopy
 
-import numpy as np
 import tensorflow as tf
 
 from src.model import RelationExtractor
-from src.preprocessing import ParserRuREBus, ExampleEncoder, check_example
+from src.preprocessing import ExampleEncoder, ExamplesLoader
+from src.utils import NerEncodings
 
-
-NER_ENCODING = 'bilou'
+# TODO: добавить в конфиг и использовать при инференсе
 NER_SUFFIX_JOINER = '-'
 
 
-def load_examples(data_dir, split=True, window=1):
-    examples = []
-    num_bad = 0
-    num_examples = 0
-    p = ParserRuREBus(ner_encoding=NER_ENCODING, ner_suffix_joiner=NER_SUFFIX_JOINER)
-    for x_raw in p.parse(data_dir=data_dir, n=None):
-        # проверяем целый пример
-        try:
-            check_example(x_raw, ner_encoding=NER_ENCODING)
-        except AssertionError as e:
-            print("[doc]", e)
-            num_bad += 1
-            continue
-        if split:
-            for x_raw_chunk in x_raw.chunks(window=window):
-                num_examples += 1
-                try:
-                    check_example(x_raw_chunk, ner_encoding=NER_ENCODING)
-                    examples.append(x_raw_chunk)
-                except AssertionError as e:
-                    print("[sent]", e)
-                    num_bad += 1
-        else:
-            num_examples += 1
-            examples.append(x_raw)
-    print(f"{num_bad} / {len(examples)} examples are bad")
-    return examples
-
-
 def main(args):
-    examples_train = load_examples(data_dir=args.train_data_dir, split=bool(args.split), window=args.window)
-    examples_valid = load_examples(data_dir=args.valid_data_dir, split=bool(args.split), window=args.window)
+    loader = ExamplesLoader(
+        ner_encoding=NerEncodings.BILOU,  # TODO: добавить в конфиг и использовать при инференсе
+        ner_suffix_joiner=NER_SUFFIX_JOINER  # TODO: добавить в конфиг и использовать при инференсе
+    )
+
+    examples_train = loader.load_examples(
+        data_dir=args.train_data_dir,
+        n=None,
+        split=bool(args.split), # TODO: добавить в конфиг и использовать при инференсе
+        window=args.window, # TODO: добавить в конфиг и использовать при инференсе
+    )
+
+    examples_valid = loader.load_examples(
+        data_dir=args.valid_data_dir,
+        n=None,
+        split=bool(args.split),
+        window=args.window,
+    )
 
     print("num train examples:", len(examples_train))
     print("num valid examples:", len(examples_valid))
@@ -60,7 +43,7 @@ def main(args):
 
     add_seq_bounds = args.span_emb_type == 1
     example_encoder = ExampleEncoder(
-        ner_encoding=NER_ENCODING,
+        ner_encoding=NerEncodings.BILOU,
         ner_suffix_joiner=NER_SUFFIX_JOINER,
         add_seq_bounds=add_seq_bounds
     )
