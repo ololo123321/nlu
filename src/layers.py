@@ -111,7 +111,7 @@ class MHA(tf.keras.layers.Layer):
         return x
 
 
-class REHead(tf.keras.layers.Layer):
+class REHeadV1(tf.keras.layers.Layer):
     def __init__(self, config):
         super().__init__()
 
@@ -131,3 +131,37 @@ class REHead(tf.keras.layers.Layer):
         s_type = self.bilinear(type_d, type_h)  # [N, T, T, num_arc_labels]
 
         return s_type
+
+
+class REHeadV2(tf.keras.layers.Layer):
+    def __init__(self, config):
+        super().__init__()
+        config_mlp = config["mlp"]
+        config_type = config["type"]
+
+        self.dense_head = tf.keras.layers.Dense(config_type['hidden_dim'])
+        self.dense_dep = tf.keras.layers.Dense(config_type['hidden_dim'])
+        self.dense_head_dep = tf.keras.layers.Dense(config_type["num_labels"])
+
+        self.dropout_head = tf.keras.layers.Dropout(config_mlp['dropout'])
+        self.dropout_dep = tf.keras.layers.Dropout(config_mlp['dropout'])
+
+        self.u = tf.get_variable("u", shape=(config_type["num_labels"], config_type['hidden_dim'], config_type['hidden_dim']), dtype=tf.float32)
+
+    def call(self, x, training=False):
+        """
+
+        :param x: tf.Tensor of shape [batch_size, num_entities, d_model]
+        :param training:
+        :return: s: tf.Tensor of shape [batch_size, num_entities, num_entities, num_relations]
+        """
+        x_head = self.dense_head(x)  # [N, T, H]
+        x_head = self.dropout_head(x_head, training=training)  # [N, T, H]
+        x_dep = self.dense_dep(x)  # [N, T, H]
+        x_dep = self.dropout_dep(x_dep, training=training)  # [N, T, H]
+        x_head_dep = tf.concat([x_head, x_dep], axis=-1)  # [N, T, 2*H]
+        bilinear_part = x_head[:, None, ...] @ self.u @ tf.transpose(x_dep, [0, 2, 1])[:, None, ...]  # [N, V, T, T]
+        bilinear_part = tf.transpose(bilinear_part, [0, 2, 3, 1])  # [N, T, T, V]
+        linear_part = self.dense_head_dep(x_head_dep)  # [N, T, V]
+        s = bilinear_part + linear_part[:, None, ...]  # [N, T, T, V]
+        return s

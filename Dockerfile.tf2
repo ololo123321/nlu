@@ -1,0 +1,5 @@
+FROM tensorflow/tensorflow:2.3.0-gpu
+RUN pip install --upgrade pip
+RUN pip install tf-models-official==2.3.0
+RUN pip uninstall tensorflow && pip install numpy==1.16.4 && pip install tensorflow==2.3.0 && pip install tensorflow-gpu==2.3.0
+RUN pip install tensorflow_hub==0.10.0
