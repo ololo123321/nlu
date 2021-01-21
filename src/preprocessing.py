@@ -8,8 +8,6 @@ from itertools import accumulate
 from collections import namedtuple, Counter, defaultdict
 from rusenttokenize import ru_sent_tokenize
 
-from .utils import SpecialSymbols, BertEncodings, NerEncodings
-
 
 TOKENS_EXPRESSION = re.compile(r"\w+|[^\w\s]")
 
@@ -20,6 +18,27 @@ TOKENS_EXPRESSION = re.compile(r"\w+|[^\w\s]")
 #     r"\w+",  # слова, числа
 #     r"[^\w\s]"  # пунктуация
 # ]))
+
+
+class SpecialSymbols:
+    CLS = '[CLS]'
+    SEP = '[SEP]'
+    START_HEAD = '[START_HEAD]'
+    END_HEAD = '[END_HEAD]'
+    START_DEP = '[START_DEP]'
+    END_DEP = '[END_DEP]'
+
+
+class BertEncodings:
+    TEXT = "text"
+    NER = "ner"
+    TEXT_NER = "text_ner"
+    NER_TEXT = "ner_text"
+
+
+class NerEncodings:
+    BIO = "bio"
+    BILOU = "bilou"
 
 
 class BadLineException(Exception):

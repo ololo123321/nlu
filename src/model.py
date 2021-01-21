@@ -2,19 +2,18 @@ import random
 import json
 import os
 from collections import defaultdict
-from tqdm import trange
 
 import tensorflow as tf
 import tensorflow_hub as hub
 import numpy as np
-from sklearn.metrics import classification_report, f1_score
+from sklearn.metrics import classification_report
 
 from IPython.display import clear_output
 from matplotlib import pyplot as plt
 
 from bert.modeling import BertModel, BertConfig
 
-from .utils import compute_f1, infer_entities_bounds
+from .utils import compute_f1
 from .layers import DotProductAttention, REHeadV1, REHeadV2
 from .optimization import noam_scheme, AdamWeightDecayOptimizer
 from .preprocessing import Arc

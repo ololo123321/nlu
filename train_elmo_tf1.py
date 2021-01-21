@@ -5,8 +5,7 @@ from argparse import ArgumentParser
 import tensorflow as tf
 
 from src.model import RelationExtractor
-from src.preprocessing import ExampleEncoder, ExamplesLoader
-from src.utils import NerEncodings
+from src.preprocessing import ExampleEncoder, ExamplesLoader, NerEncodings
 
 # TODO: добавить в конфиг и использовать при инференсе
 NER_SUFFIX_JOINER = '-'
