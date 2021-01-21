@@ -227,12 +227,14 @@ class ExamplesLoader:
             self,
             ner_encoding: str = NerEncodings.BILOU,
             ner_label_other: str = "O",
-            ner_suffix_joiner: str = '-'
+            ner_suffix_joiner: str = '-',
+            fix_new_line_symbol: bool = True
     ):
         assert ner_encoding in {NerEncodings.BIO, NerEncodings.BILOU}
         self.ner_encoding = ner_encoding
         self.ner_label_other = ner_label_other
         self.ner_suffix_joiner = ner_suffix_joiner
+        self.fix_new_line_symbol = fix_new_line_symbol
 
     def load_examples(
             self,
@@ -430,7 +432,8 @@ class ExamplesLoader:
         # подгрузка текста
         with open(os.path.join(data_dir, f'{filename}.txt')) as f:
             text = ' '.join(f)
-            text = text.replace('\n ', '\n')
+            if self.fix_new_line_symbol:
+                text = text.replace('\n ', '\n')
 
         # токенизация
         text_tokens = []
