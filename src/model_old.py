@@ -9,7 +9,7 @@ from sklearn.metrics import classification_report
 from IPython.display import clear_output
 from matplotlib import pyplot as plt
 
-from .utils import compute_re_metrics, infer_entities_bounds, noam_scheme
+from .utils import infer_entities_bounds, noam_scheme
 from .layers import DotProductAttention, REHeadV1, REHeadV2
 
 
@@ -231,16 +231,16 @@ class RelationExtractor:
                 clf_reports.append(clf_report)
                 print(clf_report)
 
-                re_metrics = compute_re_metrics(
-                    y_true=y_true_arcs_types,
-                    y_pred=y_pred_arcs_types,
-                    no_rel_id=no_rel_id
-                )
+                # re_metrics = compute_re_metrics(
+                #     y_true=y_true_arcs_types,
+                #     y_pred=y_pred_arcs_types,
+                #     no_rel_id=no_rel_id
+                # )
 
                 eval_loss.append(np.mean(losses_tmp))
 
-                eval_las.append(re_metrics.f1_arcs_types)
-                eval_uas.append(re_metrics.f1_arcs)
+                # eval_las.append(re_metrics.f1_arcs_types)
+                # eval_uas.append(re_metrics.f1_arcs)
 
                 plot()
         plot()
@@ -616,7 +616,7 @@ class RelationExtractorJoint:
                     "mlp": config_re["mlp"],
                     "type": config_re["bilinear"]
                 }
-                parser = REHead(parser_config)
+                parser = REHeadV2(parser_config)
                 x = parser(x, training=self.training_ph)
                 return x
 
@@ -780,18 +780,18 @@ class RelationExtractorJoint:
                 clf_reports.append(clf_report)
                 print(clf_report)
 
-                re_metrics = compute_re_metrics(
-                    y_true=y_true_arcs_types,
-                    y_pred=y_pred_arcs_types,
-                    no_rel_id=no_rel_id
-                )
+                # re_metrics = compute_re_metrics(
+                #     y_true=y_true_arcs_types,
+                #     y_pred=y_pred_arcs_types,
+                #     no_rel_id=no_rel_id
+                # )
 
                 eval_loss.append(np.mean(losses_tmp))
                 eval_loss_ner.append(np.mean(losses_tmp_ner))
                 eval_loss_re.append(np.mean(losses_tmp_re))
 
-                eval_las.append(re_metrics.f1_arcs_types)
-                eval_uas.append(re_metrics.f1_arcs)
+                # eval_las.append(re_metrics.f1_arcs_types)
+                # eval_uas.append(re_metrics.f1_arcs)
 
                 plot()
         plot()
