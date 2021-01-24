@@ -152,9 +152,9 @@ class REHead(tf.keras.layers.Layer):
             dropout=config_mlp["dropout"]
         )
 
-        if config_type["version"] == 1:
+        if config["version"] == 1:
             bilinear_cls = BiLinearV1
-        elif config_type["version"] == 2:
+        elif config["version"] == 2:
             bilinear_cls = BiLinearV2
         else:
             raise NotImplementedError
