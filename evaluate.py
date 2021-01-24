@@ -49,7 +49,7 @@ def main(args):
                                 events.add((file, trigger, id_arg, role))
                         elif line.startswith("R"):
                             # R1\tCoreference Arg1:T16 Arg2:T7
-                            id_rel, content = line.split()
+                            id_rel, content = line.split("\t")
                             rel, arg1, arg2 = content.split()
                             head = arg1.split(":")[1]
                             dep = arg2.split(":")[1]
