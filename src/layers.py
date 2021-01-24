@@ -18,32 +18,40 @@ class MLP(tf.keras.layers.Layer):
 class BiLinearV1(tf.keras.layers.Layer):
     def __init__(self, left_dim, right_dim, output_dim):
         super().__init__()
-        self.w = tf.get_variable("w", shape=(output_dim, left_dim + 1, right_dim + 1), dtype=tf.float32)
+        self.w = tf.get_variable("w", shape=(output_dim, left_dim, right_dim), dtype=tf.float32)
         self.u = tf.get_variable("u", shape=(left_dim, output_dim), dtype=tf.float32)
         self.v = tf.get_variable("v", shape=(right_dim, output_dim), dtype=tf.float32)
+        self.b = tf.get_variable("b", shape=(output_dim,), dtype=tf.float32, initializer=tf.initializers.zeros())
 
-    def call(self, x_left, x_right):
-        x_left_1 = add_ones(x_left)  # [N, T, left_dim + 1]
-        x_right_1 = add_ones(x_right)  # [N, T, right_dim + 1]
-        x_right_1_t = tf.transpose(x_right_1, [0, 2, 1])  # [N, right_dim + 1, T]
+    def call(self, x_left: tf.Tensor, x_right: tf.Tensor) -> tf.Tensor:
+        """
+        x_left - tf.Tensor of shape [N, T, D1] and type tf.float32
+        x_right - tf.Tensor as shape [N, T, D2] and type tf.float32
+        :returns logits - tf.Tensor of shape [N, T, T, output_dim] and type tf.float32
+        """
+        x_right_t = tf.transpose(x_right, [0, 2, 1])  # [N, right_dim + 1, T]
+        logits = tf.expand_dims(x_left, axis=1) @ self.w @ tf.expand_dims(x_right_t, [1])  # [N, output_dim, T, T]
+        logits = tf.transpose(logits, [0, 2, 3, 1])  # [N, T, T, output_dim]
         x_left_u = tf.matmul(x_left, self.u)  # [N, T, output_dim]
         x_right_v = tf.matmul(x_right, self.v)  # [N, T, output_dim]
-        logits = tf.expand_dims(x_left_1, [1]) @ self.w @ tf.expand_dims(x_right_1_t, [1])  # [N, output_dim, T, T]
-        logits = tf.transpose(logits, [0, 2, 3, 1])  # [N, T, T, output_dim]
-        logits += tf.expand_dims(x_left_u, [2])  # [N, T, T, output_dim]
-        logits += tf.expand_dims(x_right_v, [2])  # [N, T, T, output_dim]
+        logits += tf.expand_dims(x_left_u, axis=2)  # [N, T, T, output_dim]
+        logits += tf.expand_dims(x_right_v, axis=2)  # [N, T, T, output_dim]
+        logits += self.b[None, None, None, :]
         return logits
 
 
-class BiLinearV2(BiLinearV1):
+class BiLinearV2(tf.keras.layers.Layer):
+    """https://arxiv.org/abs/1812.11275"""
     def __init__(self, left_dim, right_dim, output_dim):
-        super().__init__(left_dim=left_dim, right_dim=right_dim, output_dim=output_dim)
+        super().__init__()
+        self.w = tf.get_variable("w", shape=(output_dim, left_dim, right_dim), dtype=tf.float32)
+        self.dense_linear = tf.keras.layers.Dense(output_dim)
 
-    def call(self, x_left, x_right):
-        x_left_right = tf.concat([x_left, x_right], axis=-1)  # [N, T, 2 * H]
-        bilinear_part = x_left_right[:, None, ...] @ self.u @ tf.transpose(x_right, [0, 2, 1])[:, None, ...]  # [N, V, T, T]
+    def call(self, x_left: tf.Tensor, x_right: tf.Tensor) -> tf.Tensor:
+        bilinear_part = x_left[:, None, ...] @ self.w @ tf.transpose(x_right, [0, 2, 1])[:, None, ...]  # [N, V, T, T]
         bilinear_part = tf.transpose(bilinear_part, [0, 2, 3, 1])  # [N, T, T, V]
-        linear_part = self.dense_head_dep(x_left_right)  # [N, T, V]
+        x_left_right = tf.concat([x_left, x_right], axis=-1)  # [N, T, 2 * H]
+        linear_part = self.dense_linear(x_left_right)  # [N, T, V]
         logits = bilinear_part + linear_part[:, None, ...]  # [N, T, T, V]
         return logits
 

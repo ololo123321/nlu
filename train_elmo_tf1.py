@@ -99,7 +99,7 @@ def main(args):
                 },
                 "mlp": {
                     "num_layers": 1,
-                    "dropout": 0.33
+                    "dropout": args.mlp_dropout
                 },
                 "bilinear": {
                     "num_labels": example_encoder.vocab_re.size,
@@ -107,7 +107,7 @@ def main(args):
                 },
                 "no_rel_id": example_encoder.vocab_re.get_id("O"),
                 "ner_other_label_id": example_encoder.vocab_ner.get_id("O"),
-                "version": 2
+                "version": args.bilinear_impl_version
             },
         },
         "optimizer": {
@@ -204,6 +204,8 @@ if __name__ == "__main__":
     parser.add_argument("--cell_name", choices=["gru", "lstm"], default="lstm", required=False)
     parser.add_argument("--cell_dim", type=int, default=128, required=False)
     parser.add_argument("--rnn_dropout", type=float, default=0.5, required=False)
+    parser.add_argument("--mlp_dropout", type=float, default=0.33, required=False)
+    parser.add_argument("--bilinear_impl_version", type=int, default=1, required=False, help="принимает значения 1 и 2")
     parser.add_argument("--epochs", type=int, default=50, required=False)
     parser.add_argument("--batch_size", type=int, default=32, required=False)
     parser.add_argument("--split", type=int, default=1, help="приниимает int 0 (False) или 1 (True)")
