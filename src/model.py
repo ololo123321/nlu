@@ -14,7 +14,7 @@ from matplotlib import pyplot as plt
 from bert.modeling import BertModel, BertConfig
 
 from .utils import compute_f1
-from .layers import DotProductAttention, REHeadV1, REHeadV2
+from .layers import DotProductAttention, REHead
 from .optimization import noam_scheme, AdamWeightDecayOptimizer
 from .preprocessing import Arc
 
@@ -117,18 +117,8 @@ class RelationExtractor:
             x = self._get_entity_embeddings(x, d_model=d_model)  # [N, num_entities, d_model]
 
             # билинейный слой, учащий совмесное распределение сущностей
-            # TODO: сделать по-нормальному
-            parser_config = {
-                "mlp": config_re["mlp"],
-                "type": config_re["bilinear"]
-            }
-            if config_re['version'] == 1:
-                parser = REHeadV1(parser_config)
-            elif config_re['version'] == 2:
-                parser = REHeadV2(parser_config)
-            else:
-                raise NotImplementedError
-            self.s_type = parser(x, training=self.training_ph)
+            re_layer = REHead(config=config_re)
+            self.s_type = re_layer(x, training=self.training_ph)
 
         self._set_loss()
         self._set_train_op()

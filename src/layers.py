@@ -15,7 +15,7 @@ class MLP(tf.keras.layers.Layer):
         return x
 
 
-class BiLinear(tf.keras.layers.Layer):
+class BiLinearV1(tf.keras.layers.Layer):
     def __init__(self, left_dim, right_dim, output_dim):
         super().__init__()
         self.w = tf.get_variable("w", shape=(output_dim, left_dim + 1, right_dim + 1), dtype=tf.float32)
@@ -28,11 +28,24 @@ class BiLinear(tf.keras.layers.Layer):
         x_right_1_t = tf.transpose(x_right_1, [0, 2, 1])  # [N, right_dim + 1, T]
         x_left_u = tf.matmul(x_left, self.u)  # [N, T, output_dim]
         x_right_v = tf.matmul(x_right, self.v)  # [N, T, output_dim]
-        scores = tf.expand_dims(x_left_1, [1]) @ self.w @ tf.expand_dims(x_right_1_t, [1])  # [N, output_dim, T, T]
-        scores = tf.transpose(scores, [0, 2, 3, 1])  # [N, T, T, output_dim]
-        scores += tf.expand_dims(x_left_u, [2])
-        scores += tf.expand_dims(x_right_v, [2])
-        return scores
+        logits = tf.expand_dims(x_left_1, [1]) @ self.w @ tf.expand_dims(x_right_1_t, [1])  # [N, output_dim, T, T]
+        logits = tf.transpose(logits, [0, 2, 3, 1])  # [N, T, T, output_dim]
+        logits += tf.expand_dims(x_left_u, [2])  # [N, T, T, output_dim]
+        logits += tf.expand_dims(x_right_v, [2])  # [N, T, T, output_dim]
+        return logits
+
+
+class BiLinearV2(BiLinearV1):
+    def __init__(self, left_dim, right_dim, output_dim):
+        super().__init__(left_dim=left_dim, right_dim=right_dim, output_dim=output_dim)
+
+    def call(self, x_left, x_right):
+        x_left_right = tf.concat([x_left, x_right], axis=-1)  # [N, T, 2 * H]
+        bilinear_part = x_left_right[:, None, ...] @ self.u @ tf.transpose(x_right, [0, 2, 1])[:, None, ...]  # [N, V, T, T]
+        bilinear_part = tf.transpose(bilinear_part, [0, 2, 3, 1])  # [N, T, T, V]
+        linear_part = self.dense_head_dep(x_left_right)  # [N, T, V]
+        logits = bilinear_part + linear_part[:, None, ...]  # [N, T, T, V]
+        return logits
 
 
 class BiAffineAttention(tf.keras.layers.Layer):
@@ -111,57 +124,61 @@ class MHA(tf.keras.layers.Layer):
         return x
 
 
-class REHeadV1(tf.keras.layers.Layer):
+class REHead(tf.keras.layers.Layer):
     def __init__(self, config):
         super().__init__()
 
         config_mlp = config["mlp"]
-        config_type = config["type"]
-        self.mlp_type_d = MLP(config_mlp["num_layers"], config_type["hidden_dim"], tf.nn.relu, config_mlp["dropout"])
-        self.mlp_type_h = MLP(config_mlp["num_layers"], config_type["hidden_dim"], tf.nn.relu, config_mlp["dropout"])
+        config_type = config["bilinear"]
 
-        self.bilinear = BiLinear(config_type["hidden_dim"], config_type["hidden_dim"], config_type["num_labels"])
+        self.mlp_left = MLP(
+            num_layers=config_mlp["num_layers"],
+            hidden_dim=config_type["hidden_dim"],
+            activation=tf.nn.relu,
+            dropout=config_mlp["dropout"]
+        )
+        self.mlp_right = MLP(
+            num_layers=config_mlp["num_layers"],
+            hidden_dim=config_type["hidden_dim"],
+            activation=tf.nn.relu,
+            dropout=config_mlp["dropout"]
+        )
 
-    def call(self, x, training=False):
-        # head / dependent projections
-        type_d = self.mlp_type_d(x, training)  # [N, T, type_dim], dependent
-        type_h = self.mlp_type_h(x, training)  # [N, T, type_dim], head
+        if config_type["version"] == 1:
+            bilinear_cls = BiLinearV1
+        elif config_type["version"] == 2:
+            bilinear_cls = BiLinearV2
+        else:
+            raise NotImplementedError
 
-        # type scores
-        s_type = self.bilinear(type_d, type_h)  # [N, T, T, num_arc_labels]
-
-        return s_type
-
-
-class REHeadV2(tf.keras.layers.Layer):
-    def __init__(self, config):
-        super().__init__()
-        config_mlp = config["mlp"]
-        config_type = config["type"]
-
-        self.dense_head = tf.keras.layers.Dense(config_type['hidden_dim'])
-        self.dense_dep = tf.keras.layers.Dense(config_type['hidden_dim'])
-        self.dense_head_dep = tf.keras.layers.Dense(config_type["num_labels"])
-
-        self.dropout_head = tf.keras.layers.Dropout(config_mlp['dropout'])
-        self.dropout_dep = tf.keras.layers.Dropout(config_mlp['dropout'])
-
-        self.u = tf.get_variable("u", shape=(config_type["num_labels"], config_type['hidden_dim'], config_type['hidden_dim']), dtype=tf.float32)
+        self.bilinear = bilinear_cls(
+            left_dim=config_type["hidden_dim"],
+            right_dim=config_type["hidden_dim"],
+            output_dim=config_type["num_labels"]
+        )
 
     def call(self, x, training=False):
-        """
+        x_left = self.mlp_left(x, training)  # [N, T, type_dim], dependent
+        x_right = self.mlp_right(x, training)  # [N, T, type_dim], head
+        logits = self.bilinear(x_left, x_right)  # [N, T, T, num_arc_labels]
+        return logits
 
-        :param x: tf.Tensor of shape [batch_size, num_entities, d_model]
-        :param training:
-        :return: s: tf.Tensor of shape [batch_size, num_entities, num_entities, num_relations]
-        """
-        x_head = self.dense_head(x)  # [N, T, H]
-        x_head = self.dropout_head(x_head, training=training)  # [N, T, H]
-        x_dep = self.dense_dep(x)  # [N, T, H]
-        x_dep = self.dropout_dep(x_dep, training=training)  # [N, T, H]
-        x_head_dep = tf.concat([x_head, x_dep], axis=-1)  # [N, T, 2*H]
-        bilinear_part = x_head[:, None, ...] @ self.u @ tf.transpose(x_dep, [0, 2, 1])[:, None, ...]  # [N, V, T, T]
-        bilinear_part = tf.transpose(bilinear_part, [0, 2, 3, 1])  # [N, T, T, V]
-        linear_part = self.dense_head_dep(x_head_dep)  # [N, T, V]
-        s = bilinear_part + linear_part[:, None, ...]  # [N, T, T, V]
-        return s
+
+# class CoreferenceHead(tf.keras.layers.Layer):
+#     def __init__(self, hidden_dim):
+#         super().__init__()
+#         self.dense_head = tf.keras.layers.Dense(hidden_dim)
+#
+#
+#     def call(self, x, training=False, mask=None):
+#         arc_d = self.mlp_arc_d(x, training)  # [N, T, arc_dim], dependent
+#         arc_h = self.mlp_arc_h(x, training)  # [N, T, arc_dim], head
+#
+#         x_left_1 = add_ones(x_left)  # [N, T, left_dim + 1]
+#         x_right_1 = add_ones(x_right)  # [N, T, right_dim + 1]
+#         x_right_1_t = tf.transpose(x_right_1, [0, 2, 1])  # [N, right_dim + 1, T]
+#         x = x_left_1 @ self.w @ x_right_1_t  # [N, T, T]
+#
+#         mask = tf.expand_dims(mask, [-1])  # [N, T, 1]
+#         s_arc += (1. - mask) * -1e9
+#         return scores
