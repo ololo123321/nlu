@@ -6,7 +6,7 @@ import tensorflow as tf
 
 from src.model import RelationExtractor
 from src.preprocessing import ExampleEncoder, ExamplesLoader, NerEncodings
-
+from src.utils import check_entities_spans
 
 # TODO: подгружать из конфига
 NER_SUFFIX_JOINER = '-'
@@ -54,16 +54,8 @@ def main(args):
     # нет смысла искать рёбра у графа без вершин
     examples_filtered = [x for x in examples_encoded if len(x.entities) > 0]
 
-    def check_entities_spans():
-        for x in examples_filtered:
-            for entity in x.entities:
-                actual = ' '.join(x.tokens[entity.start_token_id:entity.end_token_id + 1])
-                expected = ' '.join(entity.tokens)
-                assert actual == expected
-                assert entity.start_token_id > 0
-
     print("checking examples...")
-    check_entities_spans()
+    check_entities_spans(examples=examples_filtered, span_emb_type=config["model"]["re"]["span_emb_type"])
     print("OK")
 
     # рёбра пишутся в сразу в инстансы классов Example

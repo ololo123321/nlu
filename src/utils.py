@@ -1,3 +1,4 @@
+from typing import Tuple
 import tensorflow as tf
 
 
@@ -28,15 +29,13 @@ def compute_f1(preds, labels):
         return {'precision': prec, 'recall': recall, 'f1': f1}
 
 
-def infer_entities_bounds(label_ids: tf.Tensor, bound_ids: tf.Tensor) -> tf.Tensor:
+def infer_entities_bounds(label_ids: tf.Tensor, bound_ids: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
     """
     Вывод индексов первого или последнего токена сущностей
     :param label_ids: tf.Tensor of shape [N, T]
     :param bound_ids: tf.Tensor of shape [num_bound_ids] - айдишники, обозначающие начало или конец сущности
     :return: res: tf.Tensor of shape [num_entities_sum, 2], где num_entities_sum - общее число сущностей
              в батче. (i, j) - начало или конец сущности, где 0 <= i < N; 0 < j < T
-    TODO: рассмотреть случай неизвестных лейблов токенов. вообще говоря, модель может в качестве первого
-     или последнего лейбла сущности предсказать что-то другое (например, I_ORG вместо L_ORG)
     """
     labels_3d = tf.tile(label_ids[:, :, None], [1, 1, tf.shape(bound_ids)[0]])  # [N, T, num_bound_ids]
     mask_3d = tf.equal(labels_3d, bound_ids[None, None, :])  # [N, T, num_bound_ids]
@@ -57,7 +56,7 @@ def infer_entities_bounds(label_ids: tf.Tensor, bound_ids: tf.Tensor) -> tf.Tens
 
     y = tf.reshape(res, [-1, 1])
     coords = tf.concat([x, y], axis=-1)
-    return coords
+    return coords, num_entities
 
 
 def add_ones(x):
@@ -69,3 +68,24 @@ def add_ones(x):
 def noam_scheme(init_lr, global_step, warmup_steps=4000.):
     step = tf.cast(global_step + 1, dtype=tf.float32)
     return init_lr * warmup_steps ** 0.5 * tf.minimum(step * warmup_steps ** -1.5, step ** -0.5)
+
+
+def check_entities_spans(examples, span_emb_type):
+    """
+    Дополнительная проверка примеров в скрипте обучения и инференса
+    :param examples:
+    :param span_emb_type: 0 - вектор первого токена, 1 - выводится из крайних и сосендних векторов сущности
+    (см. RelationExtractor._get_entity_embeddings)
+    :return:
+    """
+    for x in examples:
+        for entity in x.entities:
+            actual = ' '.join(x.tokens[entity.start_token_id:entity.end_token_id + 1])
+            expected = ' '.join(entity.tokens)
+            assert actual == expected
+            if span_emb_type == 0:
+                assert entity.start_token_id >= 0
+            elif span_emb_type == 1:
+                assert entity.start_token_id >= 1
+            else:
+                raise

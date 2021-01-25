@@ -16,7 +16,15 @@ class MLP(tf.keras.layers.Layer):
 
 class BiLinear(tf.keras.layers.Layer):
     """
-    logits = A*W*B^T + A*U + B*V + b
+    Билинейная форма:
+    x = a*w*b^T + a*u + b*v + bias, где
+    tensor name     shape
+    a               [N, T, D_a]
+    b               [N, T, D_b]
+    w               [D_out, D_a, D_b]
+    u               [D_a, D_out]
+    v               [D_b, D_out]
+    bias            [D_out]
     """
     def __init__(self, left_dim, right_dim, output_dim):
         super().__init__()
@@ -27,9 +35,9 @@ class BiLinear(tf.keras.layers.Layer):
 
     def call(self, a: tf.Tensor, b: tf.Tensor) -> tf.Tensor:
         """
-        x_left - tf.Tensor of shape [N, T, D1] and type tf.float32
-        x_right - tf.Tensor as shape [N, T, D2] and type tf.float32
-        :returns logits - tf.Tensor of shape [N, T, T, output_dim] and type tf.float32
+        a - tf.Tensor of shape [N, T, D1] and type tf.float32
+        b - tf.Tensor as shape [N, T, D2] and type tf.float32
+        :returns x - tf.Tensor of shape [N, T, T, output_dim] and type tf.float32
         """
         b_t = tf.transpose(b, [0, 2, 1])  # [N, right_dim, T]
         x = tf.expand_dims(a, 1) @ self.w @ tf.expand_dims(b_t, 1)  # [N, output_dim, T, T]
@@ -138,24 +146,3 @@ class GraphEncoder(tf.keras.layers.Layer):
         x_right = self.mlp_right(x, training)  # [N, T, type_dim], head
         logits = self.bilinear(x_left, x_right)  # [N, T, T, num_arc_labels]
         return logits
-
-
-# TODO: REHead с BiLinear(output_dim=1, **kwargs)
-# class CoreferenceHead(tf.keras.layers.Layer):
-#     def __init__(self, hidden_dim):
-#         super().__init__()
-#         self.dense_head = tf.keras.layers.Dense(hidden_dim)
-#
-#
-#     def call(self, x, training=False, mask=None):
-#         arc_d = self.mlp_arc_d(x, training)  # [N, T, arc_dim], dependent
-#         arc_h = self.mlp_arc_h(x, training)  # [N, T, arc_dim], head
-#
-#         x_left_1 = add_ones(x_left)  # [N, T, left_dim + 1]
-#         x_right_1 = add_ones(x_right)  # [N, T, right_dim + 1]
-#         x_right_1_t = tf.transpose(x_right_1, [0, 2, 1])  # [N, right_dim + 1, T]
-#         x = x_left_1 @ self.w @ x_right_1_t  # [N, T, T]
-#
-#         mask = tf.expand_dims(mask, [-1])  # [N, T, 1]
-#         s_arc += (1. - mask) * -1e9
-#         return scores

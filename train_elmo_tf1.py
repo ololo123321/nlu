@@ -6,6 +6,7 @@ import tensorflow as tf
 
 from src.model import RelationExtractor
 from src.preprocessing import ExampleEncoder, ExamplesLoader, NerEncodings
+from src.utils import check_entities_spans
 
 # TODO: добавить в конфиг и использовать при инференсе
 NER_SUFFIX_JOINER = '-'
@@ -164,21 +165,8 @@ def main(args):
     print("train size:", len(examples_train_encoded))
     print("valid size:", len(examples_valid_encoded))
 
-    def check_entities_spans(examples_):
-        for x in examples_:
-            for entity in x.entities:
-                actual = ' '.join(x.tokens[entity.start_token_id:entity.end_token_id + 1])
-                expected = ' '.join(entity.tokens)
-                assert actual == expected
-                if args.span_emb_type == 0:
-                    assert entity.start_token_id >= 0
-                elif args.span_emb_type == 1:
-                    assert entity.start_token_id >= 1
-                else:
-                    raise
-
     print("checking examples...")
-    check_entities_spans(examples_train_encoded + examples_valid_encoded)
+    check_entities_spans(examples=examples_train_encoded + examples_valid_encoded, span_emb_type=args.span_emb_type)
     print("OK")
 
     checkpoint_path = os.path.join(args.model_dir, "model.ckpt")

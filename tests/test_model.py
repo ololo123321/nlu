@@ -8,7 +8,7 @@ sess = tf.Session()
 BOUND_IDS = tf.constant([1, 2, 5])
 
 
-@pytest.mark.parametrize("label_ids, expected", [
+@pytest.mark.parametrize("label_ids, expected_coords, expected_num_entities", [
     pytest.param(
         tf.constant([
             [0, 1, 3, 5, 0],
@@ -25,10 +25,13 @@ BOUND_IDS = tf.constant([1, 2, 5])
             [2, 0],
             [3, 0],
             [3, 0]
-        ])
+        ]),
+        np.array([2, 1, 1, 0])
     )
 ])
-def test_infer_entities_bounds(label_ids, expected):
-    actual = infer_entities_bounds(label_ids=label_ids, bound_ids=BOUND_IDS)
-    actual = sess.run(actual)
-    assert np.allclose(actual, expected)
+def test_infer_entities_bounds(label_ids, expected_coords, expected_num_entities):
+    coords, num_entities = infer_entities_bounds(label_ids=label_ids, bound_ids=BOUND_IDS)
+    actual_coords = sess.run(coords)
+    assert np.allclose(actual_coords, expected_coords)
+    actual_num_entities = sess.run(num_entities)
+    assert np.allclose(actual_num_entities, expected_num_entities)
