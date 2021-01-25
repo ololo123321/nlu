@@ -1,5 +1,4 @@
 import tensorflow as tf
-from .utils import add_ones
 
 
 class MLP(tf.keras.layers.Layer):
@@ -15,7 +14,10 @@ class MLP(tf.keras.layers.Layer):
         return x
 
 
-class BiLinearV1(tf.keras.layers.Layer):
+class BiLinear(tf.keras.layers.Layer):
+    """
+    logits = A*W*B^T + A*U + B*V + b
+    """
     def __init__(self, left_dim, right_dim, output_dim):
         super().__init__()
         self.w = tf.get_variable("w", shape=(output_dim, left_dim, right_dim), dtype=tf.float32)
@@ -23,54 +25,23 @@ class BiLinearV1(tf.keras.layers.Layer):
         self.v = tf.get_variable("v", shape=(right_dim, output_dim), dtype=tf.float32)
         self.b = tf.get_variable("b", shape=(output_dim,), dtype=tf.float32, initializer=tf.initializers.zeros())
 
-    def call(self, x_left: tf.Tensor, x_right: tf.Tensor) -> tf.Tensor:
+    def call(self, a: tf.Tensor, b: tf.Tensor) -> tf.Tensor:
         """
         x_left - tf.Tensor of shape [N, T, D1] and type tf.float32
         x_right - tf.Tensor as shape [N, T, D2] and type tf.float32
         :returns logits - tf.Tensor of shape [N, T, T, output_dim] and type tf.float32
         """
-        x_right_t = tf.transpose(x_right, [0, 2, 1])  # [N, right_dim + 1, T]
-        logits = tf.expand_dims(x_left, axis=1) @ self.w @ tf.expand_dims(x_right_t, [1])  # [N, output_dim, T, T]
-        logits = tf.transpose(logits, [0, 2, 3, 1])  # [N, T, T, output_dim]
-        x_left_u = tf.matmul(x_left, self.u)  # [N, T, output_dim]
-        x_right_v = tf.matmul(x_right, self.v)  # [N, T, output_dim]
-        logits += tf.expand_dims(x_left_u, axis=2)  # [N, T, T, output_dim]
-        logits += tf.expand_dims(x_right_v, axis=2)  # [N, T, T, output_dim]
-        logits += self.b[None, None, None, :]
-        return logits
+        b_t = tf.transpose(b, [0, 2, 1])  # [N, right_dim, T]
+        x = tf.expand_dims(a, 1) @ self.w @ tf.expand_dims(b_t, 1)  # [N, output_dim, T, T]
+        x = tf.transpose(x, [0, 2, 3, 1])  # [N, T, T, output_dim]
 
+        a_u = tf.matmul(a, self.u)  # [N, T, output_dim]
+        x += tf.expand_dims(a_u, 2)  # [N, T, T, output_dim]
 
-class BiLinearV2(tf.keras.layers.Layer):
-    """https://arxiv.org/abs/1812.11275"""
-    def __init__(self, left_dim, right_dim, output_dim):
-        super().__init__()
-        self.w = tf.get_variable("w", shape=(output_dim, left_dim, right_dim), dtype=tf.float32)
-        self.dense_linear = tf.keras.layers.Dense(output_dim)
+        b_v = tf.matmul(b, self.v)  # [N, T, output_dim]
+        x += tf.expand_dims(b_v, 2)  # [N, T, T, output_dim]
 
-    def call(self, x_left: tf.Tensor, x_right: tf.Tensor) -> tf.Tensor:
-        bilinear_part = x_left[:, None, ...] @ self.w @ tf.transpose(x_right, [0, 2, 1])[:, None, ...]  # [N, V, T, T]
-        bilinear_part = tf.transpose(bilinear_part, [0, 2, 3, 1])  # [N, T, T, V]
-        x_left_right = tf.concat([x_left, x_right], axis=-1)  # [N, T, 2 * H]
-        linear_part = self.dense_linear(x_left_right)  # [N, T, V]
-        logits = bilinear_part + linear_part[:, None, ...]  # [N, T, T, V]
-        return logits
-
-
-class BiAffineAttention(tf.keras.layers.Layer):
-    def __init__(self, left_dim, right_dim):
-        super().__init__()
-        self.w = tf.get_variable("W", shape=(left_dim + 1, right_dim + 1), dtype=tf.float32)
-
-    def call(self, x_left, x_right):
-        """
-        x_left - tf.Tensor of shape [N, T, left_dim]
-        x_right - tf.Tensor of shape [N, T, left_right]
-        return: x - tf.Tensor of shape [N, T, T]
-        """
-        x_left_1 = add_ones(x_left)  # [N, T, left_dim + 1]
-        x_right_1 = add_ones(x_right)  # [N, T, right_dim + 1]
-        x_right_1_t = tf.transpose(x_right_1, [0, 2, 1])  # [N, right_dim + 1, T]
-        x = x_left_1 @ self.w @ x_right_1_t  # [N, T, T]
+        x += self.b[None, None, None, :]  # [N, T, T, output_dim]
         return x
 
 
@@ -132,37 +103,34 @@ class MHA(tf.keras.layers.Layer):
         return x
 
 
-class REHead(tf.keras.layers.Layer):
-    def __init__(self, config):
+class GraphEncoder(tf.keras.layers.Layer):
+    """
+    кодирование пар вершин
+    """
+    def __init__(self, num_mlp_layers, left_dim, right_dim, output_dim, dropout=0.2, activation="relu"):
         super().__init__()
 
-        config_mlp = config["mlp"]
-        config_type = config["bilinear"]
+        # рассмотрим ребро a -> b
 
+        # векторное представление вершины a
         self.mlp_left = MLP(
-            num_layers=config_mlp["num_layers"],
-            hidden_dim=config_type["hidden_dim"],
-            activation=tf.nn.relu,
-            dropout=config_mlp["dropout"]
+            num_layers=num_mlp_layers,
+            hidden_dim=left_dim,
+            activation=activation,
+            dropout=dropout
         )
+        # векторное представление вершины b
         self.mlp_right = MLP(
-            num_layers=config_mlp["num_layers"],
-            hidden_dim=config_type["hidden_dim"],
-            activation=tf.nn.relu,
-            dropout=config_mlp["dropout"]
+            num_layers=num_mlp_layers,
+            hidden_dim=right_dim,
+            activation=activation,
+            dropout=dropout
         )
-
-        if config["version"] == 1:
-            bilinear_cls = BiLinearV1
-        elif config["version"] == 2:
-            bilinear_cls = BiLinearV2
-        else:
-            raise NotImplementedError
-
-        self.bilinear = bilinear_cls(
-            left_dim=config_type["hidden_dim"],
-            right_dim=config_type["hidden_dim"],
-            output_dim=config_type["num_labels"]
+        # кодирование рёбер a -> b
+        self.bilinear = BiLinear(
+            left_dim=left_dim,
+            right_dim=right_dim,
+            output_dim=output_dim
         )
 
     def call(self, x, training=False):
@@ -172,6 +140,7 @@ class REHead(tf.keras.layers.Layer):
         return logits
 
 
+# TODO: REHead с BiLinear(output_dim=1, **kwargs)
 # class CoreferenceHead(tf.keras.layers.Layer):
 #     def __init__(self, hidden_dim):
 #         super().__init__()
