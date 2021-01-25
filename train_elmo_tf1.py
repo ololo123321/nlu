@@ -170,7 +170,12 @@ def main(args):
                 actual = ' '.join(x.tokens[entity.start_token_id:entity.end_token_id + 1])
                 expected = ' '.join(entity.tokens)
                 assert actual == expected
-                assert entity.start_token_id > 0
+                if args.span_emb_type == 0:
+                    assert entity.start_token_id >= 0
+                elif args.span_emb_type == 1:
+                    assert entity.start_token_id >= 1
+                else:
+                    raise
 
     print("checking examples...")
     check_entities_spans(examples_train_encoded + examples_valid_encoded)
