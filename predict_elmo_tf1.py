@@ -55,7 +55,7 @@ def main(args):
     examples_filtered = [x for x in examples_encoded if len(x.entities) > 0]
 
     print("checking examples...")
-    check_entities_spans(examples=examples_filtered, span_emb_type=config["model"]["re"]["span_emb_type"])
+    check_entities_spans(examples=examples_filtered, span_emb_type=config["model"]["re"]["span_embeddings"]["type"])
     print("OK")
 
     # рёбра пишутся в сразу в инстансы классов Example
@@ -85,7 +85,9 @@ def main(args):
     loader.save_predictions(
         examples=examples_filtered,
         output_dir=args.output_dir,
-        id2relation=id2relation
+        id2relation=id2relation,
+        copy_texts=args.copy_texts,
+        collection_dir=args.data_dir
     )
 
 
@@ -95,6 +97,10 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir")
     parser.add_argument("--output_dir")
     parser.add_argument("--batch_size", type=int, default=32, required=False)
+    parser.add_argument("--copy_texts", action="store_true",
+                        help="нужно ли копировать тексты в папку с ответами, "
+                             "чтоб эту папку можно было просто перетащить в сервис разметки для дальнейшей работы"
+                        )
 
     _args = parser.parse_args()
     print(_args)

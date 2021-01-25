@@ -2,6 +2,7 @@ import os
 import re
 import tqdm
 import json
+import shutil
 from copy import deepcopy
 from typing import List, Set, Dict
 from itertools import accumulate
@@ -294,10 +295,14 @@ class ExamplesLoader:
     def save_predictions(
             examples: List[Example],
             output_dir: str,
-            id2relation: Dict[int, str]
+            id2relation: Dict[int, str],
+            copy_texts: bool = False,
+            collection_dir: str = None
     ):
         event_counter = defaultdict(int)
+        filenames = set()
         for x in examples:
+            filenames.add(x.filename)
             with open(os.path.join(output_dir, f"{x.filename}.ann"), "a") as f:
                 events = {}
                 # исходные сущности
@@ -342,6 +347,10 @@ class ExamplesLoader:
                         line += ' ' + args_str
                     line += '\n'
                     f.write(line)
+        if copy_texts:
+            assert collection_dir is not None
+            for name in filenames:
+                shutil.copy(os.path.join(collection_dir, f"{name}.txt"), output_dir)
 
     def check_example(self, example: Example):
         """
