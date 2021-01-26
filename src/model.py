@@ -14,7 +14,7 @@ from matplotlib import pyplot as plt
 # from bert.modeling import BertModel, BertConfig
 
 from .utils import compute_f1
-from .layers import DotProductAttention, GraphEncoder
+from .layers import DotProductAttention, GraphEncoder, GraphEncoderInputs
 from .optimization import noam_scheme
 from .preprocessing import Arc
 
@@ -126,7 +126,8 @@ class RelationExtractor:
                 dropout=config_re["mlp"]["dropout"],
                 activation=config_re["mlp"]["activation"]
             )
-            logits = relations_encoder(head=x, dep=x, training=self.training_ph)  # [N, num_heads, num_deps, num_relations]
+            inputs = GraphEncoderInputs(head=x, dep=x)
+            logits = relations_encoder(inputs=inputs, training=self.training_ph)  # [N, num_heads, num_deps, num_relations]
             self.rel_labels_pred = tf.argmax(logits, axis=-1)  # [N, num_entities, num_entities]
 
             # логиты кореференций

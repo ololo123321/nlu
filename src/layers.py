@@ -1,3 +1,5 @@
+from typing import Tuple
+from collections import namedtuple
 import tensorflow as tf
 
 
@@ -111,11 +113,22 @@ class MHA(tf.keras.layers.Layer):
         return x
 
 
+GraphEncoderInputs = namedtuple("GraphEncoderInputs", ["head", "dep"])
+
+
 class GraphEncoder(tf.keras.layers.Layer):
     """
     кодирование пар вершин
     """
-    def __init__(self, num_mlp_layers, head_dim, dep_dim, output_dim, dropout=0.2, activation="relu"):
+    def __init__(
+            self,
+            num_mlp_layers: int,
+            head_dim: int,
+            dep_dim: int,
+            output_dim: int,
+            dropout: float = 0.2,
+            activation: str = "relu"
+    ):
         super().__init__()
 
         # рассмотрим ребро a -> b
@@ -141,7 +154,8 @@ class GraphEncoder(tf.keras.layers.Layer):
             output_dim=output_dim
         )
 
-    def call(self, head, dep, training=False):
+    def call(self, inputs: GraphEncoderInputs, training: bool = False):
+        head, dep = inputs  # чтоб не отходить от API
         head = self.mlp_head(head, training=training)  # [N, num_heads, type_dim]
         dep = self.mlp_dep(dep, training=training)  # [N, num_deps, type_dim]
         logits = self.bilinear(head, dep)  # [N, num_heads, num_deps, num_arc_labels]
