@@ -43,7 +43,7 @@ class RelationExtractor:
         self.lr_ph = None
 
         # некоторые нужные тензоры
-        self.s_type = None
+        self.rel_labels_pred = None
         self.loss = None
 
         # ops
@@ -120,17 +120,18 @@ class RelationExtractor:
             # логиты отношений
             relations_encoder = GraphEncoder(
                 num_mlp_layers=config_re["mlp"]["num_layers"],
-                left_dim=config_re["bilinear"]["hidden_dim"],
-                right_dim=config_re["bilinear"]["hidden_dim"],
+                head_dim=config_re["bilinear"]["hidden_dim"],
+                dep_dim=config_re["bilinear"]["hidden_dim"],
                 output_dim=config_re["bilinear"]["num_labels"],
                 dropout=config_re["mlp"]["dropout"],
                 activation=config_re["mlp"]["activation"]
             )
-            self.s_type = relations_encoder(x, training=self.training_ph)
+            logits = relations_encoder(head=x, dep=x, training=self.training_ph)  # [N, num_heads, num_deps, num_relations]
+            self.rel_labels_pred = tf.argmax(logits, axis=-1)  # [N, num_entities, num_entities]
 
             # логиты кореференций
 
-        self._set_loss()
+        self._set_loss(logits=logits)
         self._set_train_op()
         self.sess.run(tf.global_variables_initializer())
 
@@ -234,11 +235,8 @@ class RelationExtractor:
                     end = start + batch_size
                     examples_batch = eval_examples[start:end]
                     feed_dict, id2index = self._get_feed_dict(examples_batch, training=False)
-                    loss, s_type = self.sess.run([self.loss, self.s_type], feed_dict=feed_dict)
+                    loss, rel_labels_pred = self.sess.run([self.loss, self.rel_labels_pred], feed_dict=feed_dict)
                     losses_tmp.append(loss)
-
-                    # TODO: сделать векторизовано
-                    s_type_argmax = s_type.argmax(-1)  # [N, num_entities, num_entities]
 
                     for i, x in enumerate(examples_batch):
 
@@ -249,7 +247,7 @@ class RelationExtractor:
                             id_dep = id2index[(x.id, arc.dep)]
                             arcs_true[id_head, id_dep] = arc.rel
 
-                        arcs_pred = s_type_argmax[i, :x.num_entities, :x.num_entities]
+                        arcs_pred = rel_labels_pred[i, :x.num_entities, :x.num_entities]
 
                         y_true_arcs_types.append(arcs_true.flatten())
                         y_pred_arcs_types.append(arcs_pred.flatten())
@@ -319,16 +317,14 @@ class RelationExtractor:
         for start in range(0, len(examples), batch_size):
             end = start + batch_size
             examples_batch = examples[start:end]
-            # TODO: рассмотреть случай инференса в это функции:
             feed_dict, id2index = self._get_feed_dict(examples_batch, training=False)
-            s_type = self.sess.run(self.s_type, feed_dict=feed_dict)
-            s_type_argmax = s_type.argmax(-1)  # [N, num_entities, num_entities]
+            rel_labels_pred = self.sess.run(self.rel_labels_pred, feed_dict=feed_dict)
             d = {(id_example, i): id_entity for (id_example, id_entity), i in id2index.items()}
             assert len(d) == len(id2index)
             for i, x in enumerate(examples_batch):
                 for j in range(x.num_entities):
                     for k in range(x.num_entities):
-                        id_rel = s_type_argmax[i, j, k]
+                        id_rel = rel_labels_pred[i, j, k]
                         if id_rel != 0:
                             id_head = d[(x.id, j)]
                             id_dep = d[(x.id, k)]
@@ -337,17 +333,6 @@ class RelationExtractor:
                             x.arcs.append(arc)
                             filename2id_arc[x.filename] += 1
 
-    @staticmethod
-    def evaluate(y_true, y_pred):
-        flags_las = []
-        flags_uas = []
-        for i, j in zip(y_true, y_pred):
-            flags_las.append(i == j)
-            flags_uas.append(i[:-1] == j[:-1])
-        las = np.mean(flags_las)
-        uas = np.mean(flags_uas)
-        return las, uas
-    
     def restore(self, model_dir):
         var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.scope)
         saver = tf.train.Saver(var_list)
@@ -361,23 +346,6 @@ class RelationExtractor:
         if not_initialized_vars:
             self.sess.run(tf.variables_initializer(not_initialized_vars))
         self.sess.run(tf.tables_initializer())
-    
-    def _predict_batch(self, examples):
-        feed_dict = self._get_feed_dict(examples, training=False)
-        # s_arc, s_type = self.sess.run([self.s_arc, self.s_type], feed_dict=feed_dict)
-        preds = []
-        # for i in range(len(examples)):
-        #     length_i = examples[i].num_tokens
-        #     s_arc_i = s_arc[i, :length_i, :length_i]
-        #     s_type_i = s_type[i, :length_i, :length_i]
-        #
-        #     indices_dep = range(length_i)
-        #     indices_head = mst(s_arc_i)
-        #     indices_type = s_type_i[indices_dep, indices_head].argmax(-1)
-        #
-        #     preds_i = list(zip(indices_head, indices_type))
-        #     preds.append(preds_i)
-        return preds
 
     def _get_feed_dict(self, examples, training):
         # tokens
@@ -466,18 +434,18 @@ class RelationExtractor:
 
         self.lr_ph = tf.placeholder(tf.float32, shape=None, name="lr_ph")
 
-    def _set_loss(self):
+    def _set_loss(self, logits):
         """
-        s_type - tf.Tensor of shape [batch_size, num_entities, num_entities, num_relations]
+        logits - tf.Tensor of shape [batch_size, num_entities, num_entities, num_relations]
         """
-        logits_shape = tf.shape(self.s_type)  # [4]
+        logits_shape = tf.shape(logits)  # [4]
         labels = tf.broadcast_to(self.config['model']['re']['no_rel_id'], logits_shape[:3])  # [batch_size, num_entities, num_entities]
         labels = tf.tensor_scatter_nd_update(
             tensor=labels,
             indices=self.type_ids_ph[:, :-1],
             updates=self.type_ids_ph[:, -1],
         )  # [batch_size, num_entities, num_entities]
-        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=self.s_type)  # [batch_size, num_entities, num_entities]
+        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits)  # [batch_size, num_entities, num_entities]
         mask = tf.cast(tf.sequence_mask(self.num_entities_ph), tf.float32)  # [batch_size, num_entities]
         masked_per_example_loss = per_example_loss * mask[:, :, None] * mask[:, None, :]
         total_loss = tf.reduce_sum(masked_per_example_loss)

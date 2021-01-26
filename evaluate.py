@@ -3,6 +3,10 @@ import re
 from argparse import ArgumentParser
 
 
+# TODO: NER
+# TODO: event and entities attrs
+
+
 def compute_metrics(y_true: set, y_pred: set):
     tp = len(y_true & y_pred)
 

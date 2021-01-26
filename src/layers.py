@@ -26,28 +26,28 @@ class BiLinear(tf.keras.layers.Layer):
     v               [D_b, D_out]
     bias            [D_out]
     """
-    def __init__(self, left_dim, right_dim, output_dim):
+    def __init__(self, head_dim, dep_dim, output_dim):
         super().__init__()
-        self.w = tf.get_variable("w", shape=(output_dim, left_dim, right_dim), dtype=tf.float32)
-        self.u = tf.get_variable("u", shape=(left_dim, output_dim), dtype=tf.float32)
-        self.v = tf.get_variable("v", shape=(right_dim, output_dim), dtype=tf.float32)
+        self.w = tf.get_variable("w", shape=(output_dim, head_dim, dep_dim), dtype=tf.float32)
+        self.u = tf.get_variable("u", shape=(head_dim, output_dim), dtype=tf.float32)
+        self.v = tf.get_variable("v", shape=(dep_dim, output_dim), dtype=tf.float32)
         self.b = tf.get_variable("b", shape=(output_dim,), dtype=tf.float32, initializer=tf.initializers.zeros())
 
-    def call(self, a: tf.Tensor, b: tf.Tensor) -> tf.Tensor:
+    def call(self, head: tf.Tensor, dep: tf.Tensor) -> tf.Tensor:
         """
-        a - tf.Tensor of shape [N, T, D1] and type tf.float32
-        b - tf.Tensor as shape [N, T, D2] and type tf.float32
+        head - tf.Tensor of shape [N, T, D_head] and type tf.float32
+        bep - tf.Tensor as shape [N, T, D_dep] and type tf.float32
         :returns x - tf.Tensor of shape [N, T, T, output_dim] and type tf.float32
         """
-        b_t = tf.transpose(b, [0, 2, 1])  # [N, right_dim, T]
-        x = tf.expand_dims(a, 1) @ self.w @ tf.expand_dims(b_t, 1)  # [N, output_dim, T, T]
+        dep_t = tf.transpose(dep, [0, 2, 1])  # [N, right_dim, T]
+        x = tf.expand_dims(head, 1) @ self.w @ tf.expand_dims(dep_t, 1)  # [N, output_dim, T, T]
         x = tf.transpose(x, [0, 2, 3, 1])  # [N, T, T, output_dim]
 
-        a_u = tf.matmul(a, self.u)  # [N, T, output_dim]
-        x += tf.expand_dims(a_u, 2)  # [N, T, T, output_dim]
+        head_u = tf.matmul(head, self.u)  # [N, T, output_dim]
+        x += tf.expand_dims(head_u, 2)  # [N, T, T, output_dim]
 
-        b_v = tf.matmul(b, self.v)  # [N, T, output_dim]
-        x += tf.expand_dims(b_v, 2)  # [N, T, T, output_dim]
+        dep_v = tf.matmul(dep, self.v)  # [N, T, output_dim]
+        x += tf.expand_dims(dep_v, 2)  # [N, T, T, output_dim]
 
         x += self.b[None, None, None, :]  # [N, T, T, output_dim]
         return x
@@ -115,34 +115,34 @@ class GraphEncoder(tf.keras.layers.Layer):
     """
     кодирование пар вершин
     """
-    def __init__(self, num_mlp_layers, left_dim, right_dim, output_dim, dropout=0.2, activation="relu"):
+    def __init__(self, num_mlp_layers, head_dim, dep_dim, output_dim, dropout=0.2, activation="relu"):
         super().__init__()
 
         # рассмотрим ребро a -> b
 
         # векторное представление вершины a
-        self.mlp_left = MLP(
+        self.mlp_head = MLP(
             num_layers=num_mlp_layers,
-            hidden_dim=left_dim,
+            hidden_dim=head_dim,
             activation=activation,
             dropout=dropout
         )
         # векторное представление вершины b
-        self.mlp_right = MLP(
+        self.mlp_dep = MLP(
             num_layers=num_mlp_layers,
-            hidden_dim=right_dim,
+            hidden_dim=dep_dim,
             activation=activation,
             dropout=dropout
         )
         # кодирование рёбер a -> b
         self.bilinear = BiLinear(
-            left_dim=left_dim,
-            right_dim=right_dim,
+            head_dim=head_dim,
+            dep_dim=dep_dim,
             output_dim=output_dim
         )
 
-    def call(self, x, training=False):
-        x_left = self.mlp_left(x, training)  # [N, T, type_dim], dependent
-        x_right = self.mlp_right(x, training)  # [N, T, type_dim], head
-        logits = self.bilinear(x_left, x_right)  # [N, T, T, num_arc_labels]
+    def call(self, head, dep, training=False):
+        head = self.mlp_head(head, training=training)  # [N, num_heads, type_dim]
+        dep = self.mlp_dep(dep, training=training)  # [N, num_deps, type_dim]
+        logits = self.bilinear(head, dep)  # [N, num_heads, num_deps, num_arc_labels]
         return logits
