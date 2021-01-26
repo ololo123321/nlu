@@ -1,3 +1,4 @@
+from collections import namedtuple
 import tensorflow as tf
 
 
@@ -7,11 +8,14 @@ class MLP(tf.keras.layers.Layer):
         self.dense_layers = [tf.keras.layers.Dense(hidden_dim, activation=activation) for _ in range(num_layers)]
         self.dropout_layers = [tf.keras.layers.Dropout(dropout) for _ in range(num_layers)]
 
-    def call(self, x, training=False):
+    def call(self, x: tf.Tensor, training: bool = False):
         for dense, dropout in zip(self.dense_layers, self.dropout_layers):
             x = dense(x)
             x = dropout(x, training=training)
         return x
+
+
+BiLinearInputs = namedtuple("BiLinearInputs", ["head", "dep"])
 
 
 class BiLinear(tf.keras.layers.Layer):
@@ -33,12 +37,14 @@ class BiLinear(tf.keras.layers.Layer):
         self.v = tf.get_variable("v", shape=(dep_dim, output_dim), dtype=tf.float32)
         self.b = tf.get_variable("b", shape=(output_dim,), dtype=tf.float32, initializer=tf.initializers.zeros())
 
-    def call(self, head: tf.Tensor, dep: tf.Tensor) -> tf.Tensor:
+    def call(self, inputs: BiLinearInputs, training=None, mask=None) -> tf.Tensor:
         """
         head - tf.Tensor of shape [N, T, D_head] and type tf.float32
         bep - tf.Tensor as shape [N, T, D_dep] and type tf.float32
         :returns x - tf.Tensor of shape [N, T, T, output_dim] and type tf.float32
         """
+        head = inputs.head
+        dep = inputs.dep
         dep_t = tf.transpose(dep, [0, 2, 1])  # [N, right_dim, T]
         x = tf.expand_dims(head, 1) @ self.w @ tf.expand_dims(dep_t, 1)  # [N, output_dim, T, T]
         x = tf.transpose(x, [0, 2, 3, 1])  # [N, T, T, output_dim]
@@ -111,11 +117,22 @@ class MHA(tf.keras.layers.Layer):
         return x
 
 
+GraphEncoderInputs = namedtuple("GraphEncoderInputs", ["head", "dep"])
+
+
 class GraphEncoder(tf.keras.layers.Layer):
     """
     кодирование пар вершин
     """
-    def __init__(self, num_mlp_layers, head_dim, dep_dim, output_dim, dropout=0.2, activation="relu"):
+    def __init__(
+            self,
+            num_mlp_layers: int,
+            head_dim: int,
+            dep_dim: int,
+            output_dim: int,
+            dropout: float = 0.2,
+            activation: str = "relu"
+    ):
         super().__init__()
 
         # рассмотрим ребро a -> b
@@ -141,8 +158,10 @@ class GraphEncoder(tf.keras.layers.Layer):
             output_dim=output_dim
         )
 
-    def call(self, head, dep, training=False):
+    def call(self, inputs: GraphEncoderInputs, training: bool = False):
+        head, dep = inputs  # чтоб не отходить от API
         head = self.mlp_head(head, training=training)  # [N, num_heads, type_dim]
         dep = self.mlp_dep(dep, training=training)  # [N, num_deps, type_dim]
-        logits = self.bilinear(head, dep)  # [N, num_heads, num_deps, num_arc_labels]
+        bilinear_inputs = BiLinearInputs(head=head, dep=dep)
+        logits = self.bilinear(inputs=bilinear_inputs)  # [N, num_heads, num_deps, num_arc_labels]
         return logits

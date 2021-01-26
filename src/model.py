@@ -14,20 +14,35 @@ from matplotlib import pyplot as plt
 # from bert.modeling import BertModel, BertConfig
 
 from .utils import compute_f1, infer_entities_bounds
-from .layers import DotProductAttention, GraphEncoder
+from .layers import DotProductAttention, GraphEncoder, GraphEncoderInputs
 from .optimization import noam_scheme
 from .preprocessing import Arc
 
 
 # model
 
-class RelationExtractor:
+class JointModel:
     """
-    Предполагается, что NER уже решён
+    Модель принимает на вход текст и ищет в нём:
+    * именные сущности
+    * события, а также роли именных сущностей в событиях
+    * семантические отношения между именными сущностями
+    * атрибуты событий и именных сущностей [в планах]
     """
     scope = "re_head"
 
     def __init__(self, sess, config):
+        """
+        config = {
+            "model": {
+                "embedder": {},
+                "entities": {},
+                "relations": {},
+                "event": {},
+            },
+            "optimizer": {}
+        }
+        """
         self.sess = sess
         self.config = config
 
@@ -35,12 +50,13 @@ class RelationExtractor:
         self.tokens_ph = None
         self.sequence_len_ph = None
         self.num_entities_ph = None
-        self.ner_labels_ph = None
+        self.ner_entities_labels_ph = None
         self.entity_start_ids_ph = None
         self.entity_end_ids_ph = None
         self.type_ids_ph = None
         self.training_ph = None
         self.lr_ph = None
+        self.ner_event_labels_ph = None
 
         # некоторые нужные тензоры
         self.rel_labels_pred = None
@@ -59,80 +75,40 @@ class RelationExtractor:
     def build(self):
         self._set_placeholders()
 
-        # конфиги голов
-        config_embedder = self.config["model"]["embedder"]
-        config_re = self.config["model"]["re"]
+        x = self._build_embedder()
 
-        # embedder
-        # TODO: добавить возможность выбора bert
-        if config_embedder["type"] == "elmo":
-            elmo = hub.Module(config_embedder["dir"], trainable=False)
-            input_dict = {
-                "tokens": self.tokens_ph,
-                "sequence_len": self.sequence_len_ph
-            }
-            x = elmo(input_dict, signature="tokens", as_dict=True)["elmo"]  # [N, T, elmo_dim]
+        # поиск именных сущностей
+        num_labels = 10  # TODO
+        use_crf = True  # TODO
+        # TODO: иметь возможность подгрузить предобученную голову. если подгружается предобученная, то учить не нужно
+        x_ner, ner_labels_pred = self._build_ner_head(
+            x, num_labels=num_labels, use_crf=use_crf, reuse=False, config=self.config["model"]["ner"]
+        )
 
-            elmo_dropout = tf.keras.layers.Dropout(config_embedder["dropout"])
-            x = elmo_dropout(x, training=self.training_ph)
-        else:
-            raise NotImplementedError
+        # вывод эмбеддингов именных сущностей
+        bound_ids = tf.constant([1])  # TODO
+        entities_emb_train, _, _ = infer_entities_bounds(
+            x_ner, label_ids=self.ner_entities_labels_ph, bound_ids=bound_ids
+        )
+        entities_emb_inference, _, _ = infer_entities_bounds(
+            x_ner, label_ids=ner_labels_pred, bound_ids=bound_ids
+        )
 
-        # sequence_mask (нужна и в ner, и в re)
-        sequence_mask = tf.cast(tf.sequence_mask(self.sequence_len_ph), tf.float32)
+        # событие
+        roles_logits_train, event_entity_role_logits_train = self._build_event_head(
+            x,
+            ner_labels=self.ner_entities_labels_ph,
+            entities_emb=entities_emb_train,
+            training=True
+        )
+        roles_logits_inference, event_entity_role_logits_inference = self._build_event_head(
+            x,
+            ner_labels=ner_labels_pred,
+            entities_emb=entities_emb_inference,
+            training=False
+        )
 
-        with tf.variable_scope(self.scope, reuse=tf.AUTO_REUSE):
-            # эмбеддинги лейблов именных сущностей
-            if config_re["ner_embeddings"]["use"]:
-                ner_emb = tf.keras.layers.Embedding(
-                    input_dim=config_re["ner_embeddings"]["num_labels"],
-                    output_dim=config_re["ner_embeddings"]["dim"]
-                )(self.ner_labels_ph)
-                ner_dropout = tf.keras.layers.Dropout(config_re["ner_embeddings"]["dropout"])
-                ner_emb = ner_dropout(ner_emb, training=self.training_ph)
-
-                # merged
-                if config_re["merged_embeddings"]["merge_mode"] == "concat":
-                    x = tf.concat([x, ner_emb], axis=-1)
-                elif config_re["merged_embeddings"]["merge_mode"] == "sum":
-                    # TODO: вставить assert на равенство размерности эмбеддингов сущностей и разметности elmo
-                    x += ner_emb
-                else:
-                    raise NotImplementedError
-
-                x = tf.keras.layers.Dropout(config_re["merged_embeddings"]["dropout"])(x, training=self.training_ph)
-
-                if config_re["merged_embeddings"]["layernorm"]:
-                    x = tf.keras.layers.LayerNormalization()(x)
-
-            # обучаемые с нуля верхние слои:
-            if config_embedder["attention"]["enabled"]:
-                x = self._stacked_attention(x, config=config_embedder["attention"],
-                                            mask=sequence_mask)  # [N, T, d_model]
-                d_model = config_embedder["attention"]["num_heads"] * config_embedder["attention"]["head_dim"]
-            if config_embedder["rnn"]["enabled"]:
-                x = self._stacked_rnn(x, config=config_embedder["rnn"], mask=sequence_mask)
-                d_model = config_embedder["rnn"]["cell_dim"] * 2
-
-            # векторные представления сущностей
-            x = self._get_entity_embeddings(x, d_model=d_model)  # [N, num_entities, d_model]
-
-            # логиты отношений
-            relations_encoder = GraphEncoder(
-                num_mlp_layers=config_re["mlp"]["num_layers"],
-                head_dim=config_re["bilinear"]["hidden_dim"],
-                dep_dim=config_re["bilinear"]["hidden_dim"],
-                output_dim=config_re["bilinear"]["num_labels"],
-                dropout=config_re["mlp"]["dropout"],
-                activation=config_re["mlp"]["activation"]
-            )
-            logits = relations_encoder(head=x, dep=x,
-                                       training=self.training_ph)  # [N, num_heads, num_deps, num_relations]
-            self.rel_pred_ids = tf.argmax(logits, axis=-1)  # [N, num_entities, num_entities]
-
-            # логиты кореференций
-
-        self._set_loss(logits=logits)
+        self._set_loss(event_entity_role_logits=event_entity_role_logits_train, role_logits=roles_logits_train)
         self._set_train_op()
         self.sess.run(tf.global_variables_initializer())
 
@@ -236,7 +212,7 @@ class RelationExtractor:
                     end = start + batch_size
                     examples_batch = eval_examples[start:end]
                     feed_dict, id2index = self._get_feed_dict(examples_batch, training=False)
-                    loss, rel_pred_ids = self.sess.run([self.loss, self.rel_pred_ids], feed_dict=feed_dict)
+                    loss, rel_labels_pred = self.sess.run([self.loss, self.rel_labels_pred], feed_dict=feed_dict)
                     losses_tmp.append(loss)
 
                     for i, x in enumerate(examples_batch):
@@ -248,7 +224,7 @@ class RelationExtractor:
                             id_dep = id2index[(x.id, arc.dep)]
                             arcs_true[id_head, id_dep] = arc.rel
 
-                        arcs_pred = rel_pred_ids[i, :x.num_entities, :x.num_entities]
+                        arcs_pred = rel_labels_pred[i, :x.num_entities, :x.num_entities]
 
                         y_true_arcs_types.append(arcs_true.flatten())
                         y_pred_arcs_types.append(arcs_pred.flatten())
@@ -319,13 +295,13 @@ class RelationExtractor:
             end = start + batch_size
             examples_batch = examples[start:end]
             feed_dict, id2index = self._get_feed_dict(examples_batch, training=False)
-            rel_pred_ids = self.sess.run(self.rel_pred_ids, feed_dict=feed_dict)
+            rel_labels_pred = self.sess.run(self.rel_labels_pred, feed_dict=feed_dict)
             d = {(id_example, i): id_entity for (id_example, id_entity), i in id2index.items()}
             assert len(d) == len(id2index)
             for i, x in enumerate(examples_batch):
                 for j in range(x.num_entities):
                     for k in range(x.num_entities):
-                        id_rel = rel_pred_ids[i, j, k]
+                        id_rel = rel_labels_pred[i, j, k]
                         if id_rel != 0:
                             id_head = d[(x.id, j)]
                             id_dep = d[(x.id, k)]
@@ -348,67 +324,114 @@ class RelationExtractor:
             self.sess.run(tf.variables_initializer(not_initialized_vars))
         self.sess.run(tf.tables_initializer())
 
-    def _build_ner_head(self, x):
-        config_ner = self.config["model"]["ner"]
+    def _build_embedder(self):
+        # embedder
+        # TODO: добавить возможность выбора bert
+        if self.config["model"]["embedder"]["type"] == "elmo":
+            elmo = hub.Module(self.config["model"]["embedder"]["dir"], trainable=False)
+            input_dict = {
+                "tokens": self.tokens_ph,
+                "sequence_len": self.sequence_len_ph
+            }
+            x = elmo(input_dict, signature="tokens", as_dict=True)["elmo"]  # [N, T, elmo_dim]
 
-        num_ner_labels = config_ner["num_labels"]
-        with tf.variable_scope("ner", reuse=False):
-            # обучаемые с нуля верхние слои
-            # x_ner = self._stacked_attention(x, config=config_ner["attention"], mask=sequence_mask_float)
-            # x_ner = tf.keras.layers.Dense(num_ner_labels)(x_ner)
-            x_ner = tf.keras.layers.Dense(num_ner_labels)(x)
+            elmo_dropout = tf.keras.layers.Dropout(self.config["model"]["embedder"]["dropout"])
+            x = elmo_dropout(x, training=self.training_ph)
+        else:
+            raise NotImplementedError
+        return x
 
-            if config_ner["use_crf"]:
-                with tf.variable_scope("transition_params"):
+    def _build_ner_head(self, x, num_labels: int, use_crf: bool = False, reuse: bool = False, config: dict = None):
+        with tf.variable_scope("ner", reuse=reuse):
+            if config is not None:
+                x, _ = self._build_encoder_layers(x, config=config)
+            logits = tf.keras.layers.Dense(num_labels)(x)
+
+            if use_crf:
+                with tf.variable_scope("crf"):
                     self.transition_params = tf.get_variable("transition_params",
-                                                             [num_ner_labels, num_ner_labels], dtype=tf.float32)
-
+                                                             [num_labels, num_labels], dtype=tf.float32)
                 # ner_labels_pred: [N, T]
-                self.ner_labels_pred, _ = tf.contrib.crf.crf_decode(x_ner, self.transition_params, self.sequence_len_ph)
+                ner_labels_pred, _ = tf.contrib.crf.crf_decode(logits, self.transition_params, self.sequence_len_ph)
             else:
-                self.ner_labels_pred = tf.argmax(x_ner, axis=-1)
+                ner_labels_pred = tf.argmax(logits, axis=-1)
 
             # self.ner_labels_pred = tf.stop_gradient(self.ner_labels_pred)
+        return x, ner_labels_pred
 
-    def _build_event_head(self, x, ner_labels):
-        config_re = self.config["model"]["re"]
-        config_embedder = self.config["model"]["embedder"]
-
-        # эмбеддинги лейблов именных сущностей
-        if config_re["ner_embeddings"]["use"]:
-            ner_emb = tf.keras.layers.Embedding(
-                input_dim=config_re["ner_embeddings"]["num_labels"],
-                output_dim=config_re["ner_embeddings"]["dim"]
-            )(ner_labels)
-            ner_dropout = tf.keras.layers.Dropout(config_re["ner_embeddings"]["dropout"])
-            ner_emb = ner_dropout(ner_emb, training=self.training_ph)
-
-            # merged
-            if config_re["merged_embeddings"]["merge_mode"] == "concat":
-                x = tf.concat([x, ner_emb], axis=-1)
-            elif config_re["merged_embeddings"]["merge_mode"] == "sum":
-                # TODO: вставить assert на равенство размерности эмбеддингов сущностей и разметности elmo
-                x += ner_emb
-            else:
-                raise NotImplementedError
-
-            x = tf.keras.layers.Dropout(config_re["merged_embeddings"]["dropout"])(x, training=self.training_ph)
-
-            if config_re["merged_embeddings"]["layernorm"]:
-                x = tf.keras.layers.LayerNormalization()(x)
-
-        # обучаемые с нуля верхние слои:
+    def _build_encoder_layers(self, x, config):
+        """обучаемые с нуля верхние слои:"""
+        sequence_mask = tf.sequence_mask(self.sequence_len_ph)
         d_model = None
-        if config_embedder["attention"]["enabled"]:
-            x = self._stacked_attention(x, config=config_embedder["attention"], mask=sequence_mask)  # [N, T, d_model]
-            d_model = config_embedder["attention"]["num_heads"] * config_embedder["attention"]["head_dim"]
-        if config_embedder["rnn"]["enabled"]:
-            x = self._stacked_rnn(x, config=config_embedder["rnn"], mask=sequence_mask)
-            d_model = config_embedder["rnn"]["cell_dim"] * 2
+        if config["attention"]["enabled"]:
+            x = self._stacked_attention(x, config=config["attention"],
+                                        mask=sequence_mask)  # [N, T, d_model]
+            d_model = config["attention"]["num_heads"] * config["attention"]["head_dim"]
+        if config["rnn"]["enabled"]:
+            x = self._stacked_rnn(x, config=config["rnn"], mask=sequence_mask)
+            d_model = config["rnn"]["cell_dim"] * 2
         if d_model is None:
-            d_model = 1024  # TODO вынести куда-то
-
+            d_model = self.config["embedder"]["dim"]
         return x, d_model
+
+    def _build_event_head(self, x, ner_labels, entities_emb, training: bool = False):
+        with tf.variable_scope("event_head", reuse=tf.AUTO_REUSE):
+            config_re = self.config["model"]["re"]
+
+            # эмбеддинги лейблов именных сущностей
+            # TODO: лучше не юзать, чтоб не зависеть от NER-лейблов именных сущностей.
+            #  лучше от той головы брать только айдишники начала сущностей
+            if config_re["ner_embeddings"]["use"]:
+                ner_emb = tf.keras.layers.Embedding(
+                    input_dim=config_re["ner_embeddings"]["num_labels"],
+                    output_dim=config_re["ner_embeddings"]["dim"]
+                )(ner_labels)
+                ner_dropout = tf.keras.layers.Dropout(config_re["ner_embeddings"]["dropout"])
+                ner_emb = ner_dropout(ner_emb, training=self.training_ph)
+
+                # merged
+                if config_re["merged_embeddings"]["merge_mode"] == "concat":
+                    x = tf.concat([x, ner_emb], axis=-1)
+                elif config_re["merged_embeddings"]["merge_mode"] == "sum":
+                    # TODO: вставить assert на равенство размерности эмбеддингов сущностей и разметности elmo
+                    x += ner_emb
+                else:
+                    raise NotImplementedError
+
+                x = tf.keras.layers.Dropout(config_re["merged_embeddings"]["dropout"])(x, training=self.training_ph)
+
+                if config_re["merged_embeddings"]["layernorm"]:
+                    x = tf.keras.layers.LayerNormalization()(x)
+
+            # обучаемые с нуля верхние слои:
+            x, d_model = self._build_encoder_layers(x, config=self.config["model"]["event"])
+
+            # поиск триггеров событий
+            num_roles = self.config["model"]["event"]["num_roles"]
+            roles_logits = tf.keras.layers.Dense(num_roles)(x)
+            roles_pred = tf.argmax(roles_logits, axis=-1)
+
+            # получение векторов событий
+            if training:
+                event_emb = self._get_entity_embeddings(x, d_model=d_model)
+                num_events = None  # TODO
+            else:
+                bound_ids = tf.constant([1])  # TODO
+                event_emb, _, num_events = infer_entities_bounds(x, label_ids=roles_pred, bound_ids=bound_ids)
+
+            # получение логитов пар (событие, именная сущность)
+            pairs_encoder = GraphEncoder(
+                num_mlp_layers=1,  # TODO
+                head_dim=d_model,
+                dep_dim=d_model,
+                output_dim=num_roles,
+                dropout=0.2,  # TODO
+                activation="relu"  # TODO
+            )
+            inputs = GraphEncoderInputs(head=event_emb, dep=entities_emb)
+            event_entity_role_logits = pairs_encoder(inputs, training=self.training_ph)  # [N, num_events, num_entities, num_roles]
+
+        return roles_logits, event_entity_role_logits
 
     def _get_feed_dict(self, examples, training):
         # tokens
@@ -464,7 +487,7 @@ class RelationExtractor:
         feed_dict = {
             self.tokens_ph: tokens,
             self.sequence_len_ph: sequence_len,
-            self.ner_labels_ph: ner_labels,
+            self.ner_entities_labels_ph: ner_labels,
             self.num_entities_ph: num_entities,
             self.entity_start_ids_ph: entity_start_ids,
             self.entity_end_ids_ph: entity_end_ids,
@@ -480,7 +503,7 @@ class RelationExtractor:
         self.sequence_len_ph = tf.placeholder(tf.int32, shape=[None], name="sequence_len_ph")
 
         # для эмбеддингов сущнсотей
-        self.ner_labels_ph = tf.placeholder(tf.int32, shape=[None, None], name="ner_ph")
+        self.ner_entities_labels_ph = tf.placeholder(tf.int32, shape=[None, None], name="ner_ph")
 
         # для маскирования на уровне сущностей
         self.num_entities_ph = tf.placeholder(tf.int32, shape=[None], name="num_entities_ph")
@@ -497,11 +520,12 @@ class RelationExtractor:
 
         self.lr_ph = tf.placeholder(tf.float32, shape=None, name="lr_ph")
 
-    def _set_loss(self, logits):
+    def _set_loss(self, event_entity_role_logits, role_logits):
         """
         logits - tf.Tensor of shape [batch_size, num_entities, num_entities, num_relations]
         """
-        logits_shape = tf.shape(logits)  # [4]
+        # поиск событий
+        logits_shape = tf.shape(event_entity_role_logits)  # [4]
         labels = tf.broadcast_to(self.config['model']['re']['no_rel_id'],
                                  logits_shape[:3])  # [batch_size, num_entities, num_entities]
         labels = tf.tensor_scatter_nd_update(
@@ -509,13 +533,29 @@ class RelationExtractor:
             indices=self.type_ids_ph[:, :-1],
             updates=self.type_ids_ph[:, -1],
         )  # [batch_size, num_entities, num_entities]
-        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels,
-                                                                          logits=logits)  # [batch_size, num_entities, num_entities]
+        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            labels=labels,
+            logits=event_entity_role_logits
+        )  # [batch_size, num_entities, num_entities]
         mask = tf.cast(tf.sequence_mask(self.num_entities_ph), tf.float32)  # [batch_size, num_entities]
         masked_per_example_loss = per_example_loss * mask[:, :, None] * mask[:, None, :]
         total_loss = tf.reduce_sum(masked_per_example_loss)
         num_pairs = tf.cast(tf.reduce_sum(self.num_entities_ph ** 2), tf.float32)
-        self.loss = total_loss / num_pairs
+        loss_event_entity = total_loss / num_pairs
+
+        # поиск триггеров событий
+        # TODO: рассмотреть случай crf
+        ner_labels = None  # TODO
+        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            labels=ner_labels,
+            logits=role_logits
+        )  # [batch_size, maxlen]
+        mask = tf.cast(tf.sequence_mask(self.sequence_len_ph), tf.float32)  # [batch_size, maxlen]
+        masked_per_example_loss = per_example_loss * mask  # [batch_size, maxlen]
+        loss_ner = tf.reduce_sum(masked_per_example_loss) / tf.reduce_sum(mask)
+
+        # общий лосс
+        self.loss = loss_event_entity + loss_ner
 
     def _set_train_op(self):
         tvars = tf.trainable_variables()

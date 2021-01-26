@@ -29,12 +29,13 @@ def compute_f1(preds, labels):
         return {'precision': prec, 'recall': recall, 'f1': f1}
 
 
-def infer_entities_bounds(label_ids: tf.Tensor, bound_ids: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+def infer_entities_bounds(x, label_ids: tf.Tensor, bound_ids: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
     """
     Вывод индексов первого или последнего токена сущностей
+    :param x: tf.Tensor of shape [N, T, D]
     :param label_ids: tf.Tensor of shape [N, T]
     :param bound_ids: tf.Tensor of shape [num_bound_ids] - айдишники, обозначающие начало или конец сущности
-    :return: res: tf.Tensor of shape [num_entities_sum, 2], где num_entities_sum - общее число сущностей
+    :return: coords: tf.Tensor of shape [num_entities_sum, 2], где num_entities_sum - общее число сущностей
              в батче. (i, j) - начало или конец сущности, где 0 <= i < N; 0 < j < T
     """
     labels_3d = tf.tile(label_ids[:, :, None], [1, 1, tf.shape(bound_ids)[0]])  # [N, T, num_bound_ids]
@@ -50,13 +51,15 @@ def infer_entities_bounds(label_ids: tf.Tensor, bound_ids: tf.Tensor) -> Tuple[t
     # Пусть число примеров = 3, число сущностей - 2
     num_examples = sequence_mask_shape[0]
     num_entities_max = sequence_mask_shape[1]
-    x = tf.range(num_examples)  # [0, 1, 2]
-    x = tf.tile(x[:, None], [1, num_entities_max])  # [[0, 0], [1, 1], [2, 2]]
-    x = tf.reshape(x, [-1, 1])  # [[0], [0], [1], [1], [2], [2]]
+    x_coord = tf.range(num_examples)  # [0, 1, 2]
+    x_coord = tf.tile(x_coord[:, None], [1, num_entities_max])  # [[0, 0], [1, 1], [2, 2]]
+    x_coord = tf.reshape(x_coord, [-1, 1])  # [[0], [0], [1], [1], [2], [2]]
 
-    y = tf.reshape(res, [-1, 1])
-    coords = tf.concat([x, y], axis=-1)
-    return coords, num_entities
+    y_coord = tf.reshape(res, [-1, 1])  # [N * num_entities_max, 1]
+    coords = tf.concat([x_coord, y_coord], axis=-1)  # [N * num_entities_max, 2]
+
+    x = tf.gather_nd(x, coords)
+    return x, coords, num_entities
 
 
 def add_ones(x):

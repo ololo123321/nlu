@@ -30,7 +30,7 @@ BOUND_IDS = tf.constant([1, 2, 5])
     )
 ])
 def test_infer_entities_bounds(label_ids, expected_coords, expected_num_entities):
-    coords, num_entities = infer_entities_bounds(label_ids=label_ids, bound_ids=BOUND_IDS)
+    _, coords, num_entities = infer_entities_bounds(label_ids=label_ids, bound_ids=BOUND_IDS)
     actual_coords = sess.run(coords)
     assert np.allclose(actual_coords, expected_coords)
     actual_num_entities = sess.run(num_entities)
