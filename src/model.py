@@ -13,7 +13,7 @@ from matplotlib import pyplot as plt
 
 # from bert.modeling import BertModel, BertConfig
 
-from .utils import compute_f1
+from .utils import compute_f1, infer_entities_bounds
 from .layers import DotProductAttention, GraphEncoder
 from .optimization import noam_scheme
 from .preprocessing import Arc
@@ -82,7 +82,6 @@ class RelationExtractor:
         sequence_mask = tf.cast(tf.sequence_mask(self.sequence_len_ph), tf.float32)
 
         with tf.variable_scope(self.scope, reuse=tf.AUTO_REUSE):
-
             # эмбеддинги лейблов именных сущностей
             if config_re["ner_embeddings"]["use"]:
                 ner_emb = tf.keras.layers.Embedding(
@@ -108,7 +107,8 @@ class RelationExtractor:
 
             # обучаемые с нуля верхние слои:
             if config_embedder["attention"]["enabled"]:
-                x = self._stacked_attention(x, config=config_embedder["attention"], mask=sequence_mask)  # [N, T, d_model]
+                x = self._stacked_attention(x, config=config_embedder["attention"],
+                                            mask=sequence_mask)  # [N, T, d_model]
                 d_model = config_embedder["attention"]["num_heads"] * config_embedder["attention"]["head_dim"]
             if config_embedder["rnn"]["enabled"]:
                 x = self._stacked_rnn(x, config=config_embedder["rnn"], mask=sequence_mask)
@@ -126,8 +126,9 @@ class RelationExtractor:
                 dropout=config_re["mlp"]["dropout"],
                 activation=config_re["mlp"]["activation"]
             )
-            logits = relations_encoder(head=x, dep=x, training=self.training_ph)  # [N, num_heads, num_deps, num_relations]
-            self.rel_labels_pred = tf.argmax(logits, axis=-1)  # [N, num_entities, num_entities]
+            logits = relations_encoder(head=x, dep=x,
+                                       training=self.training_ph)  # [N, num_heads, num_deps, num_relations]
+            self.rel_pred_ids = tf.argmax(logits, axis=-1)  # [N, num_entities, num_entities]
 
             # логиты кореференций
 
@@ -235,7 +236,7 @@ class RelationExtractor:
                     end = start + batch_size
                     examples_batch = eval_examples[start:end]
                     feed_dict, id2index = self._get_feed_dict(examples_batch, training=False)
-                    loss, rel_labels_pred = self.sess.run([self.loss, self.rel_labels_pred], feed_dict=feed_dict)
+                    loss, rel_pred_ids = self.sess.run([self.loss, self.rel_pred_ids], feed_dict=feed_dict)
                     losses_tmp.append(loss)
 
                     for i, x in enumerate(examples_batch):
@@ -247,7 +248,7 @@ class RelationExtractor:
                             id_dep = id2index[(x.id, arc.dep)]
                             arcs_true[id_head, id_dep] = arc.rel
 
-                        arcs_pred = rel_labels_pred[i, :x.num_entities, :x.num_entities]
+                        arcs_pred = rel_pred_ids[i, :x.num_entities, :x.num_entities]
 
                         y_true_arcs_types.append(arcs_true.flatten())
                         y_pred_arcs_types.append(arcs_pred.flatten())
@@ -318,13 +319,13 @@ class RelationExtractor:
             end = start + batch_size
             examples_batch = examples[start:end]
             feed_dict, id2index = self._get_feed_dict(examples_batch, training=False)
-            rel_labels_pred = self.sess.run(self.rel_labels_pred, feed_dict=feed_dict)
+            rel_pred_ids = self.sess.run(self.rel_pred_ids, feed_dict=feed_dict)
             d = {(id_example, i): id_entity for (id_example, id_entity), i in id2index.items()}
             assert len(d) == len(id2index)
             for i, x in enumerate(examples_batch):
                 for j in range(x.num_entities):
                     for k in range(x.num_entities):
-                        id_rel = rel_labels_pred[i, j, k]
+                        id_rel = rel_pred_ids[i, j, k]
                         if id_rel != 0:
                             id_head = d[(x.id, j)]
                             id_dep = d[(x.id, k)]
@@ -338,7 +339,7 @@ class RelationExtractor:
         saver = tf.train.Saver(var_list)
         checkpoint_path = os.path.join(model_dir, "model.ckpt")
         saver.restore(self.sess, checkpoint_path)
-    
+
     def initialize(self):
         global_vars = tf.global_variables()
         is_not_initialized = self.sess.run([tf.is_variable_initialized(var) for var in global_vars])
@@ -346,6 +347,68 @@ class RelationExtractor:
         if not_initialized_vars:
             self.sess.run(tf.variables_initializer(not_initialized_vars))
         self.sess.run(tf.tables_initializer())
+
+    def _build_ner_head(self, x):
+        config_ner = self.config["model"]["ner"]
+
+        num_ner_labels = config_ner["num_labels"]
+        with tf.variable_scope("ner", reuse=False):
+            # обучаемые с нуля верхние слои
+            # x_ner = self._stacked_attention(x, config=config_ner["attention"], mask=sequence_mask_float)
+            # x_ner = tf.keras.layers.Dense(num_ner_labels)(x_ner)
+            x_ner = tf.keras.layers.Dense(num_ner_labels)(x)
+
+            if config_ner["use_crf"]:
+                with tf.variable_scope("transition_params"):
+                    self.transition_params = tf.get_variable("transition_params",
+                                                             [num_ner_labels, num_ner_labels], dtype=tf.float32)
+
+                # ner_labels_pred: [N, T]
+                self.ner_labels_pred, _ = tf.contrib.crf.crf_decode(x_ner, self.transition_params, self.sequence_len_ph)
+            else:
+                self.ner_labels_pred = tf.argmax(x_ner, axis=-1)
+
+            # self.ner_labels_pred = tf.stop_gradient(self.ner_labels_pred)
+
+    def _build_event_head(self, x, ner_labels):
+        config_re = self.config["model"]["re"]
+        config_embedder = self.config["model"]["embedder"]
+
+        # эмбеддинги лейблов именных сущностей
+        if config_re["ner_embeddings"]["use"]:
+            ner_emb = tf.keras.layers.Embedding(
+                input_dim=config_re["ner_embeddings"]["num_labels"],
+                output_dim=config_re["ner_embeddings"]["dim"]
+            )(ner_labels)
+            ner_dropout = tf.keras.layers.Dropout(config_re["ner_embeddings"]["dropout"])
+            ner_emb = ner_dropout(ner_emb, training=self.training_ph)
+
+            # merged
+            if config_re["merged_embeddings"]["merge_mode"] == "concat":
+                x = tf.concat([x, ner_emb], axis=-1)
+            elif config_re["merged_embeddings"]["merge_mode"] == "sum":
+                # TODO: вставить assert на равенство размерности эмбеддингов сущностей и разметности elmo
+                x += ner_emb
+            else:
+                raise NotImplementedError
+
+            x = tf.keras.layers.Dropout(config_re["merged_embeddings"]["dropout"])(x, training=self.training_ph)
+
+            if config_re["merged_embeddings"]["layernorm"]:
+                x = tf.keras.layers.LayerNormalization()(x)
+
+        # обучаемые с нуля верхние слои:
+        d_model = None
+        if config_embedder["attention"]["enabled"]:
+            x = self._stacked_attention(x, config=config_embedder["attention"], mask=sequence_mask)  # [N, T, d_model]
+            d_model = config_embedder["attention"]["num_heads"] * config_embedder["attention"]["head_dim"]
+        if config_embedder["rnn"]["enabled"]:
+            x = self._stacked_rnn(x, config=config_embedder["rnn"], mask=sequence_mask)
+            d_model = config_embedder["rnn"]["cell_dim"] * 2
+        if d_model is None:
+            d_model = 1024  # TODO вынести куда-то
+
+        return x, d_model
 
     def _get_feed_dict(self, examples, training):
         # tokens
@@ -439,13 +502,15 @@ class RelationExtractor:
         logits - tf.Tensor of shape [batch_size, num_entities, num_entities, num_relations]
         """
         logits_shape = tf.shape(logits)  # [4]
-        labels = tf.broadcast_to(self.config['model']['re']['no_rel_id'], logits_shape[:3])  # [batch_size, num_entities, num_entities]
+        labels = tf.broadcast_to(self.config['model']['re']['no_rel_id'],
+                                 logits_shape[:3])  # [batch_size, num_entities, num_entities]
         labels = tf.tensor_scatter_nd_update(
             tensor=labels,
             indices=self.type_ids_ph[:, :-1],
             updates=self.type_ids_ph[:, -1],
         )  # [batch_size, num_entities, num_entities]
-        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits)  # [batch_size, num_entities, num_entities]
+        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels,
+                                                                          logits=logits)  # [batch_size, num_entities, num_entities]
         mask = tf.cast(tf.sequence_mask(self.num_entities_ph), tf.float32)  # [batch_size, num_entities]
         masked_per_example_loss = per_example_loss * mask[:, :, None] * mask[:, None, :]
         total_loss = tf.reduce_sum(masked_per_example_loss)
