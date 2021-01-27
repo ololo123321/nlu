@@ -1,4 +1,3 @@
-from typing import Tuple
 import tensorflow as tf
 
 
@@ -29,7 +28,7 @@ def compute_f1(preds, labels):
         return {'precision': prec, 'recall': recall, 'f1': f1}
 
 
-def infer_entities_bounds(x, label_ids: tf.Tensor, bound_ids: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+def infer_entities_bounds(label_ids: tf.Tensor, bound_ids: tf.Tensor) -> tf.Tensor:
     """
     Вывод индексов первого или последнего токена сущностей
     :param x: tf.Tensor of shape [N, T, D]
@@ -58,8 +57,7 @@ def infer_entities_bounds(x, label_ids: tf.Tensor, bound_ids: tf.Tensor) -> Tupl
     y_coord = tf.reshape(res, [-1, 1])  # [N * num_entities_max, 1]
     coords = tf.concat([x_coord, y_coord], axis=-1)  # [N * num_entities_max, 2]
 
-    x = tf.gather_nd(x, coords)
-    return x, coords, num_entities
+    return coords
 
 
 def add_ones(x):

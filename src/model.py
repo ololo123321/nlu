@@ -334,13 +334,18 @@ class JointModelV1:
                     x = tf.keras.layers.LayerNormalization()(x)
 
             # обучаемые с нуля верхние слои:
-            x, d_model = self._build_encoder_layers(x, config=self.config["model"]["event"])
+            x, d_model = self._build_encoder_layers(x, config=self.config["model"]["embedder"])
+
+            def get_embeddings(emb_token, coords):
+                batch_size = tf.shape(emb_token)[0]
+                res = tf.gather_nd(emb_token, coords)  # [N * num_entities_max, d_model]
+                res = tf.reshape(res, [batch_size, -1, d_model])  # [N, num_entities_max, d_model]
+                return res
 
             # векторы именных сущностей
-            bound_ids_entity = tf.constant(self.config["model"]["ner"]["start_ids_entity"])
-            entity_emb, _, num_events = infer_entities_bounds(
-                x, label_ids=self.ner_labels_entities_ph, bound_ids=bound_ids_entity
-            )
+            bound_ids_entity = tf.constant(self.config["model"]["ner"]["start_ids"])
+            entity_coords = infer_entities_bounds(label_ids=self.ner_labels_entities_ph, bound_ids=bound_ids_entity)
+            entity_emb = get_embeddings(x, coords=entity_coords)
 
             # поиск триггеров событий
             num_labels_event = self.config["model"]["event"]["num_labels"]  # включая "O"
@@ -349,7 +354,8 @@ class JointModelV1:
 
             # векторы событий
             bound_ids_event = tf.constant(self.config["model"]["event"]["start_ids"])
-            event_emb, _, num_events = infer_entities_bounds(x, label_ids=event_labels, bound_ids=bound_ids_event)
+            event_coords = infer_entities_bounds(label_ids=event_labels, bound_ids=bound_ids_event)
+            event_emb = get_embeddings(x, coords=event_coords)
 
             # получение логитов пар (событие, именная сущность)
             head_dim = dep_dim = self.config["model"]["re"]["bilinear"]["hidden_dim"]
@@ -357,7 +363,7 @@ class JointModelV1:
                 num_mlp_layers=self.config["model"]["re"]["mlp"]["num_layers"],
                 head_dim=head_dim,
                 dep_dim=dep_dim,
-                output_dim=self.config["model"]["event"]["num_roles"],
+                output_dim=self.config["model"]["event"]["num_labels"],
                 dropout=self.config["model"]["re"]["mlp"]["dropout"],
                 activation=self.config["model"]["re"]["mlp"]["activation"]
             )
@@ -427,7 +433,8 @@ class JointModelV1:
         self.sequence_len_ph = tf.placeholder(tf.int32, shape=[None], name="sequence_len_ph")
 
         # для эмбеддингов сущнсотей
-        self.ner_entities_labels_ph = tf.placeholder(tf.int32, shape=[None, None], name="ner_ph")
+        self.ner_labels_entities_ph = tf.placeholder(tf.int32, shape=[None, None], name="ner_labels_entities_ph")
+        self.ner_labels_event_ph = tf.placeholder(tf.int32, shape=[None, None], name="ner_labels_event_ph")
 
         # для маскирования пар (событие, сущность)
         self.num_events_ph = tf.placeholder(tf.int32, shape=[None], name="num_events_ph")

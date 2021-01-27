@@ -4,7 +4,7 @@ from argparse import ArgumentParser
 
 import tensorflow as tf
 
-from src.model import RelationExtractor
+from src.model import JointModelV1
 from src.preprocessing import ExampleEncoder, ExamplesLoader, NerEncodings
 from src.utils import check_entities_spans
 
@@ -15,14 +15,15 @@ NER_SUFFIX_JOINER = '-'
 def main(args):
     loader = ExamplesLoader(
         ner_encoding=NerEncodings.BILOU,  # TODO: добавить в конфиг и использовать при инференсе
-        ner_suffix_joiner=NER_SUFFIX_JOINER  # TODO: добавить в конфиг и использовать при инференсе
+        ner_suffix_joiner=NER_SUFFIX_JOINER,  # TODO: добавить в конфиг и использовать при инференсе
+        event_tags={"Bankruptcy"}
     )
 
     examples_train = loader.load_examples(
         data_dir=args.train_data_dir,
         n=None,
-        split=bool(args.split), # TODO: добавить в конфиг и использовать при инференсе
-        window=args.window, # TODO: добавить в конфиг и использовать при инференсе
+        split=bool(args.split),  # TODO: добавить в конфиг и использовать при инференсе
+        window=args.window,  # TODO: добавить в конфиг и использовать при инференсе
     )
 
     examples_valid = loader.load_examples(
@@ -58,7 +59,7 @@ def main(args):
     start_ids_entity = []
     start_ids_event = []
     event_tag = "BANKRUPTCY"
-    for label, i in example_encoder.vocab_ner.encodings:
+    for label, i in example_encoder.vocab_ner.encodings.items():
         if label.startswith("B"):
             if event_tag.endswith(event_tag):
                 start_ids_event.append(i)
@@ -164,7 +165,7 @@ def main(args):
 
     tf.reset_default_graph()
     sess = tf.Session()
-    model = RelationExtractor(sess, config)
+    model = JointModelV1(sess, config)
     model.build()
     model.initialize()
 
@@ -199,7 +200,8 @@ def main(args):
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         no_rel_id=example_encoder.vocab_re.get_id("O"),
-        id2label=example_encoder.vocab_re.inv_encodings,
+        id2label_ner=example_encoder.vocabs_events[event_tag].inv_encodings,
+        id2label_roles=example_encoder.vocab_re.inv_encodings,
         checkpoint_path=checkpoint_path
     )
 
