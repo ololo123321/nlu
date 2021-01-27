@@ -95,12 +95,15 @@ def main(args):
             },
             # поиск
             "ner": {
-                "start_ids": start_ids_entity
+                "start_ids": start_ids_entity,
+                "other_label_id": 0
             },
             # событие
             "event": {
                 "num_labels": example_encoder.vocab_re.size,  # TODO: должен быть отдельный vocab под событие
-                "start_ids": start_ids_event
+                "start_ids": start_ids_event,
+                "tag": "Bankruptcy",
+                "other_label_id": 0
             },
             # конфигурация головы, решающей relation extraction
             "re": {
@@ -127,8 +130,7 @@ def main(args):
                     "num_labels": example_encoder.vocab_re.size,
                     "hidden_dim": 128  # TODO: вынести в аргументы
                 },
-                "no_rel_id": example_encoder.vocab_re.get_id("O"),
-                "ner_other_label_id": example_encoder.vocab_ner.get_id("O")
+                "no_rel_id": example_encoder.vocab_re.get_id("O")
             },
         },
         "optimizer": {

@@ -356,9 +356,14 @@ class JointModelV1:
         num_tokens_max = max(sequence_len)
         tokens = [x + [pad] * (num_tokens_max - l) for x, l in zip(tokens, sequence_len)]
 
-        # ner labels
-        other_label_id = self.config["model"]["re"]["ner_other_label_id"]
+        # ner labels (entities)
+        other_label_id = self.config["model"]["ner"]["other_label_id"]
         ner_labels = [x.labels + [other_label_id] * (num_tokens_max - l) for x, l in zip(examples, sequence_len)]
+
+        # ner labels (event)
+        event_tag = self.config["model"]["event"]["tag"]
+        other_label_id = self.config["model"]["event"]["other_label_id"]
+        ner_labels_event = [x.labels_events[event_tag] + [other_label_id] * (num_tokens_max - l) for x, l in zip(examples, sequence_len)]
 
         # entities
         num_entities = [x.num_entities for x in examples]
@@ -402,7 +407,8 @@ class JointModelV1:
         feed_dict = {
             self.tokens_ph: tokens,
             self.sequence_len_ph: sequence_len,
-            self.ner_entities_labels_ph: ner_labels,
+            self.ner_labels_entities_ph: ner_labels,
+            self.ner_labels_event_ph: ner_labels_event,
             self.num_entities_ph: num_entities,
             self.entity_start_ids_ph: entity_start_ids,
             self.entity_end_ids_ph: entity_end_ids,

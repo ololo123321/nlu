@@ -13,14 +13,6 @@ from rusenttokenize import ru_sent_tokenize
 TOKENS_EXPRESSION = re.compile(r"\w+|[^\w\s]")
 
 
-# TOKENS_EXPRESSION = re.compile("|".join([  # порядок выражений важен!
-#     r"[А-ЯA-Z]\w*[\.-]?\w+",  # Foo.bar -> Foo.Bar; Foo.bar -> Foo.bar
-#     r"[а-яa-z]\w*[\.-]?[а-яa-z]\w*",  # foo.bar -> foo.bar
-#     r"\w+",  # слова, числа
-#     r"[^\w\s]"  # пунктуация
-# ]))
-
-
 class SpecialSymbols:
     CLS = '[CLS]'
     SEP = '[SEP]'
@@ -40,6 +32,11 @@ class BertEncodings:
 class NerEncodings:
     BIO = "bio"
     BILOU = "bilou"
+
+
+class NerPrefixJoiners:
+    UNDERSCORE = "_"
+    HYPHEN = "-"
 
 
 class BadLineException(Exception):
@@ -165,7 +162,7 @@ class Example(ReprMixin):
         self.entities = entities
         self.arcs = arcs
         self.label = label  # в случае классификации предложений
-        self.labels_event = labels_events  # NER-лейблы события
+        self.labels_events = labels_events  # NER-лейблы события
 
     @property
     def num_tokens(self):
@@ -195,6 +192,7 @@ class Example(ReprMixin):
                 continue
             tokens = self.tokens[start:end]
             labels = self.labels[start:end]
+            labels_events = {k: v[start:end] for k, v in self.labels_events.items()}
             entities = []
             entity_ids = set()
             for x in self.entities:
@@ -213,7 +211,8 @@ class Example(ReprMixin):
                 tokens=tokens,
                 labels=labels,
                 entities=entities,
-                arcs=arcs
+                arcs=arcs,
+                labels_events=labels_events
             )
             res.append(x)
         return res
@@ -377,61 +376,98 @@ class ExamplesLoader:
         RE:
         * оба аргумента отношений есть в entities
         """
+        # обязателен айдишник
         assert example.id is not None, f"example {example} has no id!"
         prefix = f"[{example.id}]: "
 
+        # ner-кодировка
         assert self.ner_encoding in {NerEncodings.BIO, NerEncodings.BILOU}, \
             f"expected ner_encoding {NerEncodings.BIO} or {NerEncodings.BILOU}, got {self.ner_encoding}"
-        assert len(example.tokens) == len(example.labels), \
-            prefix + f"tokens and labels mismatch, {len(example.tokens)} != {len(example.labels)}"
 
-        entity_ids = set()
+        num_tokens = len(example.tokens)
+
+        # биекция между токенами и лейблами
+        assert num_tokens == len(example.labels), \
+            prefix + f"tokens and labels mismatch, {num_tokens} != {len(example.labels)}"
+
+        entity_ids_all = set()
+        entity_ids_wo_events = set()
         entity_spans = set()
+        event2entities = defaultdict(set)
         for entity in example.entities:
+            # обязателен айдишник
             assert entity.id is not None, \
                 prefix + f"[{entity}] entity has no id!"
-            assert entity.start_token_id <= entity.end_token_id, \
-                prefix + f"[{entity}] strange entity span"
-            assert entity.start_token_id >= 0, prefix + f"[{entity}] strange start"
-            assert entity.end_token_id < len(example.tokens), \
-                prefix + f"[{entity}] strange entity end: {entity.end_token_id}, but num tokens is {len(example.tokens)}"
+
+            # проверка валидности спана
+            assert 0 <= entity.start_token_id <= entity.end_token_id < num_tokens, \
+                prefix + f"[{entity}] strange entity span: " \
+                f"start token id: {entity.start_token_id}, end token id: {entity.end_token_id}. num tokens: {num_tokens}"
+
+            # проверка корректности соответстия токенов сущности токенам примера
             expected_tokens = example.tokens[entity.start_token_id:entity.end_token_id + 1]
             assert expected_tokens == entity.tokens, \
                 prefix + f"[{entity}] tokens and example tokens mismatch: {entity.tokens} != {expected_tokens}"
-            expected_labels = example.labels[entity.start_token_id:entity.end_token_id + 1]
+
+            # проверка корректности соответстия лейблов сущности лейблам примера
+            if entity.is_event_trigger:
+                ner_labels = example.labels_events[entity.label]
+            else:
+                ner_labels = example.labels
+            expected_labels = ner_labels[entity.start_token_id:entity.end_token_id + 1]
             assert expected_labels == entity.labels, \
                 prefix + f"[{entity}]: labels and example labels mismatch: {entity.labels} != {expected_labels}"
-            entity_ids.add(entity.id)
-            entity_spans.add((entity.start_token_id, entity.end_token_id))
 
-        assert len(example.entities) == len(entity_ids), \
+            # кэш
+            entity_ids_all.add(entity.id)
+            entity_spans.add((entity.start_token_id, entity.end_token_id))
+            if entity.is_event_trigger:
+                event2entities[entity.label].add(entity.id)
+            else:
+                entity_ids_wo_events.add(entity.id)
+
+        # проверка уникальности сущностей
+        assert len(example.entities) == len(entity_ids_all), \
             prefix + f"entity ids are not unique: {len(example.entities)} != {len(entity_ids)}"
 
+        # проверка биекции между множеством спанов и множеством сущностей.
+        # пока предполагается её наличие.
         assert len(example.entities) == len(entity_spans), \
-            prefix + f"there are overlapping entitie: " \
-                f"number of entities is {len(example.entities)}, but number of unique text spans is {len(entity_spans)}"
+            prefix + f"there are span duplicates: " \
+            f"number of entities is {len(example.entities)}, but number of unique text spans is {len(entity_spans)}"
 
-        if len(entity_ids) == 0:
-            assert set(example.labels) == {self.ner_label_other}, \
-                prefix + f"ner labels and named entities mismatch: ner labels are {set(example.labels)}, " \
+        def check_ner_labels(ent_ids, labels, ner_label_other):
+            """проверка непротиворечивости множества сущностей лейблам"""
+            if len(ent_ids) == 0:
+                assert set(labels) == {ner_label_other}, \
+                    prefix + f"ner labels and named entities mismatch: ner labels are {set(labels)}, " \
                     f"but there are no entities in example."
-        else:
-            assert set(example.labels) != {self.ner_label_other}, \
-                prefix + f"ner labels and named entities mismatch: ner labels are {set(example.labels)}, " \
-                    f"but there is at least one entity in example."
+            else:
+                assert set(labels) != {ner_label_other}, \
+                    prefix + f"ner labels and named entities mismatch: ner labels are {set(labels)}, " \
+                    f"but there are following entities in example: {ent_ids}"
+
+        check_ner_labels(ent_ids=entity_ids_wo_events, labels=example.labels, ner_label_other=self.ner_label_other)
+
+        for k, v in event2entities.items():
+            check_ner_labels(ent_ids=v, labels=example.labels_events[k], ner_label_other=self.ner_label_other)
 
         arc_args = []
         for arc in example.arcs:
-            assert arc.head in entity_ids, \
+            # проверка того, что в примере есть исходящая вершина
+            assert arc.head in entity_ids_all, \
                 prefix + f"something is wrong with arc {arc.id}: head {arc.head} is unknown"
-            assert arc.dep in entity_ids, \
+            # проверка того, что в примере есть входящая вершина
+            assert arc.dep in entity_ids_all, \
                 prefix + f"something is wrong with arc {arc.id}: dep {arc.dep} is unknown"
             arc_args.append((arc.head, arc.dep))
+        # проверка того, что одному ребру соответствует одно отношение
         if len(arc_args) != len(set(arc_args)):
             arc_counts = {k: v for k, v in Counter(arc_args).items() if v > 1}
             raise AssertionError(prefix + f'there duplicates in arc args: {arc_counts}')
 
         if self.ner_encoding == NerEncodings.BILOU:
+            # проверка того, что число начал сущности равно числу концов
             num_start_ids = sum(x.startswith("B") for x in example.labels)
             num_end_ids = sum(x.startswith("L") for x in example.labels)
             assert num_start_ids == num_end_ids, \
@@ -497,7 +533,7 @@ class ExamplesLoader:
 
         # .ann
         ner_labels = [self.ner_label_other] * len(text_tokens)
-        ner_labels_event = {event_tag: ner_labels.copy() for event_tag in self.event_tags}
+        ner_labels_events = {event_tag: ner_labels.copy() for event_tag in self.event_tags}
         entities = []
         arcs = []
         arcs_used = set()  # в арках бывают дубликаты, пример: R35, R36 в 31339011023601075299026_18_part_1.ann
@@ -593,7 +629,7 @@ class ExamplesLoader:
 
                         # запись лейблов
                         if entity_label in self.event_tags:
-                            ner_labels_event[entity_label][token_id] = label
+                            ner_labels_events[entity_label][token_id] = label
                         else:
                             ner_labels[token_id] = label
 
@@ -686,7 +722,7 @@ class ExamplesLoader:
             labels=ner_labels,
             entities=entities,
             arcs=arcs,
-            labels_events=ner_labels_event
+            labels_events=ner_labels_events
         )
 
         return example
