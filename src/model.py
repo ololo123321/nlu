@@ -397,9 +397,6 @@ class JointModelV1:
         # ner labels (entities)
         other_label_id = self.config["model"]["ner"]["other_label_id"]
         ner_labels = [x.labels + [other_label_id] * (num_tokens_max - l) for x, l in zip(examples, sequence_len)]
-
-        # entities TODO: ченкуть, что всё ок, если нет сущностей и/или нет событий
-        num_events = [x.num_events for x in examples]
         num_entities_other = [x.num_entities_wo_events for x in examples]
 
         id2index = {}
@@ -417,20 +414,19 @@ class JointModelV1:
                 id_dep = id2index[(x.id, arc.dep)]
                 type_ids.append((i, id_head, id_dep, arc.rel))
 
-        # если в батче нет ни одного отношения, то не получится посчитать лосс.
-        # решение - добавить одно отношение с лейблом NO_RELATION
-        if len(type_ids) == 0:
-            for i, x in enumerate(examples):
-                if x.num_entities > 0:
-                    type_ids.append((i, 0, 0, self.config['model']['re']['no_rel_id']))
-                    break
+        # # если в батче нет ни одного отношения, то не получится посчитать лосс.
+        # # решение - добавить одно отношение с лейблом NO_RELATION
+        # if len(type_ids) == 0:
+        #     for i, x in enumerate(examples):
+        #         if x.num_entities > 0:
+        #             type_ids.append((i, 0, 0, self.config['model']['re']['no_rel_id']))
+        #             break
 
         # feed_dict
         feed_dict = {
             self.tokens_ph: tokens,
             self.sequence_len_ph: sequence_len,
             self.ner_labels_entities_ph: ner_labels,
-            self.num_events_ph: num_events,
             self.num_other_entities_ph: num_entities_other,
             self.type_ids_ph: type_ids,
             self.training_ph: training
@@ -444,6 +440,7 @@ class JointModelV1:
                 x.labels_events[event_tag] + [other_label_id] * (num_tokens_max - l)
                 for x, l in zip(examples, sequence_len)
             ]
+            feed_dict[self.num_events_ph] = [x.num_events for x in examples]
 
         return feed_dict, id2index
 
