@@ -428,7 +428,7 @@ class ExamplesLoader:
 
         # проверка уникальности сущностей
         assert len(example.entities) == len(entity_ids_all), \
-            prefix + f"entity ids are not unique: {len(example.entities)} != {len(entity_ids)}"
+            prefix + f"entity ids are not unique: {len(example.entities)} != {len(entity_ids_all)}"
 
         # проверка биекции между множеством спанов и множеством сущностей.
         # пока предполагается её наличие.
