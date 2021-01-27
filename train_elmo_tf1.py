@@ -36,8 +36,10 @@ def main(args):
     print("num train examples:", len(examples_train))
     print("num valid examples:", len(examples_valid))
 
-    examples_train = [x for x in examples_train if len(x.entities) > 0]
-    examples_valid = [x for x in examples_valid if len(x.entities) > 0]
+    # удаление тривиальных примеров
+    # TODO: подумать, как с такими лучше быть на инференсе
+    examples_train = [x for x in examples_train if x.num_events != 0 and x.num_entities_wo_events != 0]
+    examples_valid = [x for x in examples_valid if x.num_events != 0 and x.num_entities_wo_events != 0]
 
     print("num train examples filtered:", len(examples_train))
     print("num valid examples filtered:", len(examples_valid))
