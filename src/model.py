@@ -1,5 +1,4 @@
 import random
-# import json
 import os
 from collections import defaultdict
 
@@ -7,11 +6,6 @@ import tensorflow as tf
 import tensorflow_hub as hub
 import numpy as np
 from sklearn.metrics import classification_report
-
-from IPython.display import clear_output
-from matplotlib import pyplot as plt
-
-# from bert.modeling import BertModel, BertConfig
 
 from .utils import compute_f1, infer_entities_bounds
 from .layers import DotProductAttention, GraphEncoder, GraphEncoderInputs
@@ -21,15 +15,14 @@ from .preprocessing import Arc
 
 # model
 
-class JointModel:
+class JointModelV1:
     """
-    Модель принимает на вход текст и ищет в нём:
-    * именные сущности
-    * события, а также роли именных сущностей в событиях
-    * семантические отношения между именными сущностями
-    * атрибуты событий и именных сущностей [в планах]
+    Функционал:
+    * ищется ровно одно событие (NER + построение маркированных рёбер event -> entity)
+
+    Допущения:
+    * NER для старых именных сущностей (ORG, PER, LOC, MEDIA, SPORT) уже решён
     """
-    scope = "re_head"
 
     def __init__(self, sess, config):
         """
@@ -49,14 +42,14 @@ class JointModel:
         # placeholders
         self.tokens_ph = None
         self.sequence_len_ph = None
-        self.num_entities_ph = None
-        self.ner_entities_labels_ph = None
+        self.num_entities_ph = None  # TODO: разделить на num_entities и num_events
+        self.ner_labels_entities_ph = None
         self.entity_start_ids_ph = None
         self.entity_end_ids_ph = None
         self.type_ids_ph = None
         self.training_ph = None
         self.lr_ph = None
-        self.ner_event_labels_ph = None
+        self.ner_labels_event_ph = None
 
         # некоторые нужные тензоры
         self.rel_labels_pred = None
@@ -77,38 +70,10 @@ class JointModel:
 
         x = self._build_embedder()
 
-        # поиск именных сущностей
-        num_labels = 10  # TODO
-        use_crf = True  # TODO
-        # TODO: иметь возможность подгрузить предобученную голову. если подгружается предобученная, то учить не нужно
-        x_ner, ner_labels_pred = self._build_ner_head(
-            x, num_labels=num_labels, use_crf=use_crf, reuse=False, config=self.config["model"]["ner"]
-        )
+        event_logits_train, event_entity_role_logits_train = self._build_event_head(x, training=True)
+        event_logits_inference, event_entity_role_logits_inference = self._build_event_head(x, training=False)
 
-        # вывод эмбеддингов именных сущностей
-        bound_ids = tf.constant([1])  # TODO
-        entities_emb_train, _, _ = infer_entities_bounds(
-            x_ner, label_ids=self.ner_entities_labels_ph, bound_ids=bound_ids
-        )
-        entities_emb_inference, _, _ = infer_entities_bounds(
-            x_ner, label_ids=ner_labels_pred, bound_ids=bound_ids
-        )
-
-        # событие
-        roles_logits_train, event_entity_role_logits_train = self._build_event_head(
-            x,
-            ner_labels=self.ner_entities_labels_ph,
-            entities_emb=entities_emb_train,
-            training=True
-        )
-        roles_logits_inference, event_entity_role_logits_inference = self._build_event_head(
-            x,
-            ner_labels=ner_labels_pred,
-            entities_emb=entities_emb_inference,
-            training=False
-        )
-
-        self._set_loss(event_entity_role_logits=event_entity_role_logits_train, role_logits=roles_logits_train)
+        self._set_loss(event_entity_role_logits=event_entity_role_logits_train, event_logits=event_logits_train)
         self._set_train_op()
         self.sess.run(tf.global_variables_initializer())
 
@@ -119,42 +84,10 @@ class JointModel:
             no_rel_id: int,
             num_epochs=1,
             batch_size=128,
-            plot_step=10,
-            plot_train_steps=1000,
             train_op_name="train_op",
             id2label=None,
             checkpoint_path=None
     ):
-        train_loss = []
-        eval_loss = []
-
-        eval_las = []
-        eval_uas = []
-        clf_reports = []
-
-        def plot():
-            clear_output()
-
-            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
-
-            ax1.set_title("train loss")
-            ax1.plot(train_loss[-plot_train_steps:], label="loss")
-            ax1.grid()
-            ax1.legend()
-
-            ax2.set_title("eval loss")
-            ax2.plot(eval_loss, marker='o', label="total loss")
-            ax2.grid()
-            ax2.legend()
-
-            ax3.set_title("f1")
-            ax3.plot(eval_las, marker='o', label='right triple (a, b, r)')
-            ax3.plot(eval_uas, marker='o', label='right pair (a, b)')
-            ax3.legend()
-            ax3.grid()
-
-            plt.show()
-
         def print_clf_report(y_true, y_pred):
             if id2label is not None:
                 target_names = [id2label[i] for i in sorted(set(y_true) | set(y_pred))]
@@ -195,7 +128,6 @@ class JointModel:
             if self.config["optimizer"]["reduce_lr_on_plateau"]:
                 feed_dict[self.lr_ph] = lr
             _, loss = self.sess.run([train_op, self.loss], feed_dict=feed_dict)
-            train_loss.append(loss)
             # print(f"loss: {loss}")
 
             # if step % plot_step == 0:
@@ -212,7 +144,9 @@ class JointModel:
                     end = start + batch_size
                     examples_batch = eval_examples[start:end]
                     feed_dict, id2index = self._get_feed_dict(examples_batch, training=False)
-                    loss, rel_labels_pred = self.sess.run([self.loss, self.rel_labels_pred], feed_dict=feed_dict)
+                    loss, ner_labels_pred, rel_labels_pred = self.sess.run(
+                        [self.loss, self.ner_labels_pred, self.rel_labels_pred], feed_dict=feed_dict
+                    )
                     losses_tmp.append(loss)
 
                     for i, x in enumerate(examples_batch):
@@ -280,15 +214,6 @@ class JointModel:
 
                 epoch += 1
 
-                # eval_loss.append(np.mean(losses_tmp))
-
-                # eval_las.append(re_metrics.f1_arcs_types)
-                # eval_uas.append(re_metrics.f1_arcs)
-
-                # plot()
-        # plot()
-        return clf_reports
-
     def predict(self, examples, batch_size=128):
         filename2id_arc = defaultdict(int)
         for start in range(0, len(examples), batch_size):
@@ -341,24 +266,6 @@ class JointModel:
             raise NotImplementedError
         return x
 
-    def _build_ner_head(self, x, num_labels: int, use_crf: bool = False, reuse: bool = False, config: dict = None):
-        with tf.variable_scope("ner", reuse=reuse):
-            if config is not None:
-                x, _ = self._build_encoder_layers(x, config=config)
-            logits = tf.keras.layers.Dense(num_labels)(x)
-
-            if use_crf:
-                with tf.variable_scope("crf"):
-                    self.transition_params = tf.get_variable("transition_params",
-                                                             [num_labels, num_labels], dtype=tf.float32)
-                # ner_labels_pred: [N, T]
-                ner_labels_pred, _ = tf.contrib.crf.crf_decode(logits, self.transition_params, self.sequence_len_ph)
-            else:
-                ner_labels_pred = tf.argmax(logits, axis=-1)
-
-            # self.ner_labels_pred = tf.stop_gradient(self.ner_labels_pred)
-        return x, ner_labels_pred
-
     def _build_encoder_layers(self, x, config):
         """обучаемые с нуля верхние слои:"""
         sequence_mask = tf.sequence_mask(self.sequence_len_ph)
@@ -374,7 +281,11 @@ class JointModel:
             d_model = self.config["embedder"]["dim"]
         return x, d_model
 
-    def _build_event_head(self, x, ner_labels, entities_emb, training: bool = False):
+    def _build_event_head(self, x, training: bool = False):
+        """
+        elmo -> bilstm -> entity_embeddings, event_embeddings -> bilinear
+        training - параметр, от которого зависит то, какие лейблы событий использовать: предсказанные или истинные
+        """
         with tf.variable_scope("event_head", reuse=tf.AUTO_REUSE):
             config_re = self.config["model"]["re"]
 
@@ -385,7 +296,7 @@ class JointModel:
                 ner_emb = tf.keras.layers.Embedding(
                     input_dim=config_re["ner_embeddings"]["num_labels"],
                     output_dim=config_re["ner_embeddings"]["dim"]
-                )(ner_labels)
+                )(self.ner_labels_entities_ph)
                 ner_dropout = tf.keras.layers.Dropout(config_re["ner_embeddings"]["dropout"])
                 ner_emb = ner_dropout(ner_emb, training=self.training_ph)
 
@@ -406,32 +317,36 @@ class JointModel:
             # обучаемые с нуля верхние слои:
             x, d_model = self._build_encoder_layers(x, config=self.config["model"]["event"])
 
-            # поиск триггеров событий
-            num_roles = self.config["model"]["event"]["num_roles"]
-            roles_logits = tf.keras.layers.Dense(num_roles)(x)
-            roles_pred = tf.argmax(roles_logits, axis=-1)
+            # векторы именных сущностей
+            bound_ids_entity = tf.constant(self.config["model"]["ner"]["start_ids_entity"])
+            entity_emb, _, num_events = infer_entities_bounds(
+                x, label_ids=self.ner_labels_entities_ph, bound_ids=bound_ids_entity
+            )
 
-            # получение векторов событий
-            if training:
-                event_emb = self._get_entity_embeddings(x, d_model=d_model)
-                num_events = None  # TODO
-            else:
-                bound_ids = tf.constant([1])  # TODO
-                event_emb, _, num_events = infer_entities_bounds(x, label_ids=roles_pred, bound_ids=bound_ids)
+            # поиск триггеров событий
+            num_labels_event = self.config["model"]["event"]["num_labels"]  # включая "O"
+            event_logits = tf.keras.layers.Dense(num_labels_event)(x)
+            event_pred = tf.argmax(event_logits, axis=-1)
+
+            # векторы событий
+            label_ids = self.ner_labels_event_ph if training else event_pred
+            bound_ids_event = tf.constant(self.config["model"]["event"]["start_ids"])
+            event_emb, _, num_events = infer_entities_bounds(x, label_ids=label_ids, bound_ids=bound_ids_event)
 
             # получение логитов пар (событие, именная сущность)
+            head_dim = dep_dim = self.config["model"]["re"]["bilinear"]["hidden_dim"]
             pairs_encoder = GraphEncoder(
-                num_mlp_layers=1,  # TODO
-                head_dim=d_model,
-                dep_dim=d_model,
-                output_dim=num_roles,
-                dropout=0.2,  # TODO
-                activation="relu"  # TODO
+                num_mlp_layers=self.config["model"]["re"]["mlp"]["num_layers"],
+                head_dim=head_dim,
+                dep_dim=dep_dim,
+                output_dim=self.config["model"]["event"]["num_roles"],
+                dropout=self.config["model"]["re"]["mlp"]["dropout"],
+                activation=self.config["model"]["re"]["mlp"]["activation"]
             )
-            inputs = GraphEncoderInputs(head=event_emb, dep=entities_emb)
+            inputs = GraphEncoderInputs(head=event_emb, dep=entity_emb)
             event_entity_role_logits = pairs_encoder(inputs, training=self.training_ph)  # [N, num_events, num_entities, num_roles]
 
-        return roles_logits, event_entity_role_logits
+        return event_logits, event_entity_role_logits
 
     def _get_feed_dict(self, examples, training):
         # tokens
@@ -520,7 +435,7 @@ class JointModel:
 
         self.lr_ph = tf.placeholder(tf.float32, shape=None, name="lr_ph")
 
-    def _set_loss(self, event_entity_role_logits, role_logits):
+    def _set_loss(self, event_entity_role_logits, event_logits):
         """
         logits - tf.Tensor of shape [batch_size, num_entities, num_entities, num_relations]
         """
@@ -545,10 +460,9 @@ class JointModel:
 
         # поиск триггеров событий
         # TODO: рассмотреть случай crf
-        ner_labels = None  # TODO
         per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
-            labels=ner_labels,
-            logits=role_logits
+            labels=self.ner_labels_event_ph,
+            logits=event_logits
         )  # [batch_size, maxlen]
         mask = tf.cast(tf.sequence_mask(self.sequence_len_ph), tf.float32)  # [batch_size, maxlen]
         masked_per_example_loss = per_example_loss * mask  # [batch_size, maxlen]

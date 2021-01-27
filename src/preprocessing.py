@@ -113,12 +113,14 @@ class Vocab(ReprMixin):
         if isinstance(values, dict):  # str -> int
             self._value2id = values
             self._id2value = {v: k for k, v in values.items()}
-        else:
+        elif isinstance(values, set):
             special_value = "O"
             values -= {special_value}
             self._id2value = dict(enumerate(sorted(values), 1))
             self._id2value[0] = special_value
             self._value2id = {v: k for k, v in self._id2value.items()}
+        else:
+            raise
 
     @property
     def size(self):
@@ -143,7 +145,18 @@ SpanInfo = namedtuple("Span", ["span_chunks", "span_tokens"])
 
 
 class Example(ReprMixin):
-    def __init__(self, filename=None, id=None, text=None, tokens=None, labels=None, entities=None, arcs=None, label=None):
+    def __init__(
+            self,
+            filename=None,
+            id=None,
+            text=None,
+            tokens=None,
+            labels=None,
+            entities=None,
+            arcs=None,
+            label=None,
+            labels_events: Dict[str, List] = None
+    ):
         self.filename = filename
         self.id = id
         self.text = text
@@ -152,6 +165,7 @@ class Example(ReprMixin):
         self.entities = entities
         self.arcs = arcs
         self.label = label  # в случае классификации предложений
+        self.labels_event = labels_events  # NER-лейблы события
 
     @property
     def num_tokens(self):
@@ -248,13 +262,15 @@ class ExamplesLoader:
             ner_encoding: str = NerEncodings.BILOU,
             ner_label_other: str = "O",
             ner_suffix_joiner: str = '-',
-            fix_new_line_symbol: bool = True
+            fix_new_line_symbol: bool = True,
+            event_tags: Set[str] = None
     ):
         assert ner_encoding in {NerEncodings.BIO, NerEncodings.BILOU}
         self.ner_encoding = ner_encoding
         self.ner_label_other = ner_label_other
         self.ner_suffix_joiner = ner_suffix_joiner
         self.fix_new_line_symbol = fix_new_line_symbol
+        self.event_tags = event_tags if event_tags is not None else set()  # таги событий
 
     def load_examples(
             self,
@@ -481,6 +497,7 @@ class ExamplesLoader:
 
         # .ann
         ner_labels = [self.ner_label_other] * len(text_tokens)
+        ner_labels_event = {event_tag: ner_labels.copy() for event_tag in self.event_tags}
         entities = []
         arcs = []
         arcs_used = set()  # в арках бывают дубликаты, пример: R35, R36 в 31339011023601075299026_18_part_1.ann
@@ -490,6 +507,8 @@ class ExamplesLoader:
                 line = line.strip()
                 content = line.split('\t')
                 line_tag = content[0]
+
+                # сущности
                 if line_tag.startswith("T"):
                     # проверка того, что формат строки верный
                     try:
@@ -572,8 +591,11 @@ class ExamplesLoader:
 
                         assert token_id is not None
 
-                        # запись лейблов в ner_labels
-                        ner_labels[token_id] = label
+                        # запись лейблов
+                        if entity_label in self.event_tags:
+                            ner_labels_event[entity_label][token_id] = label
+                        else:
+                            ner_labels[token_id] = label
 
                         # вывод индекса токена начала и конца
                         if i == 0:
@@ -600,6 +622,7 @@ class ExamplesLoader:
                     )
                     entities.append(entity)
 
+                # отношения (relations)
                 elif line_tag.startswith("R"):
                     try:
                         _, relation = content
@@ -618,6 +641,7 @@ class ExamplesLoader:
                         arcs.append(arc)
                         arcs_used.add(arc_triple)
 
+                # события (events)
                 elif line_tag.startswith("E"):
                     # E0\tBankruptcy:T0 Bankrupt:T1 Bankrupt2:T2
                     event_args = content[1].split()
@@ -626,7 +650,9 @@ class ExamplesLoader:
                     event_triggers.add(id_head)
                     for dep in event_args:
                         rel, id_dep = dep.split(":")
-                        rel = re.sub(r'\d+', '', rel)  # если аргументов несколько, то 
+                        # если аргументов одной роли несколько, то всем, начиная со второго,
+                        # приписывается в конце номер (см. пример)
+                        rel = re.sub(r'\d+', '', rel)
                         arc = Arc(
                             id=line_tag,
                             head=id_head,
@@ -637,6 +663,15 @@ class ExamplesLoader:
                         if arc_triple not in arcs_used:
                             arcs.append(arc)
                             arcs_used.add(arc_triple)
+
+                # атрибуты сущностей и событий TODO: написать код
+                elif line_tag.startswith("M"):
+                    pass
+
+                # комментарии (annotations). их можно игнорить
+                elif line_tag.startswith("A"):
+                    pass
+
                 else:
                     raise Exception(f"invalid line: {line}")
 
@@ -650,7 +685,8 @@ class ExamplesLoader:
             tokens=text_tokens,
             labels=ner_labels,
             entities=entities,
-            arcs=arcs
+            arcs=arcs,
+            labels_events=ner_labels_event
         )
 
         return example
@@ -674,28 +710,45 @@ class ExampleEncoder:
 
         self.vocab_ner = None
         self.vocab_re = None
+        self.vocabs_events = {}
 
     def fit_transform(self, examples):
         self.fit(examples)
         return self.transform(examples)
 
     def fit(self, examples):
+        # инициализация значений словаря
         vocab_ner = set()
+        vocabs_events = defaultdict(set)
+
         prefixes = {"B", "I"}
-        if self.ner_encoding == "bilou":
+        if self.ner_encoding == NerEncodings.BILOU:
             prefixes |= {"L", "U"}
+
+        def extend_vocab(label_, ner_suffix_joiner, vocab_values):
+            if ner_suffix_joiner in label_:
+                # предполагаем, что каждая сущность может состоять из нескольких токенов
+                label_ = label_.split(ner_suffix_joiner)[-1]
+                for p in prefixes:
+                    vocab_values.add(p + ner_suffix_joiner + label_)
+            else:
+                vocab_values.add(label_)
+
         for x in examples:
             for label in x.labels:
-                if self.ner_suffix_joiner in label:
-                    # предполагаем, что каждая сущность может состоять из нескольких токенов
-                    label = label.split(self.ner_suffix_joiner)[-1]
-                    for prefix in prefixes:
-                        vocab_ner.add(prefix + self.ner_suffix_joiner + label)
-                        vocab_ner.add(prefix + self.ner_suffix_joiner + label)
-                else:
-                    vocab_ner.add(label)
+                extend_vocab(label, self.ner_suffix_joiner, vocab_ner)
+            for event_tag, labels in x.labels_events:
+                for label in labels:
+                    extend_vocab(label, self.ner_suffix_joiner, vocabs_events[event_tag])
+
         vocab_ner.add(self.ner_label_other)
         self.vocab_ner = Vocab(vocab_ner)
+
+        for k, v in vocabs_events.items():
+            v.add(self.ner_label_other)
+            vocabs_events[k] = Vocab(v)
+
+        self.vocabs_events = vocabs_events
 
         # arcs vocab
         vocab_re = set()

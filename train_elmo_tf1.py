@@ -54,6 +54,17 @@ def main(args):
     print("saving encodings...")
     example_encoder.save(encoder_dir=args.model_dir)
 
+    # вывод айдишников начала событий и остальных именых сущностей
+    start_ids_entity = []
+    start_ids_event = []
+    event_tag = "BANKRUPTCY"
+    for label, i in example_encoder.vocab_ner.encodings:
+        if label.startswith("B"):
+            if event_tag.endswith(event_tag):
+                start_ids_event.append(i)
+            else:
+                start_ids_entity.append(i)
+
     config = {
         "model": {
             # конфигурация веткоризации токенов
@@ -82,6 +93,15 @@ def main(args):
                     "recurrent_dropout": 0.0
                 }
             },
+            # поиск
+            "ner": {
+                "start_ids": start_ids_entity
+            },
+            # событие
+            "event": {
+                "num_labels": example_encoder.vocab_re.size,  # TODO: должен быть отдельный vocab под событие
+                "start_ids": start_ids_event
+            },
             # конфигурация головы, решающей relation extraction
             "re": {
                 "ner_embeddings": {
@@ -105,7 +125,7 @@ def main(args):
                 },
                 "bilinear": {
                     "num_labels": example_encoder.vocab_re.size,
-                    "hidden_dim": 128
+                    "hidden_dim": 128  # TODO: вынести в аргументы
                 },
                 "no_rel_id": example_encoder.vocab_re.get_id("O"),
                 "ner_other_label_id": example_encoder.vocab_ner.get_id("O")
@@ -119,7 +139,7 @@ def main(args):
             "max_steps_wo_improvement": 50,
             "lr_reduce_patience": 5,
             "lr_reduction_factor": 0.7,
-            # custome schedule (если True, то предыдущая опция игнорится)
+            # custom schedule (если True, то предыдущая опция игнорится)
             "custom_schedule": True,
             "min_lr": 1e-5,
             # opt name
