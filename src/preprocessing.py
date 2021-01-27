@@ -172,6 +172,14 @@ class Example(ReprMixin):
     def num_entities(self):
         return len(self.entities)
 
+    @property
+    def num_entities_wo_events(self):
+        return sum(not x.is_event_trigger for x in self.entities)
+
+    @property
+    def num_events(self):
+        return sum(x.is_event_trigger for x in self.entities)
+
     def chunks(self, window=1):
         if not self.text:
             print(f"[{self.id} WARNING]: empty text")
