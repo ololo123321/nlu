@@ -23,8 +23,8 @@ class BiLinear(tf.keras.layers.Layer):
     Билинейная форма:
     x = a*w*b^T + a*u + b*v + bias, где
     tensor name     shape
-    a               [N, T, D_a]
-    b               [N, T, D_b]
+    a               [N, T_a, D_a]
+    b               [N, T_b, D_b]
     w               [D_out, D_a, D_b]
     u               [D_a, D_out]
     v               [D_b, D_out]
