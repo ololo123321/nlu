@@ -781,7 +781,7 @@ class ExampleEncoder:
         for x in examples:
             for label in x.labels:
                 extend_vocab(label, self.ner_suffix_joiner, vocab_ner)
-            for event_tag, labels in x.labels_events:
+            for event_tag, labels in x.labels_events.items():
                 for label in labels:
                     extend_vocab(label, self.ner_suffix_joiner, vocabs_events[event_tag])
 
@@ -825,14 +825,27 @@ class ExampleEncoder:
             example_enc.tokens = ["[START]"] + example_enc.tokens + ["[END]"]
 
         # labels
-        labels_encoded = []
-        for label in example.labels:
-            label_enc = self.vocab_ner.get_id(label)
-            labels_encoded.append(label_enc)
-        if self.add_seq_bounds:
-            label = self.vocab_ner.get_id(self.ner_label_other)
-            labels_encoded = [label] + labels_encoded + [label]
-        example_enc.labels = labels_encoded
+        def encode_labels(labels, vocab, add_seq_bounds, ner_label_other):
+            labels_encoded = []
+            for label in labels:
+                label_enc = vocab.get_id(label)
+                labels_encoded.append(label_enc)
+            if add_seq_bounds:
+                label = vocab.get_id(ner_label_other)
+                labels_encoded = [label] + labels_encoded + [label]
+            # example_enc.labels = labels_encoded
+            return labels_encoded
+
+        example_enc.labels = encode_labels(
+            labels=example.labels, vocab=self.vocab_ner,
+            add_seq_bounds=self.add_seq_bounds, ner_label_other=self.ner_label_other
+        )
+        example_enc.labels_events = {}
+        for k, v in example.labels_events.items():
+            example_enc.labels_events[k] = encode_labels(
+                labels=v, vocab=self.vocabs_events[k],
+                add_seq_bounds=self.add_seq_bounds, ner_label_other=self.ner_label_other
+            )
 
         # entities
         example_enc.entities = deepcopy(example.entities)
@@ -852,6 +865,7 @@ class ExampleEncoder:
         return example_enc
     
     def save(self, encoder_dir):
+        # TODO: кодировки лейблов событий
         d = {
             "ner_encoding": self.ner_encoding,
             "ner_label_other": self.ner_label_other,
@@ -870,6 +884,7 @@ class ExampleEncoder:
 
     @classmethod
     def load(cls, encoder_dir):
+        # TODO: кодировки лейблов событий
         config = json.load(open(os.path.join(encoder_dir, "encoder_config.json")))
         enc = cls(**config)
 
