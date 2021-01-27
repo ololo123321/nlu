@@ -16,7 +16,7 @@ def main(args):
     loader = ExamplesLoader(
         ner_encoding=NerEncodings.BILOU,  # TODO: добавить в конфиг и использовать при инференсе
         ner_suffix_joiner=NER_SUFFIX_JOINER,  # TODO: добавить в конфиг и использовать при инференсе
-        event_tags={"Bankruptcy"}
+        event_tags={"Bankruptcy"}  # TODO: избавиться от хардкода
     )
 
     examples_train = loader.load_examples(
@@ -200,7 +200,7 @@ def main(args):
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         no_rel_id=example_encoder.vocab_re.get_id("O"),
-        id2label_ner=example_encoder.vocabs_events[event_tag].inv_encodings,
+        id2label_ner=example_encoder.vocabs_events["Bankruptcy"].inv_encodings,  # TODO: избавиться от хардкода
         id2label_roles=example_encoder.vocab_re.inv_encodings,
         checkpoint_path=checkpoint_path
     )

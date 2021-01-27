@@ -788,11 +788,10 @@ class ExampleEncoder:
         vocab_ner.add(self.ner_label_other)
         self.vocab_ner = Vocab(vocab_ner)
 
+        self.vocabs_events = {}
         for k, v in vocabs_events.items():
             v.add(self.ner_label_other)
-            vocabs_events[k] = Vocab(v)
-
-        self.vocabs_events = vocabs_events
+            self.vocabs_events[k] = Vocab(v)
 
         # arcs vocab
         vocab_re = set()

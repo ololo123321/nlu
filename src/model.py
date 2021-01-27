@@ -46,16 +46,18 @@ class JointModelV1:
         self.num_events_ph = None
         self.num_other_entities_ph = None
         self.ner_labels_entities_ph = None
+        self.ner_labels_event_ph = None
         self.type_ids_ph = None
         self.training_ph = None
         self.lr_ph = None
-        self.ner_labels_event_ph = None
 
         # некоторые нужные тензоры
         self.event_logits = None   # для расчёта loss
         self.event_entity_role_logits = None   # для расчёта loss
-        self.ner_labels_pred = None  # TODO
-        self.rel_labels_pred = None
+        self.ner_labels_pred = None
+        self.event_labels_pred = None
+        self.rel_labels_pred_train = None  # зависит от: ner_labels_entities_ph, ner_labels_event_ph
+        self.rel_labels_pred_inference = None  # зависит от: ner_labels_entities_ph, ner_labels_pred
         self.loss_ner = None
         self.loss_event_entity = None
         self.loss = None
@@ -66,21 +68,17 @@ class JointModelV1:
         self.reset_op = None
 
         # for debug
-        self.global_step = None
-        self.all_are_finite = None
-        self.x_span = None
+        self.event_emb_shape = None
+        self.entity_emb_shape = None
 
     def build(self):
         self._set_placeholders()
 
         x = self._build_embedder()
-
-        self._build_event_head(x, event_labels=self.ner_labels_event_ph)  # обучение
-        self._build_event_head(x, event_labels=self.ner_labels_pred)  # инференс
+        self._build_event_head(x)
 
         self._set_loss()
         self._set_train_op()
-        self.sess.run(tf.global_variables_initializer())
 
     def train(
             self,
@@ -153,7 +151,7 @@ class JointModelV1:
                     examples_batch = eval_examples[start:end]
                     feed_dict, id2index = self._get_feed_dict(examples_batch, training=False)
                     loss, ner_labels_pred, rel_labels_pred = self.sess.run(
-                        [self.loss, self.ner_labels_pred, self.rel_labels_pred],
+                        [self.loss, self.ner_labels_pred, self.rel_labels_pred_train],
                         feed_dict=feed_dict
                     )
 
@@ -239,7 +237,7 @@ class JointModelV1:
             end = start + batch_size
             examples_batch = examples[start:end]
             feed_dict, id2index = self._get_feed_dict(examples_batch, training=False)
-            rel_labels_pred = self.sess.run(self.rel_labels_pred, feed_dict=feed_dict)
+            rel_labels_pred = self.sess.run(self.rel_labels_pred_inference, feed_dict=feed_dict)
             d = {(id_example, i): id_entity for (id_example, id_entity), i in id2index.items()}
             assert len(d) == len(id2index)
             for i, x in enumerate(examples_batch):
@@ -300,7 +298,7 @@ class JointModelV1:
             d_model = self.config["embedder"]["dim"]
         return x, d_model
 
-    def _build_event_head(self, x, event_labels):
+    def _build_event_head(self, x):
         """
         elmo -> bilstm -> entity_embeddings, event_embeddings -> bilinear
         training - параметр, от которого зависит то, какие лейблы событий использовать: предсказанные или истинные
@@ -343,19 +341,25 @@ class JointModelV1:
                 return res
 
             # векторы именных сущностей
-            bound_ids_entity = tf.constant(self.config["model"]["ner"]["start_ids"])
+            bound_ids_entity = tf.constant(self.config["model"]["ner"]["start_ids"], dtype=tf.int32)
             entity_coords = infer_entities_bounds(label_ids=self.ner_labels_entities_ph, bound_ids=bound_ids_entity)
             entity_emb = get_embeddings(x, coords=entity_coords)
 
             # поиск триггеров событий
             num_labels_event = self.config["model"]["event"]["num_labels"]  # включая "O"
             self.event_logits = tf.keras.layers.Dense(num_labels_event)(x)
-            self.ner_labels_pred = tf.argmax(self.event_logits, axis=-1)
+            self.ner_labels_pred = tf.argmax(self.event_logits, axis=-1, output_type=tf.int32)
 
             # векторы событий
-            bound_ids_event = tf.constant(self.config["model"]["event"]["start_ids"])
-            event_coords = infer_entities_bounds(label_ids=event_labels, bound_ids=bound_ids_event)
-            event_emb = get_embeddings(x, coords=event_coords)
+            bound_ids_event = tf.constant(self.config["model"]["event"]["start_ids"], dtype=tf.int32)
+
+            # train
+            event_coords = infer_entities_bounds(label_ids=self.ner_labels_event_ph, bound_ids=bound_ids_event)
+            event_emb_train = get_embeddings(x, coords=event_coords)
+
+            # inference
+            event_coords = infer_entities_bounds(label_ids=self.ner_labels_pred, bound_ids=bound_ids_event)
+            event_emb_inference = get_embeddings(x, coords=event_coords)
 
             # получение логитов пар (событие, именная сущность)
             head_dim = dep_dim = self.config["model"]["re"]["bilinear"]["hidden_dim"]
@@ -367,8 +371,20 @@ class JointModelV1:
                 dropout=self.config["model"]["re"]["mlp"]["dropout"],
                 activation=self.config["model"]["re"]["mlp"]["activation"]
             )
-            inputs = GraphEncoderInputs(head=event_emb, dep=entity_emb)
+
+            # train
+            inputs = GraphEncoderInputs(head=event_emb_train, dep=entity_emb)
             self.event_entity_role_logits = pairs_encoder(inputs, training=self.training_ph)  # [N, num_events, num_entities, num_roles]
+            self.rel_labels_pred_train = tf.argmax(self.event_entity_role_logits, axis=-1, output_type=tf.int32)
+
+            # inference
+            inputs = GraphEncoderInputs(head=event_emb_inference, dep=entity_emb)
+            event_entity_role_logits_inference = pairs_encoder(inputs, training=self.training_ph)  # [N, num_events, num_entities, num_roles]
+            self.rel_labels_pred_inference = tf.argmax(event_entity_role_logits_inference, axis=-1, output_type=tf.int32)
+
+            # debug
+            self.event_emb_shape = tf.shape(event_emb_train)
+            self.entity_emb_shape = tf.shape(entity_emb)
 
     def _get_feed_dict(self, examples, training):
         # tokens
@@ -381,11 +397,6 @@ class JointModelV1:
         # ner labels (entities)
         other_label_id = self.config["model"]["ner"]["other_label_id"]
         ner_labels = [x.labels + [other_label_id] * (num_tokens_max - l) for x, l in zip(examples, sequence_len)]
-
-        # ner labels (event)
-        event_tag = self.config["model"]["event"]["tag"]
-        other_label_id = self.config["model"]["event"]["other_label_id"]
-        ner_labels_event = [x.labels_events[event_tag] + [other_label_id] * (num_tokens_max - l) for x, l in zip(examples, sequence_len)]
 
         # entities TODO: ченкуть, что всё ок, если нет сущностей и/или нет событий
         num_events = [x.num_events for x in examples]
@@ -405,6 +416,7 @@ class JointModelV1:
                 id_head = id2index[(x.id, arc.head)]
                 id_dep = id2index[(x.id, arc.dep)]
                 type_ids.append((i, id_head, id_dep, arc.rel))
+
         # если в батче нет ни одного отношения, то не получится посчитать лосс.
         # решение - добавить одно отношение с лейблом NO_RELATION
         if len(type_ids) == 0:
@@ -418,12 +430,20 @@ class JointModelV1:
             self.tokens_ph: tokens,
             self.sequence_len_ph: sequence_len,
             self.ner_labels_entities_ph: ner_labels,
-            self.ner_labels_event_ph: ner_labels_event,
             self.num_events_ph: num_events,
             self.num_other_entities_ph: num_entities_other,
             self.type_ids_ph: type_ids,
             self.training_ph: training
         }
+
+        if training:
+            # ner labels (event)
+            event_tag = self.config["model"]["event"]["tag"]
+            other_label_id = self.config["model"]["event"]["other_label_id"]
+            feed_dict[self.ner_labels_event_ph] = [
+                x.labels_events[event_tag] + [other_label_id] * (num_tokens_max - l)
+                for x, l in zip(examples, sequence_len)
+            ]
 
         return feed_dict, id2index
 
