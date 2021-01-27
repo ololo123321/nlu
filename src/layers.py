@@ -39,23 +39,23 @@ class BiLinear(tf.keras.layers.Layer):
 
     def call(self, inputs: BiLinearInputs, training=None, mask=None) -> tf.Tensor:
         """
-        head - tf.Tensor of shape [N, T, D_head] and type tf.float32
-        bep - tf.Tensor as shape [N, T, D_dep] and type tf.float32
-        :returns x - tf.Tensor of shape [N, T, T, output_dim] and type tf.float32
+        head - tf.Tensor of shape [N, T_head, D_head] and type tf.float32
+        dep - tf.Tensor as shape [N, T_dep, D_dep] and type tf.float32
+        :returns x - tf.Tensor of shape [N, T_head, T_dep, output_dim] and type tf.float32
         """
-        head = inputs.head
-        dep = inputs.dep
-        dep_t = tf.transpose(dep, [0, 2, 1])  # [N, right_dim, T]
-        x = tf.expand_dims(head, 1) @ self.w @ tf.expand_dims(dep_t, 1)  # [N, output_dim, T, T]
-        x = tf.transpose(x, [0, 2, 3, 1])  # [N, T, T, output_dim]
+        head = inputs.head  # [N, T_head, D_head]
+        dep = inputs.dep  # [N, T_dep, D_dep]
+        dep_t = tf.transpose(dep, [0, 2, 1])  # [N, D_dep, T_dep]
+        x = tf.expand_dims(head, 1) @ self.w @ tf.expand_dims(dep_t, 1)  # [N, output_dim, T_head, T_dep]
+        x = tf.transpose(x, [0, 2, 3, 1])  # [N, T_head, T_dep, output_dim]
 
-        head_u = tf.matmul(head, self.u)  # [N, T, output_dim]
-        x += tf.expand_dims(head_u, 2)  # [N, T, T, output_dim]
+        head_u = tf.matmul(head, self.u)  # [N, T_head, output_dim]
+        x += tf.expand_dims(head_u, 2)  # [N, T_head, T_dep, output_dim]
 
-        dep_v = tf.matmul(dep, self.v)  # [N, T, output_dim]
-        x += tf.expand_dims(dep_v, 2)  # [N, T, T, output_dim]
+        dep_v = tf.matmul(dep, self.v)  # [N, T_dep, output_dim]
+        x += tf.expand_dims(dep_v, 1)  # [N, T_head, T_dep, output_dim]
 
-        x += self.b[None, None, None, :]  # [N, T, T, output_dim]
+        x += self.b[None, None, None, :]  # [N, T_head, T_dep, output_dim]
         return x
 
 
@@ -159,9 +159,8 @@ class GraphEncoder(tf.keras.layers.Layer):
         )
 
     def call(self, inputs: GraphEncoderInputs, training: bool = False):
-        head, dep = inputs  # чтоб не отходить от API
-        head = self.mlp_head(head, training=training)  # [N, num_heads, type_dim]
-        dep = self.mlp_dep(dep, training=training)  # [N, num_deps, type_dim]
+        head = self.mlp_head(inputs.head, training=training)  # [N, num_heads, type_dim]
+        dep = self.mlp_dep(inputs.dep, training=training)  # [N, num_deps, type_dim]
         bilinear_inputs = BiLinearInputs(head=head, dep=dep)
         logits = self.bilinear(inputs=bilinear_inputs)  # [N, num_heads, num_deps, num_arc_labels]
         return logits

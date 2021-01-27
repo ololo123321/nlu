@@ -9,7 +9,6 @@ from itertools import accumulate
 from collections import namedtuple, Counter, defaultdict
 from rusenttokenize import ru_sent_tokenize
 
-
 TOKENS_EXPRESSION = re.compile(r"\w+|[^\w\s]")
 
 
@@ -173,12 +172,20 @@ class Example(ReprMixin):
         return len(self.entities)
 
     @property
+    def events(self):
+        return [x for x in self.entities if x.is_event_trigger]
+
+    @property
+    def entities_wo_events(self):
+        return [x for x in self.entities if not x.is_event_trigger]
+
+    @property
     def num_entities_wo_events(self):
-        return sum(not x.is_event_trigger for x in self.entities)
+        return len(self.entities_wo_events)
 
     @property
     def num_events(self):
-        return sum(x.is_event_trigger for x in self.entities)
+        return len(self.events)
 
     def chunks(self, window=1):
         if not self.text:
@@ -264,6 +271,7 @@ class ExamplesLoader:
     https://github.com/dialogue-evaluation/RuREBus
 
     """
+
     def __init__(
             self,
             ner_encoding: str = NerEncodings.BILOU,
@@ -410,7 +418,7 @@ class ExamplesLoader:
             # проверка валидности спана
             assert 0 <= entity.start_token_id <= entity.end_token_id < num_tokens, \
                 prefix + f"[{entity}] strange entity span: " \
-                f"start token id: {entity.start_token_id}, end token id: {entity.end_token_id}. num tokens: {num_tokens}"
+                    f"start token id: {entity.start_token_id}, end token id: {entity.end_token_id}. num tokens: {num_tokens}"
 
             # проверка корректности соответстия токенов сущности токенам примера
             expected_tokens = example.tokens[entity.start_token_id:entity.end_token_id + 1]
@@ -442,18 +450,18 @@ class ExamplesLoader:
         # пока предполагается её наличие.
         assert len(example.entities) == len(entity_spans), \
             prefix + f"there are span duplicates: " \
-            f"number of entities is {len(example.entities)}, but number of unique text spans is {len(entity_spans)}"
+                f"number of entities is {len(example.entities)}, but number of unique text spans is {len(entity_spans)}"
 
         def check_ner_labels(ent_ids, labels, ner_label_other):
             """проверка непротиворечивости множества сущностей лейблам"""
             if len(ent_ids) == 0:
                 assert set(labels) == {ner_label_other}, \
                     prefix + f"ner labels and named entities mismatch: ner labels are {set(labels)}, " \
-                    f"but there are no entities in example."
+                        f"but there are no entities in example."
             else:
                 assert set(labels) != {ner_label_other}, \
                     prefix + f"ner labels and named entities mismatch: ner labels are {set(labels)}, " \
-                    f"but there are following entities in example: {ent_ids}"
+                        f"but there are following entities in example: {ent_ids}"
 
         check_ner_labels(ent_ids=entity_ids_wo_events, labels=example.labels, ner_label_other=self.ner_label_other)
 
@@ -862,7 +870,7 @@ class ExampleEncoder:
             arcs_encoded.append(arc_enc)
         example_enc.arcs = arcs_encoded
         return example_enc
-    
+
     def save(self, encoder_dir):
         # TODO: кодировки лейблов событий
         d = {
@@ -874,10 +882,10 @@ class ExampleEncoder:
         }
         with open(os.path.join(encoder_dir, "encoder_config.json"), "w") as f:
             json.dump(d, f, indent=4)
-        
+
         with open(os.path.join(encoder_dir, "ner_encodings.json"), "w") as f:
             json.dump(self.vocab_ner.encodings, f, indent=4)
-        
+
         with open(os.path.join(encoder_dir, "re_encodings.json"), "w") as f:
             json.dump(self.vocab_re.encodings, f, indent=4)
 
@@ -892,7 +900,7 @@ class ExampleEncoder:
 
         re_encodings = json.load(open(os.path.join(encoder_dir, "re_encodings.json")))
         enc.vocab_re = Vocab(values=re_encodings)
-        
+
         return enc
 
 

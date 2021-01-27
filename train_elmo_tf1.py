@@ -13,10 +13,12 @@ NER_SUFFIX_JOINER = '-'
 
 
 def main(args):
+    event_tag = "Bankruptcy"
+
     loader = ExamplesLoader(
-        ner_encoding=NerEncodings.BILOU,  # TODO: добавить в конфиг и использовать при инференсе
+        ner_encoding=NerEncodings.BIO,  # TODO: добавить в конфиг и использовать при инференсе
         ner_suffix_joiner=NER_SUFFIX_JOINER,  # TODO: добавить в конфиг и использовать при инференсе
-        event_tags={"Bankruptcy"}  # TODO: избавиться от хардкода
+        event_tags={event_tag}  # TODO: избавиться от хардкода
     )
 
     examples_train = loader.load_examples(
@@ -44,11 +46,10 @@ def main(args):
     print("num train examples filtered:", len(examples_train))
     print("num valid examples filtered:", len(examples_valid))
 
-    add_seq_bounds = args.span_emb_type == 1
     example_encoder = ExampleEncoder(
-        ner_encoding=NerEncodings.BILOU,
+        ner_encoding=NerEncodings.BIO,
         ner_suffix_joiner=NER_SUFFIX_JOINER,
-        add_seq_bounds=add_seq_bounds
+        add_seq_bounds=False
     )
 
     examples_train_encoded = example_encoder.fit_transform(examples_train)
@@ -57,17 +58,8 @@ def main(args):
     print("saving encodings...")
     example_encoder.save(encoder_dir=args.model_dir)
 
-    # вывод айдишников начала событий и остальных именых сущностей
-    start_ids_entity = []
-    start_ids_event = []
-    event_tag = "BANKRUPTCY"
-    for label, i in example_encoder.vocab_ner.encodings.items():
-        if label.startswith("B"):
-            if event_tag.endswith(event_tag):
-                start_ids_event.append(i)
-            else:
-                start_ids_entity.append(i)
-
+    vocab_ner_event = example_encoder.vocabs_events[event_tag]
+    print(vocab_ner_event)
     config = {
         "model": {
             # конфигурация веткоризации токенов
@@ -98,14 +90,14 @@ def main(args):
             },
             # поиск
             "ner": {
-                "start_ids": start_ids_entity,
+                "start_ids": [i for label, i in example_encoder.vocab_ner.encodings.items() if label.startswith("B")],
                 "other_label_id": 0
             },
             # событие
             "event": {
-                "num_labels": example_encoder.vocab_re.size,  # TODO: должен быть отдельный vocab под событие
-                "start_ids": start_ids_event,
-                "tag": "Bankruptcy",
+                "num_labels": vocab_ner_event.size,  # TODO: должен быть отдельный vocab под событие
+                "start_ids": [i for label, i in vocab_ner_event.encodings.items() if label.startswith("B")],
+                "tag": event_tag,
                 "other_label_id": 0
             },
             # конфигурация головы, решающей relation extraction
@@ -202,7 +194,7 @@ def main(args):
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         no_rel_id=example_encoder.vocab_re.get_id("O"),
-        id2label_ner=example_encoder.vocabs_events["Bankruptcy"].inv_encodings,  # TODO: избавиться от хардкода
+        id2label_ner=example_encoder.vocabs_events[event_tag].inv_encodings,
         id2label_roles=example_encoder.vocab_re.inv_encodings,
         checkpoint_path=checkpoint_path
     )

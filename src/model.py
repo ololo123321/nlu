@@ -132,6 +132,9 @@ class JointModelV1:
             feed_dict, _ = self._get_feed_dict(examples_batch, training=True)
             if self.config["optimizer"]["reduce_lr_on_plateau"]:
                 feed_dict[self.lr_ph] = lr
+            # event_emb_shape, entity_emb_shape = self.sess.run([self.event_emb_shape, self.entity_emb_shape], feed_dict=feed_dict)
+            # print("event_emb_shape:", event_emb_shape)
+            # print("entity_emb_shape:", entity_emb_shape)
             _, loss = self.sess.run([train_op, self.loss], feed_dict=feed_dict)
             # print(f"loss: {loss}")
 
@@ -176,7 +179,7 @@ class JointModelV1:
                         y_pred_arcs_types.append(arcs_pred.flatten())
                 # events
                 print("ner result:")
-                print_clf_report(y_true_arcs_types, y_pred_arcs_types, id2label=id2label_ner)
+                print_clf_report(y_true_ner, y_pred_ner, id2label=id2label_ner)
 
                 # roles
                 y_true_arcs_types = np.concatenate(y_true_arcs_types)
@@ -402,9 +405,16 @@ class JointModelV1:
         id2index = {}
         for i, x in enumerate(examples):
             assert x.id is not None
+            idx_entity = 0
+            idx_event = 0
             for j, entity in enumerate(x.entities):
                 assert entity.id is not None
-                id2index[(x.id, entity.id)] = j
+                if entity.is_event_trigger:
+                    id2index[(x.id, entity.id)] = idx_event
+                    idx_event += 1
+                else:
+                    id2index[(x.id, entity.id)] = idx_entity
+                    idx_entity += 1
 
         # arcs
         type_ids = []
@@ -432,15 +442,26 @@ class JointModelV1:
             self.training_ph: training
         }
 
-        if training:
+        # if training:
             # ner labels (event)
-            event_tag = self.config["model"]["event"]["tag"]
-            other_label_id = self.config["model"]["event"]["other_label_id"]
-            feed_dict[self.ner_labels_event_ph] = [
-                x.labels_events[event_tag] + [other_label_id] * (num_tokens_max - l)
-                for x, l in zip(examples, sequence_len)
-            ]
-            feed_dict[self.num_events_ph] = [x.num_events for x in examples]
+        # TODO: при инференсе не знаем истинных лейблов событий! сделано пока без условия на training, чтоб ничего не ломалось
+        event_tag = self.config["model"]["event"]["tag"]
+        other_label_id = self.config["model"]["event"]["other_label_id"]
+        feed_dict[self.ner_labels_event_ph] = [
+            x.labels_events[event_tag] + [other_label_id] * (num_tokens_max - l)
+            for x, l in zip(examples, sequence_len)
+        ]
+        feed_dict[self.num_events_ph] = [x.num_events for x in examples]
+
+        # assert min(feed_dict[self.num_events_ph]) >= 1
+        # assert min(num_entities_other) >= 1
+        # print("min num events:", min(feed_dict[self.num_events_ph]))
+        # print("max num events:", max(feed_dict[self.num_events_ph]))
+        #
+        # print("min num entities:", min(num_entities_other))
+        # print("max num entities:", max(num_entities_other))
+        # print("num type_ids:", len(type_ids))
+        # print("type_ids:", type_ids)
 
         return feed_dict, id2index
 
@@ -484,7 +505,7 @@ class JointModelV1:
         )  # [batch_size, num_events, num_entities]
         mask_events = tf.cast(tf.sequence_mask(self.num_events_ph), tf.float32)  # [batch_size, num_events]
         mask_entities = tf.cast(tf.sequence_mask(self.num_other_entities_ph), tf.float32)  # [batch_size, num_entities]
-        masked_per_example_loss = per_example_loss * tf.expand_dims(mask_events, 1) * tf.expand_dims(mask_entities, 2)  # [batch_size, num_events, num_entities]
+        masked_per_example_loss = per_example_loss * tf.expand_dims(mask_events, 2) * tf.expand_dims(mask_entities, 1)  # [batch_size, num_events, num_entities]
         total_loss = tf.reduce_sum(masked_per_example_loss)  # None
         num_pairs = tf.cast(tf.reduce_sum(self.num_events_ph * self.num_other_entities_ph), tf.float32)
         self.loss_event_entity = total_loss / num_pairs
