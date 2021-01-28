@@ -433,13 +433,12 @@ class JointModelV1:
                 id_dep = id2index[(x.id, arc.dep)]
                 type_ids.append((i, id_head, id_dep, arc.rel))
 
-        # # если в батче нет ни одного отношения, то не получится посчитать лосс.
-        # # решение - добавить одно отношение с лейблом NO_RELATION
-        # if len(type_ids) == 0:
-        #     for i, x in enumerate(examples):
-        #         if x.num_entities > 0:
-        #             type_ids.append((i, 0, 0, self.config['model']['re']['no_rel_id']))
-        #             break
+        # если в батче нет ни одного отношения, то не получится посчитать лосс.
+        # решение - добавить одно отношение с лейблом NO_RELATION.
+        # должно гарантироваться, что в тензоре логитов размерности [batch_size, num_heads, num_deps, num_rels]
+        # каждого измерение не равно нулю.
+        if len(type_ids) == 0:
+            type_ids.append((0, 0, 0, 0))
 
         # feed_dict
         feed_dict = {

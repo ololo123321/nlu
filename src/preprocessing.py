@@ -872,7 +872,6 @@ class ExampleEncoder:
         return example_enc
 
     def save(self, encoder_dir):
-        # TODO: кодировки лейблов событий
         d = {
             "ner_encoding": self.ner_encoding,
             "ner_label_other": self.ner_label_other,
@@ -886,12 +885,14 @@ class ExampleEncoder:
         with open(os.path.join(encoder_dir, "ner_encodings.json"), "w") as f:
             json.dump(self.vocab_ner.encodings, f, indent=4)
 
+        with open(os.path.join(encoder_dir, "ner_encodings_events.json"), "w") as f:
+            json.dump({k: v.encodings for k, v in self.vocabs_events.items()}, f, indent=4)
+
         with open(os.path.join(encoder_dir, "re_encodings.json"), "w") as f:
             json.dump(self.vocab_re.encodings, f, indent=4)
 
     @classmethod
     def load(cls, encoder_dir):
-        # TODO: кодировки лейблов событий
         config = json.load(open(os.path.join(encoder_dir, "encoder_config.json")))
         enc = cls(**config)
 
@@ -900,6 +901,9 @@ class ExampleEncoder:
 
         re_encodings = json.load(open(os.path.join(encoder_dir, "re_encodings.json")))
         enc.vocab_re = Vocab(values=re_encodings)
+
+        d = json.load(open(os.path.join(encoder_dir, "ner_encodings_events.json")))
+        enc.vocabs_events = {k: Vocab(values=v) for k, v in d.items()}
 
         return enc
 
