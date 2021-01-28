@@ -36,8 +36,8 @@ def main(args):
     print("num valid examples:", len(examples_valid))
 
     # TODO: временное решение, чтоб всё работало
-    # examples_train = [x for x in examples_train if x.num_events != 0 and x.num_entities_wo_events != 0]
-    # examples_valid = [x for x in examples_valid if x.num_events != 0 and x.num_entities_wo_events != 0]
+    examples_train = [x for x in examples_train if x.num_events != 0 and x.num_entities_wo_events != 0]
+    examples_valid = [x for x in examples_valid if x.num_events != 0 and x.num_entities_wo_events != 0]
 
     print("num train examples filtered:", len(examples_train))
     print("num valid examples filtered:", len(examples_valid))
