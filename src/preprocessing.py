@@ -840,7 +840,8 @@ class ExampleEncoder:
         """
         example_enc = Example(
             filename=example.filename,
-            id=example.id
+            id=example.id,
+            text=example.text
         )
 
         # tokens

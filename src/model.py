@@ -265,16 +265,16 @@ class JointModelV1:
             d = {(id_example, i): id_entity for (id_example, id_entity), i in id2index.items()}
             start_event_ids = set(self.config["model"]["event"]["start_ids"])
             for i, x in enumerate(examples_batch):
-                if x.filename == "0000":
-                    print("id:", x.id)
-                    print("tokens:", x.tokens)
-                    print("num tokens:", x.num_tokens)
-                    print("num events:", num_events[i])
-                    print("num events batch:", num_events)
-                    print("num entities wo events:", num_entities[i])
-                    print("num entities wo events batch:", num_entities)
-                    print("ner labels event:", ner_labels_pred[i, :x.num_tokens])
-                    print("rel_labels_pred:", rel_labels_pred[i, :num_events[i], :num_entities[i]])
+                # if x.filename == "0000":
+                #     print("id:", x.id)
+                #     print("tokens:", x.tokens)
+                #     print("num tokens:", x.num_tokens)
+                #     print("num events:", num_events[i])
+                #     print("num events batch:", num_events)
+                #     print("num entities wo events:", num_entities[i])
+                #     print("num entities wo events batch:", num_entities)
+                #     print("ner labels event:", ner_labels_pred[i, :x.num_tokens])
+                #     print("rel_labels_pred:", rel_labels_pred[i, :num_events[i], :num_entities[i]])
 
                 # запись найденных событий (только токен начала)
                 # TODO: обобщить на произвольный спан
