@@ -10,7 +10,7 @@ from sklearn.metrics import classification_report
 from .utils import compute_f1, infer_entities_bounds
 from .layers import DotProductAttention, GraphEncoder, GraphEncoderInputs
 from .optimization import noam_scheme
-from .preprocessing import Arc
+from .preprocessing import Arc, Entity
 
 
 # model
@@ -241,7 +241,8 @@ class JointModelV1:
         # TODO: получать предсказанные события
         # TODO: заменять истинные события на предсказанные в инстансах класса Example
         filename2id_arc = defaultdict(int)
-        events_counter = defaultdict(int)
+        filenmae2id_entity_new = defaultdict(lambda: 500)  # TODO: костыль с 500
+        id_event_batch2id_event_file = {}
         for start in range(0, len(examples), batch_size):
             end = start + batch_size
             examples_batch = examples[start:end]
@@ -262,6 +263,7 @@ class JointModelV1:
 
             # TODO: нет биекции между парами (id_example, i) и id_entity (см. get_feed_dict)
             d = {(id_example, i): id_entity for (id_example, id_entity), i in id2index.items()}
+            start_event_ids = set(self.config["model"]["event"]["start_ids"])
             for i, x in enumerate(examples_batch):
                 if x.filename == "0000":
                     print("id:", x.id)
@@ -273,19 +275,39 @@ class JointModelV1:
                     print("num entities wo events batch:", num_entities)
                     print("ner labels event:", ner_labels_pred[i, :x.num_tokens])
                     print("rel_labels_pred:", rel_labels_pred[i, :num_events[i], :num_entities[i]])
-                for id_event, (j, t) in enumerate(zip(ner_labels_pred[i], x.tokens)):
-                    pass
+
+                # запись найденных событий (только токен начала)
+                # TODO: обобщить на произвольный спан
+                num_events_curr = 0
+                for id_label, token, span in zip(ner_labels_pred[i], x.tokens, x.tokens_spans):
+                    if id_label in start_event_ids:
+                        id_event_trigger = f"T{filenmae2id_entity_new[x.filename]}"
+                        id_event_batch2id_event_file[(x.id, num_events_curr)] = id_event_trigger
+                        event = Entity(
+                            id=id_event_trigger,
+                            start_index=span[0],
+                            end_index=span[1],
+                            text=token,
+                            label="Bankruptcy",  # TODO: убрать хардкод
+                            is_event_trigger=True
+                        )
+                        x.entities.append(event)
+                        num_events_curr += 1
+                        filenmae2id_entity_new[x.filename] += 1
+
+                assert num_events_curr == num_events[i], f"{num_events_curr} != {num_events[i]}"
+
+                # запись найденных отношений
                 for j in range(num_events[i]):
                     for k in range(num_entities[i]):
                         id_rel = rel_labels_pred[i, j, k]
                         if id_rel != 0:
-                            id_head = f"E{events_counter[x.filename]}"
+                            id_head = id_event_batch2id_event_file[(x.id, j)]
                             id_dep = d[(x.id, k)]  # компании не ищем, поэтому айдишник знаем
                             id_arc = filename2id_arc[x.filename]
                             arc = Arc(id=id_arc, head=id_head, dep=id_dep, rel=rel_labels_pred[i, j, k])
                             x.arcs.append(arc)
                             filename2id_arc[x.filename] += 1
-                            events_counter[x.filename] += 1
 
     def restore(self, model_dir):
         var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.scope)
@@ -509,20 +531,21 @@ class JointModelV1:
         self.tokens_ph = tf.placeholder(tf.string, shape=[None, None], name="tokens_ph")
         self.sequence_len_ph = tf.placeholder(tf.int32, shape=[None], name="sequence_len_ph")
 
-        # для эмбеддингов сущнсотей
+        # [обучение] лейблы токенов сущностей и событий
         self.ner_labels_entities_ph = tf.placeholder(tf.int32, shape=[None, None], name="ner_labels_entities_ph")
         self.ner_labels_event_ph = tf.placeholder(tf.int32, shape=[None, None], name="ner_labels_event_ph")
 
-        # для маскирования пар (событие, сущность)
+        # [обучение] колчество сущностей и событий. нужно для маскирования пар (событие, сущность)
         self.num_events_ph = tf.placeholder(tf.int32, shape=[None], name="num_events_ph")
         self.num_other_entities_ph = tf.placeholder(tf.int32, shape=[None], name="num_other_entities_ph")
 
-        # для обучения re; [id_example, id_head, id_dep, id_rel]
+        # [обучение] таргет отношений в виде кортежей [id_example, id_head, id_dep, id_rel]
         self.type_ids_ph = tf.placeholder(tf.int32, shape=[None, 4], name="type_ids_ph")
 
         # для включения / выключения дропаутов
         self.training_ph = tf.placeholder(tf.bool, shape=None, name="training_ph")
 
+        # [обучение]
         self.lr_ph = tf.placeholder(tf.float32, shape=None, name="lr_ph")
 
     def _set_loss(self):

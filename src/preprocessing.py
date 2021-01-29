@@ -4,7 +4,7 @@ import tqdm
 import json
 import shutil
 from copy import deepcopy
-from typing import List, Set, Dict
+from typing import List, Set, Dict, Tuple
 from itertools import accumulate
 from collections import namedtuple, Counter, defaultdict
 from rusenttokenize import ru_sent_tokenize
@@ -151,7 +151,8 @@ class Example(ReprMixin):
             entities=None,
             arcs=None,
             label=None,
-            labels_events: Dict[str, List] = None
+            labels_events: Dict[str, List] = None,
+            tokens_spans: List[Tuple[int, int]] = None
     ):
         self.filename = filename
         self.id = id
@@ -162,6 +163,7 @@ class Example(ReprMixin):
         self.arcs = arcs
         self.label = label  # в случае классификации предложений
         self.labels_events = labels_events  # NER-лейблы события
+        self.tokens_spans = tokens_spans  # нужно для инференса
 
     @property
     def num_tokens(self):
@@ -188,6 +190,11 @@ class Example(ReprMixin):
         return len(self.events)
 
     def chunks(self, window=1):
+        """
+        Кусок исходного примера размером window предложений
+        :param window: ширина окна на уровне предложений
+        :return:
+        """
         if not self.text:
             print(f"[{self.id} WARNING]: empty text")
             return [Example(**self.__dict__)]
@@ -207,6 +214,7 @@ class Example(ReprMixin):
                 continue
             tokens = self.tokens[start:end]
             labels = self.labels[start:end]
+            tokens_spans = self.tokens_spans[start:end]
             labels_events = {k: v[start:end] for k, v in self.labels_events.items()}
             entities = []
             entity_ids = set()
@@ -227,7 +235,8 @@ class Example(ReprMixin):
                 labels=labels,
                 entities=entities,
                 arcs=arcs,
-                labels_events=labels_events
+                labels_events=labels_events,
+                tokens_spans=tokens_spans
             )
             res.append(x)
         return res
@@ -824,12 +833,20 @@ class ExampleEncoder:
         * entities - List[Tuple[start, end]]
         * arcs - List[Tuple[head, dep, id_relation]]
         """
-        example_enc = Example(filename=example.filename, id=example.id)
+        example_enc = Example(
+            filename=example.filename,
+            id=example.id
+        )
 
         # tokens
         example_enc.tokens = example.tokens.copy()
         if self.add_seq_bounds:
             example_enc.tokens = ["[START]"] + example_enc.tokens + ["[END]"]
+
+        # tokens spans
+        example_enc.tokens_spans = example.tokens_spans.copy()
+        if self.add_seq_bounds:
+            example_enc.tokens_spans = [(-1, -1)] + example_enc.tokens_spans + [(-1, -1)]  # TODO: ок ли так делать?
 
         # labels
         def encode_labels(labels, vocab, add_seq_bounds, ner_label_other):
