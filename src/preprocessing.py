@@ -542,6 +542,7 @@ class ExamplesLoader:
 
         # токенизация
         text_tokens = []
+        tokens_spans = []
         span2index = {}
 
         # бывают странные ситуации:
@@ -553,8 +554,11 @@ class ExamplesLoader:
         start2index = {}
         for i, m in enumerate(TOKENS_EXPRESSION.finditer(text)):
             text_tokens.append(m.group())
-            span2index[m.span()] = i
-            start2index[m.span()[0]] = i
+
+            span = m.span()
+            span2index[span] = i
+            start2index[span[0]] = i
+            tokens_spans.append(span)
 
         # .ann
         ner_labels = [self.ner_label_other] * len(text_tokens)
@@ -747,7 +751,8 @@ class ExamplesLoader:
             labels=ner_labels,
             entities=entities,
             arcs=arcs,
-            labels_events=ner_labels_events
+            labels_events=ner_labels_events,
+            tokens_spans=tokens_spans
         )
 
         return example
