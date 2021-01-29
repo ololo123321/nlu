@@ -450,18 +450,18 @@ class ExamplesLoader:
         # пока предполагается её наличие.
         assert len(example.entities) == len(entity_spans), \
             prefix + f"there are span duplicates: " \
-                f"number of entities is {len(example.entities)}, but number of unique text spans is {len(entity_spans)}"
+            f"number of entities is {len(example.entities)}, but number of unique text spans is {len(entity_spans)}"
 
         def check_ner_labels(ent_ids, labels, ner_label_other):
             """проверка непротиворечивости множества сущностей лейблам"""
             if len(ent_ids) == 0:
                 assert set(labels) == {ner_label_other}, \
                     prefix + f"ner labels and named entities mismatch: ner labels are {set(labels)}, " \
-                        f"but there are no entities in example."
+                    f"but there are no entities in example."
             else:
                 assert set(labels) != {ner_label_other}, \
                     prefix + f"ner labels and named entities mismatch: ner labels are {set(labels)}, " \
-                        f"but there are following entities in example: {ent_ids}"
+                    f"but there are following entities in example: {ent_ids}"
 
         check_ner_labels(ent_ids=entity_ids_wo_events, labels=example.labels, ner_label_other=self.ner_label_other)
 

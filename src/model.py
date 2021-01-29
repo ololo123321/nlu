@@ -238,29 +238,54 @@ class JointModelV1:
                 epoch += 1
 
     def predict(self, examples, batch_size=128):
+        # TODO: получать предсказанные события
+        # TODO: заменять истинные события на предсказанные в инстансах класса Example
         filename2id_arc = defaultdict(int)
         events_counter = defaultdict(int)
         for start in range(0, len(examples), batch_size):
             end = start + batch_size
             examples_batch = examples[start:end]
             feed_dict, id2index = self._get_feed_dict(examples_batch, training=False)
-            num_events, num_entities, rel_labels_pred = self.sess.run(
-                [self.num_events_inference, self.num_entities_inference, self.rel_labels_pred_inference],
+            num_events, num_entities, ner_labels_pred, rel_labels_pred = self.sess.run(
+                [
+                    self.num_events_inference,
+                    self.num_entities_inference,
+                    self.ner_labels_pred,
+                    self.rel_labels_pred_inference
+                ],
                 feed_dict=feed_dict
             )
+            # print("ner_labels_pred shape:", ner_labels_pred.shape)
+            # print("ner_labels_pred:", ner_labels_pred)
+            # print("rel_labels_pred shape:", rel_labels_pred.shape)
+            # print("rel_labels_pred:", rel_labels_pred)
+
+            # TODO: нет биекции между парами (id_example, i) и id_entity (см. get_feed_dict)
             d = {(id_example, i): id_entity for (id_example, id_entity), i in id2index.items()}
-            assert len(d) == len(id2index)
-            mask = rel_labels_pred != 0
-            for i, j, k in zip(*np.where(mask)):
-                if j < num_events[i] and k < num_entities[i]:
-                    x = examples[i]
-                    id_head = f"E{events_counter[x.filename]}"
-                    id_dep = d[(x.id, k)]  # компании не ищем, поэтому айдишник знаем
-                    id_arc = filename2id_arc[x.filename]
-                    arc = Arc(id=id_arc, head=id_head, dep=id_dep, rel=rel_labels_pred[i, j, k])
-                    x.arcs.append(arc)
-                    filename2id_arc[x.filename] += 1
-                    events_counter[x.filename] += 1
+            for i, x in enumerate(examples_batch):
+                if x.filename == "0000":
+                    print("id:", x.id)
+                    print("tokens:", x.tokens)
+                    print("num tokens:", x.num_tokens)
+                    print("num events:", num_events[i])
+                    print("num events batch:", num_events)
+                    print("num entities wo events:", num_entities[i])
+                    print("num entities wo events batch:", num_entities)
+                    print("ner labels event:", ner_labels_pred[i, :x.num_tokens])
+                    print("rel_labels_pred:", rel_labels_pred[i, :num_events[i], :num_entities[i]])
+                for id_event, (j, t) in enumerate(zip(ner_labels_pred[i], x.tokens)):
+                    pass
+                for j in range(num_events[i]):
+                    for k in range(num_entities[i]):
+                        id_rel = rel_labels_pred[i, j, k]
+                        if id_rel != 0:
+                            id_head = f"E{events_counter[x.filename]}"
+                            id_dep = d[(x.id, k)]  # компании не ищем, поэтому айдишник знаем
+                            id_arc = filename2id_arc[x.filename]
+                            arc = Arc(id=id_arc, head=id_head, dep=id_dep, rel=rel_labels_pred[i, j, k])
+                            x.arcs.append(arc)
+                            filename2id_arc[x.filename] += 1
+                            events_counter[x.filename] += 1
 
     def restore(self, model_dir):
         var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.scope)
@@ -352,7 +377,9 @@ class JointModelV1:
 
             # векторы именных сущностей
             bound_ids_entity = tf.constant(self.config["model"]["ner"]["start_ids"], dtype=tf.int32)
-            entity_coords, num_entities = infer_entities_bounds(label_ids=self.ner_labels_entities_ph, bound_ids=bound_ids_entity)
+            entity_coords, num_entities = infer_entities_bounds(
+                label_ids=self.ner_labels_entities_ph, sequence_len=self.sequence_len_ph, bound_ids=bound_ids_entity
+            )
             entity_emb = get_embeddings(x, coords=entity_coords)
             self.num_entities_inference = num_entities  # пока не нужно, но пусть будет для общности
 
@@ -365,11 +392,15 @@ class JointModelV1:
             bound_ids_event = tf.constant(self.config["model"]["event"]["start_ids"], dtype=tf.int32)
 
             # train
-            event_coords, _ = infer_entities_bounds(label_ids=self.ner_labels_event_ph, bound_ids=bound_ids_event)
+            event_coords, _ = infer_entities_bounds(
+                label_ids=self.ner_labels_event_ph, sequence_len=self.sequence_len_ph, bound_ids=bound_ids_event
+            )
             event_emb_train = get_embeddings(x, coords=event_coords)
 
             # inference
-            event_coords, num_events = infer_entities_bounds(label_ids=self.ner_labels_pred, bound_ids=bound_ids_event)
+            event_coords, num_events = infer_entities_bounds(
+                label_ids=self.ner_labels_pred, sequence_len=self.sequence_len_ph, bound_ids=bound_ids_event
+            )
             event_emb_inference = get_embeddings(x, coords=event_coords)
             self.num_events_inference = num_events
 

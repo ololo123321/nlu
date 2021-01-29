@@ -28,10 +28,11 @@ def compute_f1(preds, labels):
         return {'precision': prec, 'recall': recall, 'f1': f1}
 
 
-def infer_entities_bounds(label_ids: tf.Tensor, bound_ids: tf.Tensor):
+def infer_entities_bounds(label_ids: tf.Tensor, sequence_len, bound_ids: tf.Tensor):
     """
     Вывод индексов первого или последнего токена сущностей
-    :param label_ids: tf.Tensor of shape [N, T]
+    :param label_ids: tf.Tensor of shape [N, T] and type tf.int32 - айдишники лейблов токенов
+    :param sequence_len: tf.Tensor of shape [N] and type tf.int32 - длины последовательностей
     :param bound_ids: tf.Tensor of shape [num_bound_ids] - айдишники, обозначающие начало или конец сущности
     :return: coords: tf.Tensor of shape [batch_size * num_entities_max, 2], где num_entities_sum - общее число сущностей
              в батче. (i, j) - начало или конец сущности, где 0 <= i < N; 0 < j < T
@@ -40,6 +41,7 @@ def infer_entities_bounds(label_ids: tf.Tensor, bound_ids: tf.Tensor):
     labels_3d = tf.tile(label_ids[:, :, None], [1, 1, tf.shape(bound_ids)[0]])  # [N, T, num_bound_ids]
     mask_3d = tf.equal(labels_3d, bound_ids[None, None, :])  # [N, T, num_bound_ids]
     mask_2d = tf.reduce_any(mask_3d, axis=-1)  # [N, T]
+    mask_2d = tf.logical_and(mask_2d, tf.sequence_mask(sequence_len))  # [N, T]
 
     # вывод координаты y
     num_entities = tf.reduce_sum(tf.cast(mask_2d, tf.int32), axis=-1)  # [N]

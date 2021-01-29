@@ -10,13 +10,16 @@ from src.utils import check_entities_spans
 
 
 def main(args):
+    event_tag = "Bankruptcy"  # TODO: вынести в конфиг
+
     # подгрузка конфига
     config = json.load(open(os.path.join(args.model_dir, "config.json")))
 
     # подгрузка примеров
     loader = ExamplesLoader(
         ner_encoding=config["preprocessing"]["ner_encoding"],
-        ner_suffix_joiner=config["preprocessing"]["ner_prefix_joiner"]
+        ner_suffix_joiner=config["preprocessing"]["ner_prefix_joiner"],
+        event_tags={event_tag}
     )
     examples = loader.load_examples(
         data_dir=args.data_dir,
@@ -26,8 +29,10 @@ def main(args):
     )
 
     # удаление рёбер, если они есть. иначе будет феил при сохранении предиктов
+    # удаление событий, т.к. их мы сами предсказываем
     for x in examples:
         x.arcs.clear()
+        x.entities = x.entities_wo_events
 
     # кодирование примеров
     example_encoder = ExampleEncoder.load(encoder_dir=args.model_dir)
@@ -47,10 +52,6 @@ def main(args):
     model.build()
     model.restore(model_dir=args.model_dir)
     model.initialize()
-
-    # TODO: сувать такие примеры тоже в модель, ибо вершины должны искаться
-    # нет смысла искать рёбра у графа без вершин
-    # examples_filtered = [x for x in examples_encoded if len(x.entities) > 0]
 
     print("checking examples...")
     check_entities_spans(examples=examples_encoded, span_emb_type=config["model"]["re"]["span_embeddings"]["type"])
