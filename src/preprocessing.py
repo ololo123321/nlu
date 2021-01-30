@@ -367,7 +367,8 @@ class ExamplesLoader:
                         arg = EventArgument(id=arc.dep, role=rel)
                         events[arc.head].arguments.add(arg)
                     else:
-                        line = f"R{arc.id}\t{rel} Arg1:{arc.head} Arg2:{arc.dep}\n"
+                        id_arc = arc.id if isinstance(arc.id, str) else "R" + str(arc.id)
+                        line = f"{id_arc}\t{rel} Arg1:{arc.head} Arg2:{arc.dep}\n"
                         f.write(line)
 
                 # события
@@ -387,6 +388,7 @@ class ExamplesLoader:
                         line += ' ' + args_str
                     line += '\n'
                     f.write(line)
+
         if copy_texts:
             assert collection_dir is not None
             for name in filenames:

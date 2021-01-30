@@ -1,5 +1,6 @@
 import random
 import os
+from typing import List, Tuple, Dict
 from collections import defaultdict
 
 import tensorflow as tf
@@ -10,7 +11,7 @@ from sklearn.metrics import classification_report
 from .utils import compute_f1, infer_entities_bounds
 from .layers import DotProductAttention, GraphEncoder, GraphEncoderInputs
 from .optimization import noam_scheme
-from .preprocessing import Arc, Entity
+from .preprocessing import Arc, Entity, Example
 
 
 # model
@@ -155,6 +156,10 @@ class JointModelV1:
                     end = start + batch_size
                     examples_batch = eval_examples[start:end]
                     feed_dict, id2index = self._get_feed_dict(examples_batch, training=False)
+                    id2index = {
+                        (id_example, id_entity): idx
+                        for (id_example, id_entity, is_event_trigger), idx in id2index.items()
+                    }
                     loss, ner_labels_pred, rel_labels_pred = self.sess.run(
                         [self.loss, self.ner_labels_pred, self.rel_labels_pred_train],
                         feed_dict=feed_dict
@@ -173,9 +178,10 @@ class JointModelV1:
                         # roles
                         arcs_true = np.full((num_events, num_entities_wo_events), no_rel_id, dtype=np.int32)
                         for arc in x.arcs:
-                            id_head = id2index[(x.id, arc.head)]
-                            id_dep = id2index[(x.id, arc.dep)]
-                            arcs_true[id_head, id_dep] = arc.rel
+                            idx_head = id2index[(x.id, arc.head)]
+                            idx_dep = id2index[(x.id, arc.dep)]
+                            arcs_true[idx_head, idx_dep] = arc.rel
+
                         arcs_pred = rel_labels_pred[i, :num_events, :num_entities_wo_events]
                         y_true_arcs_types.append(arcs_true.flatten())
                         y_pred_arcs_types.append(arcs_pred.flatten())
@@ -238,15 +244,32 @@ class JointModelV1:
                 epoch += 1
 
     def predict(self, examples, batch_size=128):
-        # TODO: получать предсказанные события
-        # TODO: заменять истинные события на предсказанные в инстансах класса Example
-        filename2id_arc = defaultdict(int)
-        filenmae2id_entity_new = defaultdict(lambda: 500)  # TODO: костыль с 500
-        id_event_batch2id_event_file = {}
+        arc_counter = defaultdict(int)  # filename -> int
+        event_counter = defaultdict(lambda: 500)  # TODO: костыль с 500
+        event_label = self.config["model"]["event"]["tag"]
+        start_event_ids = set(self.config["model"]["event"]["start_ids"])
+
+        def get_event_trigger_id(fname) -> str:
+            i = event_counter[fname]
+            event_counter[fname] += 1
+            i = f"T{i}"
+            return i
+
+        def get_arc_id(fname) -> str:
+            i = arc_counter[fname]
+            arc_counter[fname] += 1
+            i = f"R{i}"
+            return i
+
         for start in range(0, len(examples), batch_size):
             end = start + batch_size
             examples_batch = examples[start:end]
             feed_dict, id2index = self._get_feed_dict(examples_batch, training=False)
+            id2index = {
+                (id_example, idx): id_entity
+                for (id_example, id_entity, is_event_trigger), idx in id2index.items()
+                if not is_event_trigger
+            }
             num_events, num_entities, ner_labels_pred, rel_labels_pred = self.sess.run(
                 [
                     self.num_events_inference,
@@ -261,9 +284,6 @@ class JointModelV1:
             # print("rel_labels_pred shape:", rel_labels_pred.shape)
             # print("rel_labels_pred:", rel_labels_pred)
 
-            # TODO: нет биекции между парами (id_example, i) и id_entity (см. get_feed_dict)
-            d = {(id_example, i): id_entity for (id_example, id_entity), i in id2index.items()}
-            start_event_ids = set(self.config["model"]["event"]["start_ids"])
             for i, x in enumerate(examples_batch):
                 # if x.filename == "0000":
                 #     print("id:", x.id)
@@ -278,36 +298,31 @@ class JointModelV1:
 
                 # запись найденных событий (только токен начала)
                 # TODO: обобщить на произвольный спан
-                num_events_curr = 0
-                for id_label, token, span in zip(ner_labels_pred[i], x.tokens, x.tokens_spans):
-                    if id_label in start_event_ids:
-                        id_event_trigger = f"T{filenmae2id_entity_new[x.filename]}"
-                        id_event_batch2id_event_file[(x.id, num_events_curr)] = id_event_trigger
+                event_idx = 0
+                for j in range(x.num_tokens):
+                    if ner_labels_pred[i, j] in start_event_ids:
+                        start_index, end_index = x.tokens_spans[j]
+                        id_event_trigger = get_event_trigger_id(x.filename)
                         event = Entity(
                             id=id_event_trigger,
-                            start_index=span[0],
-                            end_index=span[1],
-                            text=token,
-                            label="Bankruptcy",  # TODO: убрать хардкод
+                            start_index=start_index,
+                            end_index=end_index,
+                            text=x.tokens[j],
+                            label=event_label,
                             is_event_trigger=True
                         )
                         x.entities.append(event)
-                        num_events_curr += 1
-                        filenmae2id_entity_new[x.filename] += 1
 
-                assert num_events_curr == num_events[i], f"{num_events_curr} != {num_events[i]}"
+                        for k in range(num_entities[i]):
+                            id_rel = rel_labels_pred[i, event_idx, k]
+                            if id_rel != 0:
+                                id_head = id_event_trigger
+                                id_dep = id2index[(x.id, k)]  # компании не ищем, поэтому айдишник знаем
+                                id_arc = get_arc_id(x.filename)
+                                arc = Arc(id=id_arc, head=id_head, dep=id_dep, rel=id_rel)
+                                x.arcs.append(arc)
 
-                # запись найденных отношений
-                for j in range(num_events[i]):
-                    for k in range(num_entities[i]):
-                        id_rel = rel_labels_pred[i, j, k]
-                        if id_rel != 0:
-                            id_head = id_event_batch2id_event_file[(x.id, j)]
-                            id_dep = d[(x.id, k)]  # компании не ищем, поэтому айдишник знаем
-                            id_arc = filename2id_arc[x.filename]
-                            arc = Arc(id=id_arc, head=id_head, dep=id_dep, rel=rel_labels_pred[i, j, k])
-                            x.arcs.append(arc)
-                            filename2id_arc[x.filename] += 1
+                        event_idx += 1
 
     def restore(self, model_dir):
         var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.scope)
@@ -391,9 +406,10 @@ class JointModelV1:
             # обучаемые с нуля верхние слои:
             x, d_model = self._build_encoder_layers(x, config=self.config["model"]["embedder"])
 
-            def get_embeddings(emb_token, coords):
-                batch_size = tf.shape(emb_token)[0]
-                res = tf.gather_nd(emb_token, coords)  # [N * num_entities_max, d_model]
+            batch_size = tf.shape(x)[0]
+
+            def get_embeddings(coords):
+                res = tf.gather_nd(x, coords)  # [N * num_entities_max, d_model]
                 res = tf.reshape(res, [batch_size, -1, d_model])  # [N, num_entities_max, d_model]
                 return res
 
@@ -402,7 +418,7 @@ class JointModelV1:
             entity_coords, num_entities = infer_entities_bounds(
                 label_ids=self.ner_labels_entities_ph, sequence_len=self.sequence_len_ph, bound_ids=bound_ids_entity
             )
-            entity_emb = get_embeddings(x, coords=entity_coords)
+            entity_emb = get_embeddings(entity_coords)
             self.num_entities_inference = num_entities  # пока не нужно, но пусть будет для общности
 
             # поиск триггеров событий
@@ -417,13 +433,13 @@ class JointModelV1:
             event_coords, _ = infer_entities_bounds(
                 label_ids=self.ner_labels_event_ph, sequence_len=self.sequence_len_ph, bound_ids=bound_ids_event
             )
-            event_emb_train = get_embeddings(x, coords=event_coords)
+            event_emb_train = get_embeddings(event_coords)
 
             # inference
             event_coords, num_events = infer_entities_bounds(
                 label_ids=self.ner_labels_pred, sequence_len=self.sequence_len_ph, bound_ids=bound_ids_event
             )
-            event_emb_inference = get_embeddings(x, coords=event_coords)
+            event_emb_inference = get_embeddings(event_coords)
             self.num_events_inference = num_events
 
             # получение логитов пар (событие, именная сущность)
@@ -451,45 +467,66 @@ class JointModelV1:
             self.event_emb_shape = tf.shape(event_emb_train)
             self.entity_emb_shape = tf.shape(entity_emb)
 
-    def _get_feed_dict(self, examples, training):
-        # tokens
-        pad = "[PAD]"
-        tokens = [x.tokens for x in examples]
-        sequence_len = [x.num_tokens for x in examples]
-        num_tokens_max = max(sequence_len)
-        tokens = [x + [pad] * (num_tokens_max - l) for x, l in zip(tokens, sequence_len)]
+    def _get_feed_dict(self, examples: List[Example], training: bool) -> Tuple[Dict, Dict]:
+        event_tag = self.config["model"]["event"]["tag"]
+        other_label_id_ner_entities = self.config["model"]["ner"]["other_label_id"]
+        other_label_id_ner_events = self.config["model"]["event"]["other_label_id"]
 
-        # ner labels (entities)
-        other_label_id = self.config["model"]["ner"]["other_label_id"]
-        ner_labels = [x.labels + [other_label_id] * (num_tokens_max - l) for x, l in zip(examples, sequence_len)]
-        num_entities_other = [x.num_entities_wo_events for x in examples]
+        tokens = []
+        sequence_len = []
+        ner_labels = []
+        num_entities_other = []
+        type_ids = []
+        ner_labels_event = []
+        num_events = []
 
+        # ключ - тройка (id_example, id_entity, is_event_trigger).
+        # третий аргумент нужен для инференса, чтобы фильтровать обычные сущности
         id2index = {}
+
+        # ключ - пара (id_example, id_entity). нужно для восстановления индекса по паре (id_example, id_entity)
+        id2index_tmp = {}
+
         for i, x in enumerate(examples):
             assert x.id is not None
-            idx_entity = 0
+
+            tokens.append(x.tokens)
+            sequence_len.append(x.num_tokens)
+            ner_labels.append(x.labels)
+            num_entities_other.append(x.num_entities_wo_events)
+            ner_labels_event.append(x.labels_events[event_tag])
+            num_events.append(x.num_events)
+
             idx_event = 0
-            for j, entity in enumerate(x.entities):
+            idx_entity = 0
+            for entity in x.events:
                 assert entity.id is not None
                 if entity.is_event_trigger:
-                    id2index[(x.id, entity.id)] = idx_event
+                    id2index[(x.id, entity.id, True)] = idx_event
+                    id2index_tmp[(x.id, entity.id)] = idx_event
                     idx_event += 1
                 else:
-                    id2index[(x.id, entity.id)] = idx_entity
+                    id2index[(x.id, entity.id, False)] = idx_entity
+                    id2index_tmp[(x.id, entity.id)] = idx_entity
                     idx_entity += 1
 
-        # arcs
-        type_ids = []
-        for i, x in enumerate(examples):
             for arc in x.arcs:
-                id_head = id2index[(x.id, arc.head)]
-                id_dep = id2index[(x.id, arc.dep)]
+                id_head = id2index_tmp[(x.id, arc.head)]
+                id_dep = id2index_tmp[(x.id, arc.dep)]
                 type_ids.append((i, id_head, id_dep, arc.rel))
+
+        maxlen = max(sequence_len)
+
+        for i in range(len(examples)):
+            sequence_len_i = sequence_len[i]
+            tokens[i] += ["[PAD]"] * (maxlen - sequence_len_i)
+            ner_labels[i] += [other_label_id_ner_entities] * (maxlen - sequence_len_i)
+            ner_labels_event[i] += [other_label_id_ner_events] * (maxlen - sequence_len_i)
 
         # если в батче нет ни одного отношения, то не получится посчитать лосс.
         # решение - добавить одно отношение с лейблом NO_RELATION.
         # должно гарантироваться, что в тензоре логитов размерности [batch_size, num_heads, num_deps, num_rels]
-        # каждого измерение не равно нулю.
+        # каждое измерение не равно нулю.
         if len(type_ids) == 0:
             type_ids.append((0, 0, 0, 0))
 
@@ -498,21 +535,12 @@ class JointModelV1:
             self.tokens_ph: tokens,
             self.sequence_len_ph: sequence_len,
             self.ner_labels_entities_ph: ner_labels,
+            self.ner_labels_event_ph: ner_labels_event,
+            self.num_events_ph: num_events,
             self.num_other_entities_ph: num_entities_other,
             self.type_ids_ph: type_ids,
             self.training_ph: training
         }
-
-        # if training:
-            # ner labels (event)
-        # TODO: при инференсе не знаем истинных лейблов событий! сделано пока без условия на training, чтоб ничего не ломалось
-        event_tag = self.config["model"]["event"]["tag"]
-        other_label_id = self.config["model"]["event"]["other_label_id"]
-        feed_dict[self.ner_labels_event_ph] = [
-            x.labels_events[event_tag] + [other_label_id] * (num_tokens_max - l)
-            for x, l in zip(examples, sequence_len)
-        ]
-        feed_dict[self.num_events_ph] = [x.num_events for x in examples]
 
         # assert min(feed_dict[self.num_events_ph]) >= 1
         # assert min(num_entities_other) >= 1
