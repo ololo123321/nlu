@@ -499,7 +499,7 @@ class JointModelV1:
 
             idx_event = 0
             idx_entity = 0
-            for entity in x.events:
+            for entity in x.entities:
                 assert entity.id is not None
                 if entity.is_event_trigger:
                     id2index[(x.id, entity.id, True)] = idx_event
