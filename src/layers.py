@@ -20,6 +20,8 @@ BiLinearInputs = namedtuple("BiLinearInputs", ["head", "dep"])
 
 class BiLinear(tf.keras.layers.Layer):
     """
+    https://arxiv.org/abs/1812.11275
+
     Билинейная форма:
     x = a*w*b^T + a*u + b*v + bias, где
     tensor name     shape
@@ -29,6 +31,7 @@ class BiLinear(tf.keras.layers.Layer):
     u               [D_a, D_out]
     v               [D_b, D_out]
     bias            [D_out]
+    x               [N, T_a, T_b, D_out]
     """
     def __init__(self, head_dim, dep_dim, output_dim):
         super().__init__()
