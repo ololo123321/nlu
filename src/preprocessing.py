@@ -204,7 +204,7 @@ class Example(ReprMixin):
         self.label = label  # в случае классификации предложений
         self.labels_events = labels_events  # NER-лейблы события
         self.tokens_spans = tokens_spans  # нужно для инференса
-        self.events = events
+        self.events = events if events is not None else []
 
     @property
     def num_tokens(self):
@@ -249,10 +249,14 @@ class Example(ReprMixin):
             start, end = span.span_tokens
             if start == end:
                 continue
+
+            # tokens, labels
             tokens = self.tokens[start:end]
             labels = self.labels[start:end]
             tokens_spans = self.tokens_spans[start:end]
             labels_events = {k: v[start:end] for k, v in self.labels_events.items()}
+
+            # entities
             entities = []
             entity_ids = set()
             for x in self.entities:
@@ -263,7 +267,19 @@ class Example(ReprMixin):
                     x_copy.end_token_id -= start
                     entities.append(x_copy)
                     entity_ids.add(x.id)
-            arcs = [x for x in self.arcs if (x.head in entity_ids) and (x.dep in entity_ids)]
+
+            # arcs
+            arcs = []
+            for x in self.arcs:
+                if (x.head in entity_ids) and (x.dep in entity_ids):
+                    arcs.append(x)
+
+            # events
+            events = []
+            for x in self.events:
+                if x.trigger in entity_ids:
+                    events.append(x)
+
             x = Example(
                 filename=self.filename,
                 id=_id,
@@ -273,7 +289,8 @@ class Example(ReprMixin):
                 entities=entities,
                 arcs=arcs,
                 labels_events=labels_events,
-                tokens_spans=tokens_spans
+                tokens_spans=tokens_spans,
+                events=events
             )
             res.append(x)
         return res
@@ -323,7 +340,7 @@ class ExamplesLoader:
 
     def __init__(
             self,
-            ner_encoding: str = NerEncodings.BILOU,
+            ner_encoding: str = NerEncodings.BIO,
             ner_label_other: str = "O",
             ner_prefix_joiner: str = NerPrefixJoiners.HYPHEN,
             fix_new_line_symbol: bool = True,
