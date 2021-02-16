@@ -71,10 +71,8 @@ class EntitySpanException(Exception):
 # immutable structs
 
 # possible args: Entity, Event, Arc
-Arc = namedtuple("Arc", ["id", "head", "dep", "rel"])
 Attribute = namedtuple("Attribute", ["id", "type", "value"])
 Comment = namedtuple("Comment", ["id", "argument", "text"])
-Event = namedtuple("Event", ["id", "id_trigger", "label", "arguments"])
 EventArgument = namedtuple("EventArgument", ["id", "role"])
 SpanInfo = namedtuple("Span", ["span_chunks", "span_tokens"])
 
@@ -103,7 +101,8 @@ class Entity(ReprMixin):
             end_token_id=None,
             sent_id=None,
             is_event_trigger=False,
-            attributes: Set[Attribute] = None  # атрибуты сущности
+            attrs: Set[Attribute] = None,  # атрибуты сущности
+            comment: str = None
     ):
         self.id = id
         self.label = label
@@ -116,7 +115,35 @@ class Entity(ReprMixin):
         self.end_token_id = end_token_id
         self.sent_id = sent_id
         self.is_event_trigger = is_event_trigger
-        self.attributes = attributes if attributes is not None else set()
+        self.attrs = attrs if attrs is not None else []
+        self.commnet = comment
+
+
+class Event(ReprMixin):
+    def __init__(
+            self,
+            id=None,
+            trigger: str = None,
+            label: str = None,
+            args: List[EventArgument] = None,
+            attrs: List[Attribute] = None,
+            comment: str = None
+    ):
+        self.id = id
+        self.trigger = trigger
+        self.label = label
+        self.args = args if args is not None else []
+        self.attrs = attrs if attrs is not None else []
+        self.comment = comment
+
+
+class Arc(ReprMixin):
+    def __init__(self, id, head, dep, rel, comment: str = None):
+        self.id = id
+        self.head = head
+        self.dep = dep
+        self.rel = rel
+        self.comment = comment
 
 
 class Vocab(ReprMixin):
@@ -164,7 +191,8 @@ class Example(ReprMixin):
             arcs=None,
             label=None,
             labels_events: Dict[str, List] = None,
-            tokens_spans: List[Tuple[int, int]] = None
+            tokens_spans: List[Tuple[int, int]] = None,
+            events: List[Event] = None  # пока только для дебага
     ):
         self.filename = filename
         self.id = id
@@ -176,6 +204,7 @@ class Example(ReprMixin):
         self.label = label  # в случае классификации предложений
         self.labels_events = labels_events  # NER-лейблы события
         self.tokens_spans = tokens_spans  # нужно для инференса
+        self.events = events
 
     @property
     def num_tokens(self):
@@ -184,10 +213,6 @@ class Example(ReprMixin):
     @property
     def num_entities(self):
         return len(self.entities)
-
-    @property
-    def events(self):
-        return [x for x in self.entities if x.is_event_trigger]
 
     @property
     def entities_wo_events(self):
@@ -369,9 +394,8 @@ class ExamplesLoader:
                             id_event = event_counter[x.filename]
                             events[entity.id] = Event(
                                 id=id_event,
-                                id_trigger=entity.id,
+                                trigger=entity.id,
                                 label=entity.label,
-                                arguments=set(),
                             )
                             event_counter[x.filename] += 1
 
@@ -380,7 +404,7 @@ class ExamplesLoader:
                     rel = id2relation[arc.rel]
                     if arc.head in events:
                         arg = EventArgument(id=arc.dep, role=rel)
-                        events[arc.head].arguments.add(arg)
+                        events[arc.head].args.append(arg)
                     else:
                         id_arc = arc.id if isinstance(arc.id, str) else "R" + str(arc.id)
                         line = f"{id_arc}\t{rel} Arg1:{arc.head} Arg2:{arc.dep}\n"
@@ -388,10 +412,10 @@ class ExamplesLoader:
 
                 # события
                 for event in events.values():
-                    line = f"E{event.id}\t{event.label}:{event.id_trigger}"
+                    line = f"E{event.id}\t{event.label}:{event.trigger}"
                     role2count = defaultdict(int)
                     args_str = ""
-                    for arg in event.arguments:
+                    for arg in event.args:
                         i = role2count[arg.role]
                         role = arg.role
                         if i > 0:
@@ -545,13 +569,23 @@ class ExamplesLoader:
 
     def _parse_example(self, data_dir, filename: str):
         """
-        строчка файла filename:
+        строчка файла filename.ann:
 
         * сущность: T5\tBIN 325 337\tФормирование\n
         * отношение: R105\tTSK Arg1:T370 Arg2:T371\n
         * событие: E0\tBankruptcy:T0 Bankrupt:T1 Bankrupt2:T2\n
         * атрибут: A1\tEvent-time E0 Past\n
         * комментарий: #0\tAnnotatorNotes T3\tfoobar\n
+
+        замечения:
+        * в файлах .ann сначала пишется триггер события, а потом событие:
+        T12     Bankruptcy 1866 1877    банкротства
+        E3      Bankruptcy:T12
+        * в файлах .ann аргумент атрибута всегда указан раньше, чем сам атрибут:
+        E3      Bankruptcy:T12
+        A10     Negation E3
+
+        данные наблюдения позволяют за один проход по всем строчка файла .ann сделать всё необходимое
         """
         # подгрузка текста
         with open(os.path.join(data_dir, f'{filename}.txt')) as f:
@@ -582,12 +616,10 @@ class ExamplesLoader:
         # .ann
         ner_labels = [self.ner_label_other] * len(text_tokens)
         ner_labels_events = {event_tag: ner_labels.copy() for event_tag in self.event_tags}
-        entities = []
-        arcs = []
-        arcs_used = set()  # в арках бывают дубликаты, пример: R35, R36 в 31339011023601075299026_18_part_1.ann
-        event_triggers = set()
-        entity2attrs = defaultdict(set)
-        event2trigger = {}
+        id2entity = {}
+        id2event = {}
+        id2arc = {}
+        id2arg = {}
         with open(os.path.join(data_dir, f'{filename}.ann'), 'r') as f:
             for line in f:
                 line = line.strip()
@@ -707,7 +739,8 @@ class ExamplesLoader:
                         end_token_id=end_token_id,
                         is_event_trigger=False  # заполнится потом
                     )
-                    entities.append(entity)
+                    id2entity[entity.id] = entity
+                    id2arg[entity.id] = entity
 
                 # отношение
                 elif line_type == LineTypes.RELATION:
@@ -722,11 +755,8 @@ class ExamplesLoader:
                         dep=arg2.split(":")[1],
                         rel=re_label
                     )
-                    # arc_triple = arc.head, arc.dep, arc.rel
-                    arc_triple = arc.head, arc.dep
-                    if arc_triple not in arcs_used:
-                        arcs.append(arc)
-                        arcs_used.add(arc_triple)
+                    id2arc[arc.id] = arc
+                    id2arg[arc.id] = arc
 
                 # событие
                 elif line_type == LineTypes.EVENT:
@@ -734,53 +764,63 @@ class ExamplesLoader:
                     event_args = content[1].split()
                     event_trigger = event_args.pop(0)
                     event_name, id_head = event_trigger.split(":")  # event_name не используется
-                    event_triggers.add(id_head)
-                    event2trigger[line_tag] = id_head  # гаранируется, что одному событию соответствует один триггер
+                    event = Event(
+                        id=line_tag,
+                        trigger=id_head,
+                        label=event_name,
+                    )
                     for dep in event_args:
                         rel, id_dep = dep.split(":")
+
                         # если аргументов одной роли несколько, то всем, начиная со второго,
                         # приписывается в конце номер (см. пример)
                         rel = re.sub(r'\d+', '', rel)
+
+                        # запись отношения
+                        # id должен быть уникальным
+                        id_arc = f"{line_tag}_{id_dep}"
                         arc = Arc(
-                            id=line_tag,
+                            id=id_arc,
                             head=id_head,
                             dep=id_dep,
                             rel=rel
                         )
-                        arc_operands = arc.head, arc.dep
-                        if arc_operands not in arcs_used:
-                            arcs.append(arc)
-                            arcs_used.add(arc_operands)
+                        id2arc[id_arc] = arc
+
+                        # запись аргумента события
+                        arg = EventArgument(id=id_dep, role=rel)
+                        event.args.append(arg)
+
+                    id2event[event.id] = event
+                    id2arg[event.id] = event
+                    id2entity[id_head].is_event_trigger = True
 
                 # атрибут
-                elif line_type == LineTypes.ATTRIBUTE:
+                elif line_type == LineTypes.ATTRIBUTE or line_type == LineTypes.ATTRIBUTE_OLD:
                     # A1\tEvent-time E0 Past\n
                     attr_type, id_arg, value = content[1].split()
                     attr = Attribute(id=line_tag, type=attr_type, value=value)
-                    entity2attrs[id_arg].add(attr)
+                    try:
+                        id2arg[id_arg].attrs.append(attr)
+                    except KeyError:
+                        raise BadLineException("there is no arg for provided attr")
 
-                # атрибут (в старой версии)
-                elif line_type == LineTypes.ATTRIBUTE_OLD:
-                    pass
-
-                # комментарии. TODO: написать код. иметь ввиду, что комментироваться могут сущности, события, отношения
+                # комментарии.
                 elif line_type == LineTypes.COMMENT:
-                    pass
+                    # #0\tAnnotatorNotes T3\tfoobar\n
+                    _, id_arg = content[1].split()
+                    msg = content[2]
+                    try:
+                        id2arg[id_arg].comment = msg
+                    except KeyError:
+                        raise BadLineException("there is no arg for provided comment")
 
                 else:
                     raise Exception(f"invalid line: {line}")
 
-        # запись атрибутов сущностей
-        id2entity = {}
-        for entity in entities:
-            id2entity[entity.id] = entity
-            entity.is_event_trigger = entity.id in event_triggers
-            entity.attributes = entity2attrs[entity.id]
-
-        # запись атрибутов событий
-        for id_event, id_entity in event2trigger.items():
-            entity = id2entity[id_entity]
-            entity.attributes |= entity2attrs[id_event]
+        entities = list(id2entity.values())
+        events = list(id2event.values())
+        arcs = list(id2arc.values())
 
         example = Example(
             filename=filename,
@@ -791,7 +831,8 @@ class ExamplesLoader:
             entities=entities,
             arcs=arcs,
             labels_events=ner_labels_events,
-            tokens_spans=tokens_spans
+            tokens_spans=tokens_spans,
+            events=events
         )
 
         return example
