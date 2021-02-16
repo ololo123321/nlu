@@ -9,6 +9,9 @@ from itertools import accumulate
 from collections import namedtuple, Counter, defaultdict
 from rusenttokenize import ru_sent_tokenize
 
+
+# constants
+
 TOKENS_EXPRESSION = re.compile(r"\w+|[^\w\s]")
 
 
@@ -38,6 +41,21 @@ class NerPrefixJoiners:
     HYPHEN = "-"
 
 
+class LineTypes:
+    ENTITY = "T"
+    EVENT = "E"
+    RELATION = "R"
+    ATTRIBUTE = "A"
+    # то же самое, что A:
+    # https://brat.nlplab.org/standoff.html
+    # For backward compatibility with existing standoff formats,
+    # brat also recognizes the ID prefix "M" for attributes.
+    ATTRIBUTE_OLD = "M"
+    COMMENT = "#"
+
+
+# exceptions
+
 class BadLineException(Exception):
     """
     строка файла .ann имеет неверный формат
@@ -50,19 +68,25 @@ class EntitySpanException(Exception):
     """
 
 
+# immutable structs
+
+# possible args: Entity, Event, Arc
+Arc = namedtuple("Arc", ["id", "head", "dep", "rel"])
+Attribute = namedtuple("Attribute", ["id", "type", "value"])
+Comment = namedtuple("Comment", ["id", "argument", "text"])
+Event = namedtuple("Event", ["id", "id_trigger", "label", "arguments"])
+EventArgument = namedtuple("EventArgument", ["id", "role"])
+SpanInfo = namedtuple("Span", ["span_chunks", "span_tokens"])
+
+
+# mutable structs
+
+
 class ReprMixin:
     def __repr__(self):
         class_name = self.__class__.__name__
         params_str = ', '.join(f"{k}={v}" for k, v in self.__dict__.items())
         return f'{class_name}({params_str})'
-
-
-class Arc(ReprMixin):
-    def __init__(self, id, head, dep, rel):
-        self.id = id
-        self.head = head
-        self.dep = dep
-        self.rel = rel
 
 
 class Entity(ReprMixin):
@@ -79,6 +103,7 @@ class Entity(ReprMixin):
             end_token_id=None,
             sent_id=None,
             is_event_trigger=False,
+            attributes: Set[Attribute] = None  # атрибуты сущности
     ):
         self.id = id
         self.label = label
@@ -91,17 +116,7 @@ class Entity(ReprMixin):
         self.end_token_id = end_token_id
         self.sent_id = sent_id
         self.is_event_trigger = is_event_trigger
-
-
-EventArgument = namedtuple("EventArgument", ["id", "role"])
-
-
-class Event:
-    def __init__(self, id=None, id_trigger=None, label=None, arguments: Set[EventArgument] = None):
-        self.id_trigger = id_trigger
-        self.label = label
-        self.arguments = arguments if arguments is not None else set()
-        self.id = id
+        self.attributes = attributes if attributes is not None else set()
 
 
 class Vocab(ReprMixin):
@@ -135,9 +150,6 @@ class Vocab(ReprMixin):
 
     def get_id(self, value):
         return self._value2id[value]
-
-
-SpanInfo = namedtuple("Span", ["span_chunks", "span_tokens"])
 
 
 class Example(ReprMixin):
@@ -271,6 +283,9 @@ class Example(ReprMixin):
         return spans
 
 
+# handlers
+
+
 class ExamplesLoader:
     """
     * загрузка примеров из brat-формата: пар (filename.txt, filename.ann)
@@ -328,7 +343,7 @@ class ExamplesLoader:
             else:
                 num_examples += 1
                 examples.append(x_raw)
-        print(f"{num_bad} / {len(examples)} examples are bad")
+        print(f"{num_bad} / {num_examples} examples are bad")
         return examples
 
     @staticmethod
@@ -356,7 +371,7 @@ class ExamplesLoader:
                                 id=id_event,
                                 id_trigger=entity.id,
                                 label=entity.label,
-                                arguments=None,
+                                arguments=set(),
                             )
                             event_counter[x.filename] += 1
 
@@ -531,10 +546,12 @@ class ExamplesLoader:
     def _parse_example(self, data_dir, filename: str):
         """
         строчка файла filename:
-        сущность:
-        T5\tBIN 325 337\tФормирование\n
-        отношение:
-        R105\tTSK Arg1:T370 Arg2:T371
+
+        * сущность: T5\tBIN 325 337\tФормирование\n
+        * отношение: R105\tTSK Arg1:T370 Arg2:T371\n
+        * событие: E0\tBankruptcy:T0 Bankrupt:T1 Bankrupt2:T2\n
+        * атрибут: A1\tEvent-time E0 Past\n
+        * комментарий: #0\tAnnotatorNotes T3\tfoobar\n
         """
         # подгрузка текста
         with open(os.path.join(data_dir, f'{filename}.txt')) as f:
@@ -569,14 +586,17 @@ class ExamplesLoader:
         arcs = []
         arcs_used = set()  # в арках бывают дубликаты, пример: R35, R36 в 31339011023601075299026_18_part_1.ann
         event_triggers = set()
+        entity2attrs = defaultdict(set)
+        event2trigger = {}
         with open(os.path.join(data_dir, f'{filename}.ann'), 'r') as f:
             for line in f:
                 line = line.strip()
                 content = line.split('\t')
                 line_tag = content[0]
+                line_type = line_tag[0]
 
-                # сущности
-                if line_tag.startswith("T"):
+                # сущность
+                if line_type == LineTypes.ENTITY:
                     # проверка того, что формат строки верный
                     try:
                         _, entity, expected_entity_pattern = content
@@ -689,8 +709,8 @@ class ExamplesLoader:
                     )
                     entities.append(entity)
 
-                # отношения (relations)
-                elif line_tag.startswith("R"):
+                # отношение
+                elif line_type == LineTypes.RELATION:
                     try:
                         _, relation = content
                         re_label, arg1, arg2 = relation.split()
@@ -708,13 +728,14 @@ class ExamplesLoader:
                         arcs.append(arc)
                         arcs_used.add(arc_triple)
 
-                # события (events)
-                elif line_tag.startswith("E"):
+                # событие
+                elif line_type == LineTypes.EVENT:
                     # E0\tBankruptcy:T0 Bankrupt:T1 Bankrupt2:T2
                     event_args = content[1].split()
                     event_trigger = event_args.pop(0)
-                    event_name, id_head = event_trigger.split(":")  # TODO: event_name не используется
+                    event_name, id_head = event_trigger.split(":")  # event_name не используется
                     event_triggers.add(id_head)
+                    event2trigger[line_tag] = id_head  # гаранируется, что одному событию соответствует один триггер
                     for dep in event_args:
                         rel, id_dep = dep.split(":")
                         # если аргументов одной роли несколько, то всем, начиная со второго,
@@ -726,24 +747,40 @@ class ExamplesLoader:
                             dep=id_dep,
                             rel=rel
                         )
-                        arc_triple = arc.head, arc.dep
-                        if arc_triple not in arcs_used:
+                        arc_operands = arc.head, arc.dep
+                        if arc_operands not in arcs_used:
                             arcs.append(arc)
-                            arcs_used.add(arc_triple)
+                            arcs_used.add(arc_operands)
 
-                # атрибуты сущностей и событий TODO: написать код
-                elif line_tag.startswith("M"):
+                # атрибут
+                elif line_type == LineTypes.ATTRIBUTE:
+                    # A1\tEvent-time E0 Past\n
+                    attr_type, id_arg, value = content[1].split()
+                    attr = Attribute(id=line_tag, type=attr_type, value=value)
+                    entity2attrs[id_arg].add(attr)
+
+                # атрибут (в старой версии)
+                elif line_type == LineTypes.ATTRIBUTE_OLD:
                     pass
 
-                # комментарии (annotations). их можно игнорить
-                elif line_tag.startswith("A"):
+                # комментарии. TODO: написать код. иметь ввиду, что комментироваться могут сущности, события, отношения
+                elif line_type == LineTypes.COMMENT:
                     pass
 
                 else:
                     raise Exception(f"invalid line: {line}")
 
+        # запись атрибутов сущностей
+        id2entity = {}
         for entity in entities:
+            id2entity[entity.id] = entity
             entity.is_event_trigger = entity.id in event_triggers
+            entity.attributes = entity2attrs[entity.id]
+
+        # запись атрибутов событий
+        for id_event, id_entity in event2trigger.items():
+            entity = id2entity[id_entity]
+            entity.attributes |= entity2attrs[id_event]
 
         example = Example(
             filename=filename,
