@@ -1,4 +1,3 @@
-from typing import Tuple
 from collections import namedtuple
 import tensorflow as tf
 
@@ -9,24 +8,30 @@ class MLP(tf.keras.layers.Layer):
         self.dense_layers = [tf.keras.layers.Dense(hidden_dim, activation=activation) for _ in range(num_layers)]
         self.dropout_layers = [tf.keras.layers.Dropout(dropout) for _ in range(num_layers)]
 
-    def call(self, x, training=False):
+    def call(self, x: tf.Tensor, training: bool = False):
         for dense, dropout in zip(self.dense_layers, self.dropout_layers):
             x = dense(x)
             x = dropout(x, training=training)
         return x
 
 
+BiLinearInputs = namedtuple("BiLinearInputs", ["head", "dep"])
+
+
 class BiLinear(tf.keras.layers.Layer):
     """
+    https://arxiv.org/abs/1812.11275
+
     Билинейная форма:
     x = a*w*b^T + a*u + b*v + bias, где
     tensor name     shape
-    a               [N, T, D_a]
-    b               [N, T, D_b]
+    a               [N, T_a, D_a]
+    b               [N, T_b, D_b]
     w               [D_out, D_a, D_b]
     u               [D_a, D_out]
     v               [D_b, D_out]
     bias            [D_out]
+    x               [N, T_a, T_b, D_out]
     """
     def __init__(self, head_dim, dep_dim, output_dim):
         super().__init__()
@@ -35,23 +40,25 @@ class BiLinear(tf.keras.layers.Layer):
         self.v = tf.get_variable("v", shape=(dep_dim, output_dim), dtype=tf.float32)
         self.b = tf.get_variable("b", shape=(output_dim,), dtype=tf.float32, initializer=tf.initializers.zeros())
 
-    def call(self, head: tf.Tensor, dep: tf.Tensor) -> tf.Tensor:
+    def call(self, inputs: BiLinearInputs, training=None, mask=None) -> tf.Tensor:
         """
-        head - tf.Tensor of shape [N, T, D_head] and type tf.float32
-        bep - tf.Tensor as shape [N, T, D_dep] and type tf.float32
-        :returns x - tf.Tensor of shape [N, T, T, output_dim] and type tf.float32
+        head - tf.Tensor of shape [N, T_head, D_head] and type tf.float32
+        dep - tf.Tensor as shape [N, T_dep, D_dep] and type tf.float32
+        :returns x - tf.Tensor of shape [N, T_head, T_dep, output_dim] and type tf.float32
         """
-        dep_t = tf.transpose(dep, [0, 2, 1])  # [N, right_dim, T]
-        x = tf.expand_dims(head, 1) @ self.w @ tf.expand_dims(dep_t, 1)  # [N, output_dim, T, T]
-        x = tf.transpose(x, [0, 2, 3, 1])  # [N, T, T, output_dim]
+        head = inputs.head  # [N, T_head, D_head]
+        dep = inputs.dep  # [N, T_dep, D_dep]
+        dep_t = tf.transpose(dep, [0, 2, 1])  # [N, D_dep, T_dep]
+        x = tf.expand_dims(head, 1) @ self.w @ tf.expand_dims(dep_t, 1)  # [N, output_dim, T_head, T_dep]
+        x = tf.transpose(x, [0, 2, 3, 1])  # [N, T_head, T_dep, output_dim]
 
-        head_u = tf.matmul(head, self.u)  # [N, T, output_dim]
-        x += tf.expand_dims(head_u, 2)  # [N, T, T, output_dim]
+        head_u = tf.matmul(head, self.u)  # [N, T_head, output_dim]
+        x += tf.expand_dims(head_u, 2)  # [N, T_head, T_dep, output_dim]
 
-        dep_v = tf.matmul(dep, self.v)  # [N, T, output_dim]
-        x += tf.expand_dims(dep_v, 2)  # [N, T, T, output_dim]
+        dep_v = tf.matmul(dep, self.v)  # [N, T_dep, output_dim]
+        x += tf.expand_dims(dep_v, 1)  # [N, T_head, T_dep, output_dim]
 
-        x += self.b[None, None, None, :]  # [N, T, T, output_dim]
+        x += self.b[None, None, None, :]  # [N, T_head, T_dep, output_dim]
         return x
 
 
@@ -155,8 +162,8 @@ class GraphEncoder(tf.keras.layers.Layer):
         )
 
     def call(self, inputs: GraphEncoderInputs, training: bool = False):
-        head, dep = inputs  # чтоб не отходить от API
-        head = self.mlp_head(head, training=training)  # [N, num_heads, type_dim]
-        dep = self.mlp_dep(dep, training=training)  # [N, num_deps, type_dim]
-        logits = self.bilinear(head, dep)  # [N, num_heads, num_deps, num_arc_labels]
+        head = self.mlp_head(inputs.head, training=training)  # [N, num_heads, type_dim]
+        dep = self.mlp_dep(inputs.dep, training=training)  # [N, num_deps, type_dim]
+        bilinear_inputs = BiLinearInputs(head=head, dep=dep)
+        logits = self.bilinear(inputs=bilinear_inputs)  # [N, num_heads, num_deps, num_arc_labels]
         return logits

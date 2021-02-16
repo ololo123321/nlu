@@ -108,7 +108,8 @@ class RelationExtractor:
 
             # обучаемые с нуля верхние слои:
             if config_embedder["attention"]["enabled"]:
-                x = self._stacked_attention(x, config=config_embedder["attention"], mask=sequence_mask)  # [N, T, d_model]
+                x = self._stacked_attention(x, config=config_embedder["attention"],
+                                            mask=sequence_mask)  # [N, T, d_model]
                 d_model = config_embedder["attention"]["num_heads"] * config_embedder["attention"]["head_dim"]
             if config_embedder["rnn"]["enabled"]:
                 x = self._stacked_rnn(x, config=config_embedder["rnn"], mask=sequence_mask)
@@ -339,7 +340,7 @@ class RelationExtractor:
         saver = tf.train.Saver(var_list)
         checkpoint_path = os.path.join(model_dir, "model.ckpt")
         saver.restore(self.sess, checkpoint_path)
-    
+
     def initialize(self):
         global_vars = tf.global_variables()
         is_not_initialized = self.sess.run([tf.is_variable_initialized(var) for var in global_vars])
@@ -440,13 +441,15 @@ class RelationExtractor:
         logits - tf.Tensor of shape [batch_size, num_entities, num_entities, num_relations]
         """
         logits_shape = tf.shape(logits)  # [4]
-        labels = tf.broadcast_to(self.config['model']['re']['no_rel_id'], logits_shape[:3])  # [batch_size, num_entities, num_entities]
+        labels = tf.broadcast_to(self.config['model']['re']['no_rel_id'],
+                                 logits_shape[:3])  # [batch_size, num_entities, num_entities]
         labels = tf.tensor_scatter_nd_update(
             tensor=labels,
             indices=self.type_ids_ph[:, :-1],
             updates=self.type_ids_ph[:, -1],
         )  # [batch_size, num_entities, num_entities]
-        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits)  # [batch_size, num_entities, num_entities]
+        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels,
+                                                                          logits=logits)  # [batch_size, num_entities, num_entities]
         mask = tf.cast(tf.sequence_mask(self.num_entities_ph), tf.float32)  # [batch_size, num_entities]
         masked_per_example_loss = per_example_loss * mask[:, :, None] * mask[:, None, :]
         total_loss = tf.reduce_sum(masked_per_example_loss)

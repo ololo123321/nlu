@@ -4,21 +4,12 @@ import tqdm
 import json
 import shutil
 from copy import deepcopy
-from typing import List, Set, Dict
+from typing import List, Set, Dict, Tuple
 from itertools import accumulate
 from collections import namedtuple, Counter, defaultdict
 from rusenttokenize import ru_sent_tokenize
 
-
 TOKENS_EXPRESSION = re.compile(r"\w+|[^\w\s]")
-
-
-# TOKENS_EXPRESSION = re.compile("|".join([  # порядок выражений важен!
-#     r"[А-ЯA-Z]\w*[\.-]?\w+",  # Foo.bar -> Foo.Bar; Foo.bar -> Foo.bar
-#     r"[а-яa-z]\w*[\.-]?[а-яa-z]\w*",  # foo.bar -> foo.bar
-#     r"\w+",  # слова, числа
-#     r"[^\w\s]"  # пунктуация
-# ]))
 
 
 class SpecialSymbols:
@@ -40,6 +31,11 @@ class BertEncodings:
 class NerEncodings:
     BIO = "bio"
     BILOU = "bilou"
+
+
+class NerPrefixJoiners:
+    UNDERSCORE = "_"
+    HYPHEN = "-"
 
 
 class BadLineException(Exception):
@@ -113,12 +109,14 @@ class Vocab(ReprMixin):
         if isinstance(values, dict):  # str -> int
             self._value2id = values
             self._id2value = {v: k for k, v in values.items()}
-        else:
+        elif isinstance(values, set):
             special_value = "O"
             values -= {special_value}
             self._id2value = dict(enumerate(sorted(values), 1))
             self._id2value[0] = special_value
             self._value2id = {v: k for k, v in self._id2value.items()}
+        else:
+            raise
 
     @property
     def size(self):
@@ -143,7 +141,19 @@ SpanInfo = namedtuple("Span", ["span_chunks", "span_tokens"])
 
 
 class Example(ReprMixin):
-    def __init__(self, filename=None, id=None, text=None, tokens=None, labels=None, entities=None, arcs=None, label=None):
+    def __init__(
+            self,
+            filename=None,
+            id=None,
+            text=None,
+            tokens=None,
+            labels=None,
+            entities=None,
+            arcs=None,
+            label=None,
+            labels_events: Dict[str, List] = None,
+            tokens_spans: List[Tuple[int, int]] = None
+    ):
         self.filename = filename
         self.id = id
         self.text = text
@@ -152,6 +162,8 @@ class Example(ReprMixin):
         self.entities = entities
         self.arcs = arcs
         self.label = label  # в случае классификации предложений
+        self.labels_events = labels_events  # NER-лейблы события
+        self.tokens_spans = tokens_spans  # нужно для инференса
 
     @property
     def num_tokens(self):
@@ -161,7 +173,28 @@ class Example(ReprMixin):
     def num_entities(self):
         return len(self.entities)
 
+    @property
+    def events(self):
+        return [x for x in self.entities if x.is_event_trigger]
+
+    @property
+    def entities_wo_events(self):
+        return [x for x in self.entities if not x.is_event_trigger]
+
+    @property
+    def num_entities_wo_events(self):
+        return len(self.entities_wo_events)
+
+    @property
+    def num_events(self):
+        return len(self.events)
+
     def chunks(self, window=1):
+        """
+        Кусок исходного примера размером window предложений
+        :param window: ширина окна на уровне предложений
+        :return:
+        """
         if not self.text:
             print(f"[{self.id} WARNING]: empty text")
             return [Example(**self.__dict__)]
@@ -181,6 +214,8 @@ class Example(ReprMixin):
                 continue
             tokens = self.tokens[start:end]
             labels = self.labels[start:end]
+            tokens_spans = self.tokens_spans[start:end]
+            labels_events = {k: v[start:end] for k, v in self.labels_events.items()}
             entities = []
             entity_ids = set()
             for x in self.entities:
@@ -199,7 +234,9 @@ class Example(ReprMixin):
                 tokens=tokens,
                 labels=labels,
                 entities=entities,
-                arcs=arcs
+                arcs=arcs,
+                labels_events=labels_events,
+                tokens_spans=tokens_spans
             )
             res.append(x)
         return res
@@ -243,18 +280,21 @@ class ExamplesLoader:
     https://github.com/dialogue-evaluation/RuREBus
 
     """
+
     def __init__(
             self,
             ner_encoding: str = NerEncodings.BILOU,
             ner_label_other: str = "O",
             ner_suffix_joiner: str = '-',
-            fix_new_line_symbol: bool = True
+            fix_new_line_symbol: bool = True,
+            event_tags: Set[str] = None
     ):
         assert ner_encoding in {NerEncodings.BIO, NerEncodings.BILOU}
         self.ner_encoding = ner_encoding
         self.ner_label_other = ner_label_other
         self.ner_suffix_joiner = ner_suffix_joiner
         self.fix_new_line_symbol = fix_new_line_symbol
+        self.event_tags = event_tags if event_tags is not None else set()  # таги событий
 
     def load_examples(
             self,
@@ -327,7 +367,8 @@ class ExamplesLoader:
                         arg = EventArgument(id=arc.dep, role=rel)
                         events[arc.head].arguments.add(arg)
                     else:
-                        line = f"R{arc.id}\t{rel} Arg1:{arc.head} Arg2:{arc.dep}\n"
+                        id_arc = arc.id if isinstance(arc.id, str) else "R" + str(arc.id)
+                        line = f"{id_arc}\t{rel} Arg1:{arc.head} Arg2:{arc.dep}\n"
                         f.write(line)
 
                 # события
@@ -347,6 +388,7 @@ class ExamplesLoader:
                         line += ' ' + args_str
                     line += '\n'
                     f.write(line)
+
         if copy_texts:
             assert collection_dir is not None
             for name in filenames:
@@ -361,61 +403,98 @@ class ExamplesLoader:
         RE:
         * оба аргумента отношений есть в entities
         """
+        # обязателен айдишник
         assert example.id is not None, f"example {example} has no id!"
         prefix = f"[{example.id}]: "
 
+        # ner-кодировка
         assert self.ner_encoding in {NerEncodings.BIO, NerEncodings.BILOU}, \
             f"expected ner_encoding {NerEncodings.BIO} or {NerEncodings.BILOU}, got {self.ner_encoding}"
-        assert len(example.tokens) == len(example.labels), \
-            prefix + f"tokens and labels mismatch, {len(example.tokens)} != {len(example.labels)}"
 
-        entity_ids = set()
+        num_tokens = len(example.tokens)
+
+        # биекция между токенами и лейблами
+        assert num_tokens == len(example.labels), \
+            prefix + f"tokens and labels mismatch, {num_tokens} != {len(example.labels)}"
+
+        entity_ids_all = set()
+        entity_ids_wo_events = set()
         entity_spans = set()
+        event2entities = defaultdict(set)
         for entity in example.entities:
+            # обязателен айдишник
             assert entity.id is not None, \
                 prefix + f"[{entity}] entity has no id!"
-            assert entity.start_token_id <= entity.end_token_id, \
-                prefix + f"[{entity}] strange entity span"
-            assert entity.start_token_id >= 0, prefix + f"[{entity}] strange start"
-            assert entity.end_token_id < len(example.tokens), \
-                prefix + f"[{entity}] strange entity end: {entity.end_token_id}, but num tokens is {len(example.tokens)}"
+
+            # проверка валидности спана
+            assert 0 <= entity.start_token_id <= entity.end_token_id < num_tokens, \
+                prefix + f"[{entity}] strange entity span: " \
+                    f"start token id: {entity.start_token_id}, end token id: {entity.end_token_id}. num tokens: {num_tokens}"
+
+            # проверка корректности соответстия токенов сущности токенам примера
             expected_tokens = example.tokens[entity.start_token_id:entity.end_token_id + 1]
             assert expected_tokens == entity.tokens, \
                 prefix + f"[{entity}] tokens and example tokens mismatch: {entity.tokens} != {expected_tokens}"
-            expected_labels = example.labels[entity.start_token_id:entity.end_token_id + 1]
+
+            # проверка корректности соответстия лейблов сущности лейблам примера
+            if entity.is_event_trigger:
+                ner_labels = example.labels_events[entity.label]
+            else:
+                ner_labels = example.labels
+            expected_labels = ner_labels[entity.start_token_id:entity.end_token_id + 1]
             assert expected_labels == entity.labels, \
                 prefix + f"[{entity}]: labels and example labels mismatch: {entity.labels} != {expected_labels}"
-            entity_ids.add(entity.id)
+
+            # кэш
+            entity_ids_all.add(entity.id)
             entity_spans.add((entity.start_token_id, entity.end_token_id))
+            if entity.is_event_trigger:
+                event2entities[entity.label].add(entity.id)
+            else:
+                entity_ids_wo_events.add(entity.id)
 
-        assert len(example.entities) == len(entity_ids), \
-            prefix + f"entity ids are not unique: {len(example.entities)} != {len(entity_ids)}"
+        # проверка уникальности сущностей
+        assert len(example.entities) == len(entity_ids_all), \
+            prefix + f"entity ids are not unique: {len(example.entities)} != {len(entity_ids_all)}"
 
+        # проверка биекции между множеством спанов и множеством сущностей.
+        # пока предполагается её наличие.
         assert len(example.entities) == len(entity_spans), \
-            prefix + f"there are overlapping entitie: " \
-                f"number of entities is {len(example.entities)}, but number of unique text spans is {len(entity_spans)}"
+            prefix + f"there are span duplicates: " \
+            f"number of entities is {len(example.entities)}, but number of unique text spans is {len(entity_spans)}"
 
-        if len(entity_ids) == 0:
-            assert set(example.labels) == {self.ner_label_other}, \
-                prefix + f"ner labels and named entities mismatch: ner labels are {set(example.labels)}, " \
+        def check_ner_labels(ent_ids, labels, ner_label_other):
+            """проверка непротиворечивости множества сущностей лейблам"""
+            if len(ent_ids) == 0:
+                assert set(labels) == {ner_label_other}, \
+                    prefix + f"ner labels and named entities mismatch: ner labels are {set(labels)}, " \
                     f"but there are no entities in example."
-        else:
-            assert set(example.labels) != {self.ner_label_other}, \
-                prefix + f"ner labels and named entities mismatch: ner labels are {set(example.labels)}, " \
-                    f"but there is at least one entity in example."
+            else:
+                assert set(labels) != {ner_label_other}, \
+                    prefix + f"ner labels and named entities mismatch: ner labels are {set(labels)}, " \
+                    f"but there are following entities in example: {ent_ids}"
+
+        check_ner_labels(ent_ids=entity_ids_wo_events, labels=example.labels, ner_label_other=self.ner_label_other)
+
+        for k, v in event2entities.items():
+            check_ner_labels(ent_ids=v, labels=example.labels_events[k], ner_label_other=self.ner_label_other)
 
         arc_args = []
         for arc in example.arcs:
-            assert arc.head in entity_ids, \
+            # проверка того, что в примере есть исходящая вершина
+            assert arc.head in entity_ids_all, \
                 prefix + f"something is wrong with arc {arc.id}: head {arc.head} is unknown"
-            assert arc.dep in entity_ids, \
+            # проверка того, что в примере есть входящая вершина
+            assert arc.dep in entity_ids_all, \
                 prefix + f"something is wrong with arc {arc.id}: dep {arc.dep} is unknown"
             arc_args.append((arc.head, arc.dep))
+        # проверка того, что одному ребру соответствует одно отношение
         if len(arc_args) != len(set(arc_args)):
             arc_counts = {k: v for k, v in Counter(arc_args).items() if v > 1}
             raise AssertionError(prefix + f'there duplicates in arc args: {arc_counts}')
 
         if self.ner_encoding == NerEncodings.BILOU:
+            # проверка того, что число начал сущности равно числу концов
             num_start_ids = sum(x.startswith("B") for x in example.labels)
             num_end_ids = sum(x.startswith("L") for x in example.labels)
             assert num_start_ids == num_end_ids, \
@@ -465,6 +544,7 @@ class ExamplesLoader:
 
         # токенизация
         text_tokens = []
+        tokens_spans = []
         span2index = {}
 
         # бывают странные ситуации:
@@ -476,11 +556,15 @@ class ExamplesLoader:
         start2index = {}
         for i, m in enumerate(TOKENS_EXPRESSION.finditer(text)):
             text_tokens.append(m.group())
-            span2index[m.span()] = i
-            start2index[m.span()[0]] = i
+
+            span = m.span()
+            span2index[span] = i
+            start2index[span[0]] = i
+            tokens_spans.append(span)
 
         # .ann
         ner_labels = [self.ner_label_other] * len(text_tokens)
+        ner_labels_events = {event_tag: ner_labels.copy() for event_tag in self.event_tags}
         entities = []
         arcs = []
         arcs_used = set()  # в арках бывают дубликаты, пример: R35, R36 в 31339011023601075299026_18_part_1.ann
@@ -490,6 +574,8 @@ class ExamplesLoader:
                 line = line.strip()
                 content = line.split('\t')
                 line_tag = content[0]
+
+                # сущности
                 if line_tag.startswith("T"):
                     # проверка того, что формат строки верный
                     try:
@@ -572,8 +658,11 @@ class ExamplesLoader:
 
                         assert token_id is not None
 
-                        # запись лейблов в ner_labels
-                        ner_labels[token_id] = label
+                        # запись лейблов
+                        if entity_label in self.event_tags:
+                            ner_labels_events[entity_label][token_id] = label
+                        else:
+                            ner_labels[token_id] = label
 
                         # вывод индекса токена начала и конца
                         if i == 0:
@@ -600,6 +689,7 @@ class ExamplesLoader:
                     )
                     entities.append(entity)
 
+                # отношения (relations)
                 elif line_tag.startswith("R"):
                     try:
                         _, relation = content
@@ -618,6 +708,7 @@ class ExamplesLoader:
                         arcs.append(arc)
                         arcs_used.add(arc_triple)
 
+                # события (events)
                 elif line_tag.startswith("E"):
                     # E0\tBankruptcy:T0 Bankrupt:T1 Bankrupt2:T2
                     event_args = content[1].split()
@@ -626,7 +717,9 @@ class ExamplesLoader:
                     event_triggers.add(id_head)
                     for dep in event_args:
                         rel, id_dep = dep.split(":")
-                        rel = re.sub(r'\d+', '', rel)  # если аргументов несколько, то 
+                        # если аргументов одной роли несколько, то всем, начиная со второго,
+                        # приписывается в конце номер (см. пример)
+                        rel = re.sub(r'\d+', '', rel)
                         arc = Arc(
                             id=line_tag,
                             head=id_head,
@@ -637,6 +730,15 @@ class ExamplesLoader:
                         if arc_triple not in arcs_used:
                             arcs.append(arc)
                             arcs_used.add(arc_triple)
+
+                # атрибуты сущностей и событий TODO: написать код
+                elif line_tag.startswith("M"):
+                    pass
+
+                # комментарии (annotations). их можно игнорить
+                elif line_tag.startswith("A"):
+                    pass
+
                 else:
                     raise Exception(f"invalid line: {line}")
 
@@ -650,7 +752,9 @@ class ExamplesLoader:
             tokens=text_tokens,
             labels=ner_labels,
             entities=entities,
-            arcs=arcs
+            arcs=arcs,
+            labels_events=ner_labels_events,
+            tokens_spans=tokens_spans
         )
 
         return example
@@ -674,28 +778,44 @@ class ExampleEncoder:
 
         self.vocab_ner = None
         self.vocab_re = None
+        self.vocabs_events = {}
 
     def fit_transform(self, examples):
         self.fit(examples)
         return self.transform(examples)
 
     def fit(self, examples):
+        # инициализация значений словаря
         vocab_ner = set()
+        vocabs_events = defaultdict(set)
+
         prefixes = {"B", "I"}
-        if self.ner_encoding == "bilou":
+        if self.ner_encoding == NerEncodings.BILOU:
             prefixes |= {"L", "U"}
+
+        def extend_vocab(label_, ner_suffix_joiner, vocab_values):
+            if ner_suffix_joiner in label_:
+                # предполагаем, что каждая сущность может состоять из нескольких токенов
+                label_ = label_.split(ner_suffix_joiner)[-1]
+                for p in prefixes:
+                    vocab_values.add(p + ner_suffix_joiner + label_)
+            else:
+                vocab_values.add(label_)
+
         for x in examples:
             for label in x.labels:
-                if self.ner_suffix_joiner in label:
-                    # предполагаем, что каждая сущность может состоять из нескольких токенов
-                    label = label.split(self.ner_suffix_joiner)[-1]
-                    for prefix in prefixes:
-                        vocab_ner.add(prefix + self.ner_suffix_joiner + label)
-                        vocab_ner.add(prefix + self.ner_suffix_joiner + label)
-                else:
-                    vocab_ner.add(label)
+                extend_vocab(label, self.ner_suffix_joiner, vocab_ner)
+            for event_tag, labels in x.labels_events.items():
+                for label in labels:
+                    extend_vocab(label, self.ner_suffix_joiner, vocabs_events[event_tag])
+
         vocab_ner.add(self.ner_label_other)
         self.vocab_ner = Vocab(vocab_ner)
+
+        self.vocabs_events = {}
+        for k, v in vocabs_events.items():
+            v.add(self.ner_label_other)
+            self.vocabs_events[k] = Vocab(v)
 
         # arcs vocab
         vocab_re = set()
@@ -720,22 +840,44 @@ class ExampleEncoder:
         * entities - List[Tuple[start, end]]
         * arcs - List[Tuple[head, dep, id_relation]]
         """
-        example_enc = Example(filename=example.filename, id=example.id)
+        example_enc = Example(
+            filename=example.filename,
+            id=example.id,
+            text=example.text
+        )
 
         # tokens
         example_enc.tokens = example.tokens.copy()
         if self.add_seq_bounds:
             example_enc.tokens = ["[START]"] + example_enc.tokens + ["[END]"]
 
-        # labels
-        labels_encoded = []
-        for label in example.labels:
-            label_enc = self.vocab_ner.get_id(label)
-            labels_encoded.append(label_enc)
+        # tokens spans
+        example_enc.tokens_spans = example.tokens_spans.copy()
         if self.add_seq_bounds:
-            label = self.vocab_ner.get_id(self.ner_label_other)
-            labels_encoded = [label] + labels_encoded + [label]
-        example_enc.labels = labels_encoded
+            example_enc.tokens_spans = [(-1, -1)] + example_enc.tokens_spans + [(-1, -1)]  # TODO: ок ли так делать?
+
+        # labels
+        def encode_labels(labels, vocab, add_seq_bounds, ner_label_other):
+            labels_encoded = []
+            for label in labels:
+                label_enc = vocab.get_id(label)
+                labels_encoded.append(label_enc)
+            if add_seq_bounds:
+                label = vocab.get_id(ner_label_other)
+                labels_encoded = [label] + labels_encoded + [label]
+            # example_enc.labels = labels_encoded
+            return labels_encoded
+
+        example_enc.labels = encode_labels(
+            labels=example.labels, vocab=self.vocab_ner,
+            add_seq_bounds=self.add_seq_bounds, ner_label_other=self.ner_label_other
+        )
+        example_enc.labels_events = {}
+        for k, v in example.labels_events.items():
+            example_enc.labels_events[k] = encode_labels(
+                labels=v, vocab=self.vocabs_events[k],
+                add_seq_bounds=self.add_seq_bounds, ner_label_other=self.ner_label_other
+            )
 
         # entities
         example_enc.entities = deepcopy(example.entities)
@@ -753,7 +895,7 @@ class ExampleEncoder:
             arcs_encoded.append(arc_enc)
         example_enc.arcs = arcs_encoded
         return example_enc
-    
+
     def save(self, encoder_dir):
         d = {
             "ner_encoding": self.ner_encoding,
@@ -764,10 +906,13 @@ class ExampleEncoder:
         }
         with open(os.path.join(encoder_dir, "encoder_config.json"), "w") as f:
             json.dump(d, f, indent=4)
-        
+
         with open(os.path.join(encoder_dir, "ner_encodings.json"), "w") as f:
             json.dump(self.vocab_ner.encodings, f, indent=4)
-        
+
+        with open(os.path.join(encoder_dir, "ner_encodings_events.json"), "w") as f:
+            json.dump({k: v.encodings for k, v in self.vocabs_events.items()}, f, indent=4)
+
         with open(os.path.join(encoder_dir, "re_encodings.json"), "w") as f:
             json.dump(self.vocab_re.encodings, f, indent=4)
 
@@ -781,7 +926,10 @@ class ExampleEncoder:
 
         re_encodings = json.load(open(os.path.join(encoder_dir, "re_encodings.json")))
         enc.vocab_re = Vocab(values=re_encodings)
-        
+
+        d = json.load(open(os.path.join(encoder_dir, "ner_encodings_events.json")))
+        enc.vocabs_events = {k: Vocab(values=v) for k, v in d.items()}
+
         return enc
 
 
