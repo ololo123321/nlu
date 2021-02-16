@@ -113,7 +113,7 @@ def predict_and_save_baseline(examples, output_dir):
 def main(args):
     loader = ExamplesLoader(
         ner_encoding=NerEncodings.BILOU,
-        ner_suffix_joiner="-",
+        ner_prefix_joiner="-",
         fix_new_line_symbol=True
     )
     examples = loader.load_examples(data_dir=args.data_dir, n=None, split=True, window=1)

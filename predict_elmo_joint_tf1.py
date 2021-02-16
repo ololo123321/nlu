@@ -18,7 +18,7 @@ def main(args):
     # подгрузка примеров
     loader = ExamplesLoader(
         ner_encoding=config["preprocessing"]["ner_encoding"],
-        ner_suffix_joiner=config["preprocessing"]["ner_prefix_joiner"],
+        ner_prefix_joiner=config["preprocessing"]["ner_prefix_joiner"],
         event_tags={event_tag}
     )
     examples = loader.load_examples(

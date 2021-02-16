@@ -15,7 +15,7 @@ NER_SUFFIX_JOINER = '-'
 def main(args):
     loader = ExamplesLoader(
         ner_encoding=NerEncodings.BILOU,  # TODO: добавить в конфиг и использовать при инференсе
-        ner_suffix_joiner=NER_SUFFIX_JOINER  # TODO: добавить в конфиг и использовать при инференсе
+        ner_prefix_joiner=NER_SUFFIX_JOINER  # TODO: добавить в конфиг и использовать при инференсе
     )
 
     examples_train = loader.load_examples(
@@ -44,7 +44,7 @@ def main(args):
     add_seq_bounds = args.span_emb_type == 1
     example_encoder = ExampleEncoder(
         ner_encoding=NerEncodings.BILOU,
-        ner_suffix_joiner=NER_SUFFIX_JOINER,
+        ner_prefix_joiner=NER_SUFFIX_JOINER,
         add_seq_bounds=add_seq_bounds
     )
 

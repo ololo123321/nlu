@@ -300,14 +300,14 @@ class ExamplesLoader:
             self,
             ner_encoding: str = NerEncodings.BILOU,
             ner_label_other: str = "O",
-            ner_suffix_joiner: str = '-',
+            ner_prefix_joiner: str = NerPrefixJoiners.HYPHEN,
             fix_new_line_symbol: bool = True,
             event_tags: Set[str] = None
     ):
         assert ner_encoding in {NerEncodings.BIO, NerEncodings.BILOU}
         self.ner_encoding = ner_encoding
         self.ner_label_other = ner_label_other
-        self.ner_suffix_joiner = ner_suffix_joiner
+        self.ner_prefix_joiner = ner_prefix_joiner
         self.fix_new_line_symbol = fix_new_line_symbol
         self.event_tags = event_tags if event_tags is not None else set()  # таги событий
 
@@ -646,7 +646,7 @@ class ExamplesLoader:
                             raise
 
                         # добавление лейбла
-                        label = prefix + self.ner_suffix_joiner + entity_label
+                        label = prefix + self.ner_prefix_joiner + entity_label
                         entity_labels.append(label)
 
                         # вывод спана токена в исходном тексте
@@ -800,18 +800,18 @@ class ExamplesLoader:
 class ExampleEncoder:
     def __init__(
             self,
-            ner_encoding,
-            ner_label_other="O",
-            re_label_other="O",
-            ner_suffix_joiner='_',
-            add_seq_bounds=True
+            ner_encoding: str = NerEncodings.BIO,
+            ner_label_other: str = "O",
+            re_label_other: str = "O",
+            ner_prefix_joiner: str = NerPrefixJoiners.HYPHEN,
+            add_seq_bounds: bool = True
     ):
-        assert ner_encoding in {"bio", "bilou"}
+        assert ner_encoding in {NerEncodings.BIO, NerEncodings.BILOU}
         self.ner_encoding = ner_encoding
         self.ner_label_other = ner_label_other
         self.re_label_other = re_label_other
         self.add_seq_bounds = add_seq_bounds
-        self.ner_suffix_joiner = ner_suffix_joiner
+        self.ner_prefix_joiner = ner_prefix_joiner
 
         self.vocab_ner = None
         self.vocab_re = None
@@ -830,21 +830,21 @@ class ExampleEncoder:
         if self.ner_encoding == NerEncodings.BILOU:
             prefixes |= {"L", "U"}
 
-        def extend_vocab(label_, ner_suffix_joiner, vocab_values):
-            if ner_suffix_joiner in label_:
+        def extend_vocab(label_, ner_prefix_joiner, vocab_values):
+            if ner_prefix_joiner in label_:
                 # предполагаем, что каждая сущность может состоять из нескольких токенов
-                label_ = label_.split(ner_suffix_joiner)[-1]
+                label_ = label_.split(ner_prefix_joiner)[-1]
                 for p in prefixes:
-                    vocab_values.add(p + ner_suffix_joiner + label_)
+                    vocab_values.add(p + ner_prefix_joiner + label_)
             else:
                 vocab_values.add(label_)
 
         for x in examples:
             for label in x.labels:
-                extend_vocab(label, self.ner_suffix_joiner, vocab_ner)
+                extend_vocab(label, self.ner_prefix_joiner, vocab_ner)
             for event_tag, labels in x.labels_events.items():
                 for label in labels:
-                    extend_vocab(label, self.ner_suffix_joiner, vocabs_events[event_tag])
+                    extend_vocab(label, self.ner_prefix_joiner, vocabs_events[event_tag])
 
         vocab_ner.add(self.ner_label_other)
         self.vocab_ner = Vocab(vocab_ner)
@@ -938,7 +938,7 @@ class ExampleEncoder:
             "ner_encoding": self.ner_encoding,
             "ner_label_other": self.ner_label_other,
             "re_label_other": self.re_label_other,
-            "ner_suffix_joiner": self.ner_suffix_joiner,
+            "ner_prefix_joiner": self.ner_prefix_joiner,
             "add_seq_bounds": self.add_seq_bounds
         }
         with open(os.path.join(encoder_dir, "encoder_config.json"), "w") as f:

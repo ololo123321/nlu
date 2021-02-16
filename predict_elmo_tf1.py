@@ -16,7 +16,7 @@ def main(args):
     # подгрузка примеров
     loader = ExamplesLoader(
         ner_encoding=NerEncodings.BILOU,  # TODO: подгружать из конфига
-        ner_suffix_joiner=NER_SUFFIX_JOINER  # TODO: подгружать из конфига
+        ner_prefix_joiner=NER_SUFFIX_JOINER  # TODO: подгружать из конфига
     )
     examples = loader.load_examples(
         data_dir=args.data_dir,

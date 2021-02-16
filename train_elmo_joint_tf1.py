@@ -14,7 +14,7 @@ def main(args):
 
     loader = ExamplesLoader(
         ner_encoding=args.ner_encoding,
-        ner_suffix_joiner=args.ner_prefix_joiner,
+        ner_prefix_joiner=args.ner_prefix_joiner,
         event_tags={event_tag}
     )
 
@@ -45,7 +45,7 @@ def main(args):
     add_seq_bounds = args.ner_encoding == NerEncodings.BILOU
     example_encoder = ExampleEncoder(
         ner_encoding=args.ner_encoding,
-        ner_suffix_joiner=args.ner_prefix_joiner,
+        ner_prefix_joiner=args.ner_prefix_joiner,
         add_seq_bounds=add_seq_bounds
     )
 
