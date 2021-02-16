@@ -4,25 +4,25 @@ from argparse import ArgumentParser
 
 import tensorflow as tf
 
-from src.model import RelationExtractor
-from src.preprocessing import ExampleEncoder, ExamplesLoader, NerEncodings
+from src.model import JointModelV1
+from src.preprocessing import ExampleEncoder, ExamplesLoader, NerEncodings, NerPrefixJoiners
 from src.utils import check_entities_spans
-
-# TODO: добавить в конфиг и использовать при инференсе
-NER_SUFFIX_JOINER = '-'
 
 
 def main(args):
+    event_tag = "Bankruptcy"
+
     loader = ExamplesLoader(
-        ner_encoding=NerEncodings.BILOU,  # TODO: добавить в конфиг и использовать при инференсе
-        ner_suffix_joiner=NER_SUFFIX_JOINER  # TODO: добавить в конфиг и использовать при инференсе
+        ner_encoding=args.ner_encoding,
+        ner_suffix_joiner=args.ner_prefix_joiner,
+        event_tags={event_tag}
     )
 
     examples_train = loader.load_examples(
         data_dir=args.train_data_dir,
         n=None,
-        split=bool(args.split), # TODO: добавить в конфиг и использовать при инференсе
-        window=args.window, # TODO: добавить в конфиг и использовать при инференсе
+        split=bool(args.split),
+        window=args.window,
     )
 
     examples_valid = loader.load_examples(
@@ -35,16 +35,17 @@ def main(args):
     print("num train examples:", len(examples_train))
     print("num valid examples:", len(examples_valid))
 
-    examples_train = [x for x in examples_train if len(x.entities) > 0]
-    examples_valid = [x for x in examples_valid if len(x.entities) > 0]
+    # TODO: временное решение, чтоб всё работало
+    examples_train = [x for x in examples_train if x.num_events != 0 and x.num_entities_wo_events != 0]
+    examples_valid = [x for x in examples_valid if x.num_events != 0 and x.num_entities_wo_events != 0]
 
     print("num train examples filtered:", len(examples_train))
     print("num valid examples filtered:", len(examples_valid))
 
-    add_seq_bounds = args.span_emb_type == 1
+    add_seq_bounds = args.ner_encoding == NerEncodings.BILOU
     example_encoder = ExampleEncoder(
-        ner_encoding=NerEncodings.BILOU,
-        ner_suffix_joiner=NER_SUFFIX_JOINER,
+        ner_encoding=args.ner_encoding,
+        ner_suffix_joiner=args.ner_prefix_joiner,
         add_seq_bounds=add_seq_bounds
     )
 
@@ -54,6 +55,8 @@ def main(args):
     print("saving encodings...")
     example_encoder.save(encoder_dir=args.model_dir)
 
+    vocab_ner_event = example_encoder.vocabs_events[event_tag]
+    print(vocab_ner_event)
     config = {
         "model": {
             # конфигурация веткоризации токенов
@@ -82,6 +85,18 @@ def main(args):
                     "recurrent_dropout": 0.0
                 }
             },
+            # поиск
+            "ner": {
+                "start_ids": [i for label, i in example_encoder.vocab_ner.encodings.items() if label.startswith("B")],
+                "other_label_id": 0
+            },
+            # событие
+            "event": {
+                "num_labels": vocab_ner_event.size,  # TODO: должен быть отдельный vocab под событие
+                "start_ids": [i for label, i in vocab_ner_event.encodings.items() if label.startswith("B")],
+                "tag": event_tag,
+                "other_label_id": 0
+            },
             # конфигурация головы, решающей relation extraction
             "re": {
                 "ner_embeddings": {
@@ -99,16 +114,15 @@ def main(args):
                     "type": args.span_emb_type,
                 },
                 "mlp": {
-                    "num_layers": 1,
+                    "num_layers": args.num_mlp_layers,
                     "dropout": args.mlp_dropout,
-                    "activation": "relu"
+                    "activation": args.mlp_activation
                 },
                 "bilinear": {
                     "num_labels": example_encoder.vocab_re.size,
-                    "hidden_dim": 128
+                    "hidden_dim": args.bilinear_hidden_dim
                 },
-                "no_rel_id": example_encoder.vocab_re.get_id("O"),
-                "ner_other_label_id": example_encoder.vocab_ner.get_id("O")
+                "no_rel_id": example_encoder.vocab_re.get_id("O")
             },
         },
         "optimizer": {
@@ -119,7 +133,7 @@ def main(args):
             "max_steps_wo_improvement": 50,
             "lr_reduce_patience": 5,
             "lr_reduction_factor": 0.7,
-            # custome schedule (если True, то предыдущая опция игнорится)
+            # custom schedule (если True, то предыдущая опция игнорится)
             "custom_schedule": True,
             "min_lr": 1e-5,
             # opt name
@@ -132,6 +146,12 @@ def main(args):
             # gradients clipping
             "clip_grads": True,
             "clip_norm": 1.0
+        },
+        "preprocessing": {
+            "ner_encoding": args.ner_encoding,
+            "ner_prefix_joiner": args.ner_prefix_joiner,
+            "split": bool(args.split),
+            "window": args.window
         }
     }
     print("model and training config:")
@@ -142,7 +162,7 @@ def main(args):
 
     tf.reset_default_graph()
     sess = tf.Session()
-    model = RelationExtractor(sess, config)
+    model = JointModelV1(sess, config)
     model.build()
     model.initialize()
 
@@ -177,7 +197,8 @@ def main(args):
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         no_rel_id=example_encoder.vocab_re.get_id("O"),
-        id2label=example_encoder.vocab_re.inv_encodings,
+        id2label_ner=example_encoder.vocabs_events[event_tag].inv_encodings,
+        id2label_roles=example_encoder.vocab_re.inv_encodings,
         checkpoint_path=checkpoint_path
     )
 
@@ -188,6 +209,8 @@ if __name__ == "__main__":
     parser.add_argument("--valid_data_dir")
     parser.add_argument("--elmo_dir")
     parser.add_argument("--model_dir")
+    parser.add_argument("--ner_encoding", choices=[NerEncodings.BIO, NerEncodings.BILOU], default=NerEncodings.BIO, required=False)
+    parser.add_argument("--ner_prefix_joiner", choices=[NerPrefixJoiners.HYPHEN, NerPrefixJoiners.UNDERSCORE], default=NerPrefixJoiners.HYPHEN, required=False)
     parser.add_argument("--elmo_dropout", type=float, default=0.1, required=False)
     parser.add_argument("--use_ner_emb", type=int, default=1, help="приниимает int 0 (False) или 1 (True)")
     parser.add_argument("--span_emb_type", type=int, default=1, help="приниимает int 0 (False) или 1 (True)")
@@ -197,7 +220,10 @@ if __name__ == "__main__":
     parser.add_argument("--cell_name", choices=["gru", "lstm"], default="lstm", required=False)
     parser.add_argument("--cell_dim", type=int, default=128, required=False)
     parser.add_argument("--rnn_dropout", type=float, default=0.5, required=False)
+    parser.add_argument("--num_mlp_layers", type=int, default=1, required=False)
+    parser.add_argument("--mlp_activation", choices=["relu", "tanh"], default="relu", required=False)
     parser.add_argument("--mlp_dropout", type=float, default=0.33, required=False)
+    parser.add_argument("--bilinear_hidden_dim", type=int, default=128, required=False)
     parser.add_argument("--epochs", type=int, default=50, required=False)
     parser.add_argument("--batch_size", type=int, default=32, required=False)
     parser.add_argument("--split", type=int, default=1, help="приниимает int 0 (False) или 1 (True)")

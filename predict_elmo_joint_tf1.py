@@ -4,30 +4,35 @@ from argparse import ArgumentParser
 
 import tensorflow as tf
 
-from src.model import RelationExtractor
-from src.preprocessing import ExampleEncoder, ExamplesLoader, NerEncodings
+from src.model import JointModelV1
+from src.preprocessing import ExampleEncoder, ExamplesLoader
 from src.utils import check_entities_spans
-
-# TODO: подгружать из конфига
-NER_SUFFIX_JOINER = '-'
 
 
 def main(args):
+    event_tag = "Bankruptcy"  # TODO: вынести в конфиг
+
+    # подгрузка конфига
+    config = json.load(open(os.path.join(args.model_dir, "config.json")))
+
     # подгрузка примеров
     loader = ExamplesLoader(
-        ner_encoding=NerEncodings.BILOU,  # TODO: подгружать из конфига
-        ner_suffix_joiner=NER_SUFFIX_JOINER  # TODO: подгружать из конфига
+        ner_encoding=config["preprocessing"]["ner_encoding"],
+        ner_suffix_joiner=config["preprocessing"]["ner_prefix_joiner"],
+        event_tags={event_tag}
     )
     examples = loader.load_examples(
         data_dir=args.data_dir,
         n=None,
-        split=True,  # TODO: подгружать из конфига
-        window=1,  # TODO: подгружать из конфига
+        split=config["preprocessing"]["split"],
+        window=config["preprocessing"]["window"],
     )
 
     # удаление рёбер, если они есть. иначе будет феил при сохранении предиктов
+    # удаление событий, т.к. их мы сами предсказываем
     for x in examples:
         x.arcs.clear()
+        x.entities = x.entities_wo_events
 
     # кодирование примеров
     example_encoder = ExampleEncoder.load(encoder_dir=args.model_dir)
@@ -40,26 +45,20 @@ def main(args):
     # id2relation = {v: k for k, v in example_encoder.vocab_re.encodings.items()}
     # save_predictions(examples=examples_encoded, output_dir=args.output_dir, id2relation=id2relation)
 
-    # подгрузка конфига
-    config = json.load(open(os.path.join(args.model_dir, "config.json")))
-
     # создание модели + подгрузка весов
     tf.reset_default_graph()
     sess = tf.Session()
-    model = RelationExtractor(sess, config)
+    model = JointModelV1(sess, config)
     model.build()
     model.restore(model_dir=args.model_dir)
     model.initialize()
 
-    # нет смысла искать рёбра у графа без вершин
-    examples_filtered = [x for x in examples_encoded if len(x.entities) > 0]
-
     print("checking examples...")
-    check_entities_spans(examples=examples_filtered, span_emb_type=config["model"]["re"]["span_embeddings"]["type"])
+    check_entities_spans(examples=examples_encoded, span_emb_type=config["model"]["re"]["span_embeddings"]["type"])
     print("OK")
 
     # рёбра пишутся в сразу в инстансы классов Example
-    model.predict(examples_filtered, batch_size=args.batch_size)
+    model.predict(examples_encoded, batch_size=args.batch_size)
 
     def check_arcs():
         """
@@ -70,12 +69,12 @@ def main(args):
         d_set = defaultdict(set)
         d_int = defaultdict(int)
 
-        for x in examples_filtered:
+        for x in examples_encoded:
             assert x.filename is not None
             for arc in x.arcs:
                 d_set[x.filename].add(arc.id)
                 d_int[x.filename] += 1
-        for x in examples_filtered:
+        for x in examples_encoded:
             assert len(d_set[x.filename]) == d_int[x.filename], f"id: {x.id}, filename: {x.filename}: {len(d_set[x.filename])} != {d_int[x.filename]}"
 
     check_arcs()
@@ -83,7 +82,7 @@ def main(args):
     print("saving predictions")
     id2relation = {v: k for k, v in example_encoder.vocab_re.encodings.items()}
     loader.save_predictions(
-        examples=examples_filtered,
+        examples=examples_encoded,
         output_dir=args.output_dir,
         id2relation=id2relation,
         copy_texts=args.copy_texts,
