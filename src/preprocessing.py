@@ -779,7 +779,9 @@ class ExamplesLoader:
                     id2arg[arc.id] = arc
 
                 # событие
-                elif line_type == LineTypes.EVENT and not self.ignore_events:
+                elif line_type == LineTypes.EVENT:
+                    if self.ignore_events:
+                        continue
                     # E0\tBankruptcy:T0 Bankrupt:T1 Bankrupt2:T2
                     event_args = content[1].split()
                     event_trigger = event_args.pop(0)
