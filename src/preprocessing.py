@@ -46,7 +46,6 @@ class LineTypes:
     EVENT = "E"
     RELATION = "R"
     ATTRIBUTE = "A"
-    # то же самое, что A:
     # https://brat.nlplab.org/standoff.html
     # For backward compatibility with existing standoff formats,
     # brat also recognizes the ID prefix "M" for attributes.
@@ -70,9 +69,7 @@ class EntitySpanException(Exception):
 
 # immutable structs
 
-# possible args: Entity, Event, Arc
 Attribute = namedtuple("Attribute", ["id", "type", "value"])
-Comment = namedtuple("Comment", ["id", "argument", "text"])
 EventArgument = namedtuple("EventArgument", ["id", "role"])
 SpanInfo = namedtuple("Span", ["span_chunks", "span_tokens"])
 
@@ -101,7 +98,7 @@ class Entity(ReprMixin):
             end_token_id=None,
             sent_id=None,
             is_event_trigger=False,
-            attrs: Set[Attribute] = None,  # атрибуты сущности
+            attrs: List[Attribute] = None,  # атрибуты сущности
             comment: str = None
     ):
         self.id = id
@@ -116,7 +113,7 @@ class Entity(ReprMixin):
         self.sent_id = sent_id
         self.is_event_trigger = is_event_trigger
         self.attrs = attrs if attrs is not None else []
-        self.commnet = comment
+        self.comment = comment
 
 
 class Event(ReprMixin):
@@ -344,7 +341,8 @@ class ExamplesLoader:
             ner_label_other: str = "O",
             ner_prefix_joiner: str = NerPrefixJoiners.HYPHEN,
             fix_new_line_symbol: bool = True,
-            event_tags: Set[str] = None
+            event_tags: Set[str] = None,
+            ignore_events: bool = False
     ):
         assert ner_encoding in {NerEncodings.BIO, NerEncodings.BILOU}
         self.ner_encoding = ner_encoding
@@ -352,6 +350,7 @@ class ExamplesLoader:
         self.ner_prefix_joiner = ner_prefix_joiner
         self.fix_new_line_symbol = fix_new_line_symbol
         self.event_tags = event_tags if event_tags is not None else set()  # таги событий
+        self.ignore_events = ignore_events
 
     def load_examples(
             self,
@@ -549,6 +548,11 @@ class ExamplesLoader:
             arc_counts = {k: v for k, v in Counter(arc_args).items() if v > 1}
             raise AssertionError(prefix + f'there duplicates in arc args: {arc_counts}')
 
+        num_triggers = sum(entity.is_event_trigger for entity in example.entities)
+        num_events = len(example.events)
+        assert num_events == num_triggers, \
+            prefix + f"number of event triggers is {num_triggers}, but number of events is {num_events}"
+
         if self.ner_encoding == NerEncodings.BILOU:
             # проверка того, что число начал сущности равно числу концов
             num_start_ids = sum(x.startswith("B") for x in example.labels)
@@ -556,11 +560,10 @@ class ExamplesLoader:
             assert num_start_ids == num_end_ids, \
                 prefix + f"num start ids: {num_start_ids}, num end ids: {num_end_ids}"
 
-    def parse(self, data_dir, n=None, ner_encoding=NerEncodings.BILOU):
+    def parse(self, data_dir, n=None):
         """
         n - сколько примеров распарсить
         """
-        assert ner_encoding in {NerEncodings.BIO, NerEncodings.BILOU}
 
         # выбираем файлы, для которых есть исходный текст и разметка
         files = os.listdir(data_dir)
@@ -776,7 +779,7 @@ class ExamplesLoader:
                     id2arg[arc.id] = arc
 
                 # событие
-                elif line_type == LineTypes.EVENT:
+                elif line_type == LineTypes.EVENT and not self.ignore_events:
                     # E0\tBankruptcy:T0 Bankrupt:T1 Bankrupt2:T2
                     event_args = content[1].split()
                     event_trigger = event_args.pop(0)
@@ -820,7 +823,8 @@ class ExamplesLoader:
                     try:
                         id2arg[id_arg].attrs.append(attr)
                     except KeyError:
-                        raise BadLineException("there is no arg for provided attr")
+                        if not (id_arg[0] == LineTypes.EVENT and self.ignore_events):
+                            raise BadLineException("there is no arg for provided attr")
 
                 # комментарии.
                 elif line_type == LineTypes.COMMENT:
@@ -830,7 +834,8 @@ class ExamplesLoader:
                     try:
                         id2arg[id_arg].comment = msg
                     except KeyError:
-                        raise BadLineException("there is no arg for provided comment")
+                        if not (id_arg[0] == LineTypes.EVENT and self.ignore_events):
+                            raise BadLineException("there is no arg for provided comment")
 
                 else:
                     raise Exception(f"invalid line: {line}")
