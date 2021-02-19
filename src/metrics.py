@@ -32,6 +32,12 @@ def get_ner_metrics(y_true: List[List[str]], y_pred: List[List[str]], joiner: st
 
 
 def get_spans(labels: List[str], joiner: str = '-') -> Dict:
+    """
+    поддерживает только кодировку BIO
+    :param labels:
+    :param joiner:
+    :return:
+    """
     tag2spans = defaultdict(set)
 
     num_labels = len(labels)
@@ -97,6 +103,7 @@ def get_f1_precision_recall(tp: int, fp: int, fn: int) -> Dict:
 
 
 def f1_score_micro(y_true, y_pred, trivial_label: int = 0):
+    assert len(y_true) == len(y_pred)
     tp = 0
     fp = 0
     fn = 0
@@ -104,10 +111,47 @@ def f1_score_micro(y_true, y_pred, trivial_label: int = 0):
         if y_true_i != trivial_label or y_pred_i != trivial_label:
             if y_true_i == y_pred_i:
                 tp += 1
-            elif y_true_i == trivial_label:
-                fn += 1
-            elif y_pred_i == trivial_label:
-                fp += 1
+            else:
+                if y_true_i == trivial_label:
+                    fn += 1
+                elif y_pred_i == trivial_label:
+                    fp += 1
+                else:
+                    fp += 1
+                    fn += 1
 
     d = get_f1_precision_recall(tp=tp, fp=fp, fn=fn)
+    return d
+
+
+def f1_score_micro_v2(y_true, y_pred, trivial_label: int = 0):
+    assert len(y_true) == len(y_pred)
+    tp = 0
+    num_pred = 0
+    num_gold = 0
+    for y_true_i, y_pred_i in zip(y_true, y_pred):
+        if y_true_i != trivial_label:
+            num_gold += 1
+        if y_pred_i != trivial_label:
+            num_pred += 1
+        if (y_true_i == y_pred_i) and (y_true_i != trivial_label) and (y_pred_i != trivial_label):
+            tp += 1
+
+    if num_pred == 0:
+        precision = 0.0
+    else:
+        precision = tp / num_pred
+
+    if num_gold == 0:
+        recall = 0.0
+    else:
+        recall = tp / num_gold
+
+    if precision + recall == 0.0:
+        f1 = 0.0
+    else:
+        f1 = 2 * precision * recall / (precision + recall)
+
+    d = {"f1": f1, "precision": precision, "recall": recall, "support": num_gold}
+
     return d

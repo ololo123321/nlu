@@ -1,7 +1,8 @@
 import pytest
 import numpy as np
 import tensorflow as tf
-from src.utils import infer_entities_bounds
+
+from src.model.utils import infer_entities_bounds
 
 
 sess = tf.Session()
