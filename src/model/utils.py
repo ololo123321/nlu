@@ -1,34 +1,12 @@
+from typing import Tuple
 import tensorflow as tf
 
 
-def compute_f1(preds, labels):
-    """
-    https://github.com/facebookresearch/SpanBERT/blob/10641ea3795771dd96e9e3e9ef0ead4f4f6a29d2/code/run_tacred.py#L245
-    :param preds:
-    :param labels:
-    :return:
-    """
-    n_gold = n_pred = n_correct = 0
-    for pred, label in zip(preds, labels):
-        if pred != 0:
-            n_pred += 1
-        if label != 0:
-            n_gold += 1
-        if (pred != 0) and (label != 0) and (pred == label):
-            n_correct += 1
-    if n_correct == 0:
-        return {'precision': 0.0, 'recall': 0.0, 'f1': 0.0}
-    else:
-        prec = n_correct * 1.0 / n_pred
-        recall = n_correct * 1.0 / n_gold
-        if prec + recall > 0:
-            f1 = 2.0 * prec * recall / (prec + recall)
-        else:
-            f1 = 0.0
-        return {'precision': prec, 'recall': recall, 'f1': f1}
-
-
-def infer_entities_bounds(label_ids: tf.Tensor, sequence_len, bound_ids: tf.Tensor):
+def infer_entities_bounds(
+        label_ids: tf.Tensor,
+        sequence_len: tf.Tensor,
+        bound_ids: tf.Tensor
+) -> Tuple[tf.Tensor, tf.Tensor]:
     """
     Вывод индексов первого или последнего токена сущностей
     :param label_ids: tf.Tensor of shape [N, T] and type tf.int32 - айдишники лейблов токенов
@@ -71,33 +49,125 @@ def infer_entities_bounds(label_ids: tf.Tensor, sequence_len, bound_ids: tf.Tens
     return coords, num_entities
 
 
-def add_ones(x):
+def get_entity_embeddings(
+        x: tf.Tensor,
+        d_model: int,
+        emb_type: int,
+        entity_start_ids: tf.Tensor,
+        entity_end_ids: tf.Tensor = None
+) -> tf.Tensor:
+    """
+    Векторизация сущностей
+
+    :param x:
+    :param d_model:
+    :param emb_type:
+    :param entity_start_ids:
+    :param entity_end_ids:
+    :return:
+    """
+    batch_size = tf.shape(x)[0]
+
+    if emb_type == 0:
+        x_span = tf.gather_nd(x, entity_start_ids)  # [N * num_entities, D]
+    elif emb_type == 1:
+        assert entity_end_ids is not None
+        one = tf.tile([[0, 1]], [tf.shape(entity_start_ids)[0], 1])
+        x_i = tf.gather_nd(x, entity_start_ids)  # [N * num_entities, D]
+        x_i_minus_one = tf.gather_nd(x, entity_start_ids - one)  # [N * num_entities, D]
+        x_j = tf.gather_nd(x, entity_end_ids)  # [N * num_entities, D]
+        x_j_plus_one = tf.gather_nd(x, entity_end_ids + one)  # [N * num_entities, D]
+
+        d_model_half = d_model // 2
+        x_start = x_j - x_i_minus_one
+        x_start = x_start[..., :d_model_half]
+        x_end = x_i - x_j_plus_one
+        x_end = x_end[..., d_model_half:]
+
+        x_span = tf.concat([x_start, x_end], axis=-1)  # [N * num_entities, D]
+    else:
+        raise ValueError(f"expected span_emb type in {{0, 1}}, got {emb_type}")
+
+    x_span = tf.reshape(x_span, [batch_size, -1, d_model])  # [N, num_entities, D]
+
+    return x_span
+
+
+def add_ones(x: tf.Tensor) -> tf.Tensor:
     ones = tf.ones_like(x[..., :1])
     x = tf.concat([x, ones], axis=-1)
     return x
 
 
-def noam_scheme(init_lr, global_step, warmup_steps=4000.):
+def noam_scheme(init_lr: int, global_step: int, warmup_steps: int = 4000):
     step = tf.cast(global_step + 1, dtype=tf.float32)
     return init_lr * warmup_steps ** 0.5 * tf.minimum(step * warmup_steps ** -1.5, step ** -0.5)
 
 
-def check_entities_spans(examples, span_emb_type):
-    """
-    Дополнительная проверка примеров в скрипте обучения и инференса
-    :param examples:
-    :param span_emb_type: 0 - вектор первого токена, 1 - выводится из крайних и сосендних векторов сущности
-    (см. RelationExtractor._get_entity_embeddings)
-    :return:
-    """
-    for x in examples:
-        for entity in x.entities:
-            actual = ' '.join(x.tokens[entity.start_token_id:entity.end_token_id + 1])
-            expected = ' '.join(entity.tokens)
-            assert actual == expected
-            if span_emb_type == 0:
-                assert entity.start_token_id >= 0
-            elif span_emb_type == 1:
-                assert entity.start_token_id >= 1
+# def _stacked_attention(self, x, config, mask):
+#     d_model = config["num_heads"] * config["head_dim"]
+#     x = tf.keras.layers.Dense(d_model)(x)
+#     for i in range(config["num_layers"]):
+#         attn = DotProductAttention(**config)
+#         x = attn(x, training=self.training_ph, mask=mask)
+#     return x
+
+
+def stacked_bidirectional(
+        x,
+        cell_name: str,
+        cell_dim: int = 128,
+        dropout: float = 0.5,
+        recurrent_dropout: float = 0.0,
+        mask: tf.Tensor = None,
+        num_layers: int = 1,
+        add_skip_connections: bool = False,
+        training: tf.Tensor = None
+):
+    for i in range(num_layers):
+        with tf.variable_scope(f"recurrent_layer_{i}"):
+            xi = bidirectional(
+                x=x,
+                cell_name=cell_name,
+                cell_dim=cell_dim,
+                dropout=dropout,
+                recurrent_dropout=recurrent_dropout,
+                mask=mask,
+                training=training
+            )
+            if add_skip_connections:
+                if i == 0:
+                    x = xi
+                else:
+                    x += xi
             else:
-                raise
+                x = xi
+    return x
+
+
+def bidirectional(
+        x: tf.Tensor,
+        cell_name: str,
+        cell_dim: int = 128,
+        dropout: float = 0.5,
+        recurrent_dropout: float = 0.5,
+        mask: tf.Tensor = None,
+        training: tf.Tensor = None
+):
+    if cell_name == "lstm":
+        recurrent_layer = tf.keras.layers.LSTM
+    elif cell_name == "gru":
+        recurrent_layer = tf.keras.layers.GRU
+    else:
+        raise Exception(f"expected cell_name in {{lstm, gru}}, got {cell_name}")
+
+    recurrent_layer = recurrent_layer(
+        units=cell_dim,
+        dropout=dropout,
+        recurrent_dropout=recurrent_dropout,
+        return_sequences=True,
+        name=cell_name
+    )
+    bidirectional_layer = tf.keras.layers.Bidirectional(recurrent_layer, name="bidirectional")
+    x = bidirectional_layer(x, mask=mask, training=training)
+    return x

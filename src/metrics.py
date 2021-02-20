@@ -102,7 +102,7 @@ def get_f1_precision_recall(tp: int, fp: int, fn: int) -> Dict:
     return d
 
 
-def f1_score_micro(y_true, y_pred, trivial_label: int = 0):
+def f1_score_micro(y_true: List, y_pred: List, trivial_label: int = 0):
     assert len(y_true) == len(y_pred)
     tp = 0
     fp = 0
@@ -124,7 +124,7 @@ def f1_score_micro(y_true, y_pred, trivial_label: int = 0):
     return d
 
 
-def f1_score_micro_v2(y_true, y_pred, trivial_label: int = 0):
+def f1_score_micro_v2(y_true: List, y_pred: List, trivial_label: int = 0):
     assert len(y_true) == len(y_pred)
     tp = 0
     num_pred = 0

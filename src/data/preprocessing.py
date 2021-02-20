@@ -56,26 +56,29 @@ def split_example_v1(
     lengths = [len(expression.findall(sent)) for sent in sent_candidates]
     assert sum(lengths) == len(example.tokens)
 
+    pointers = [0] + list(accumulate(lengths))
     entity_spans = [
         Span(start=entity.tokens[0].index_abs, end=entity.tokens[-1].index_abs) for entity in example.entities
     ]
-    spans_sents, spans_tokens = get_spans(
+    sent_spans = get_spans(
         entity_spans=entity_spans,
-        lengths=lengths,
+        pointers=pointers,
         window=window,
         stride=stride
     )
 
     res = []
-    for i, (span_sent, span_token) in enumerate(zip(spans_sents, spans_tokens)):
+    for i, span in enumerate(sent_spans):
+        text = ' '.join(sent_candidates[span.start:span.end])
+        start = pointers[span.start]
+        end = pointers[span.end]
 
-        text = ' '.join(sent_candidates[span_sent.start:span_sent.end])
         # deepcopy - медленная штука
         example_copy = deepcopy(Example(
             filename=example.filename,
             id=f"{example.id}_{i}",
             text=text,
-            tokens=example.tokens[span_token.start:span_token.end],
+            tokens=example.tokens[start:end],
             entities=example.entities,
             events=example.events,
             arcs=example.arcs,
@@ -93,7 +96,7 @@ def split_example_v1(
         entity_ids = set()
         entities = []
         for entity in example_copy.entities:
-            if span_token.start <= entity.tokens[0].index_abs <= entity.tokens[-1].index_abs < span_token.end:
+            if start <= entity.tokens[0].index_abs <= entity.tokens[-1].index_abs < end:
                 entities.append(entity)
                 entity_ids.add(entity.id)
         example_copy.entities = entities
@@ -132,26 +135,20 @@ def split_example_v2(
         print(f"[{example.id} WARNING]: empty text")
         return [Example(**example.__dict__)]
 
-    if lang == Languages.RU:
-        split_fn = ru_sent_tokenize
-    else:
-        split_fn = nltk.sent_tokenize
-
-    if tokens_expression is not None:
-        expression = tokens_expression
-    else:
-        expression = TOKENS_EXPRESSION
+    split_fn = ru_sent_tokenize if lang == Languages.RU else nltk.sent_tokenize
+    expression = tokens_expression if tokens_expression is not None else TOKENS_EXPRESSION
 
     sent_candidates = [sent for sent in split_fn(example.text) if len(sent) > 0]
     lengths = [len(expression.findall(sent)) for sent in sent_candidates]
     assert sum(lengths) == len(example.tokens)
 
+    pointers = [0] + list(accumulate(lengths))
     entity_spans = [
         Span(start=entity.tokens[0].index_abs, end=entity.tokens[-1].index_abs) for entity in example.entities
     ]
-    spans_sents, spans_tokens = get_spans(
+    sent_spans = get_spans(
         entity_spans=entity_spans,
-        lengths=lengths,
+        pointers=pointers,
         window=window,
         stride=stride
     )
@@ -160,16 +157,18 @@ def split_example_v2(
     # print("spans_tokens:", spans_tokens)
 
     res = []
-    for i, (span_sent, span_token) in enumerate(zip(spans_sents, spans_tokens)):
-        text = ' '.join(sent_candidates[span_sent.start:span_sent.end])
+    for i, span in enumerate(sent_spans):
+        text = ' '.join(sent_candidates[span.start:span.end])
+        start = pointers[span.start]
+        end = pointers[span.end]
 
         # tokens
         # TODO: рассмотреть случай, при котором text начинается с пробелов
         # tokens = example.tokens[span.span_tokens[0]:span.span_tokens[1]]
         tokens = []
         # print(len(example.tokens), start_token)
-        offset = example.tokens[span_token.start].span_abs.start
-        for j, t in enumerate(example.tokens[span_token.start:span_token.end]):
+        offset = example.tokens[start].span_abs.start
+        for j, t in enumerate(example.tokens[start:end]):
             t_copy = Token(
                 text=t.text,
                 span_abs=t.span_abs,
@@ -185,12 +184,12 @@ def split_example_v2(
         entity_ids = set()
         entities = []
         for entity in example.entities:
-            if span_token.start <= entity.tokens[0].index_abs <= entity.tokens[-1].index_abs < span_token.end:
+            if start <= entity.tokens[0].index_abs <= entity.tokens[-1].index_abs < end:
                 entity_new = Entity(
                     id=entity.id,
                     label=entity.label,
                     text=entity.text,
-                    tokens=tokens[span_token.start:span_token.end],
+                    tokens=tokens[start:end],
                     is_event_trigger=entity.is_event_trigger,
                     attrs=entity.attrs.copy(),
                     comment=entity.comment
@@ -220,35 +219,71 @@ def split_example_v2(
     return res
 
 
-# TODO: протестировать!
-def get_spans(entity_spans: List[Span], lengths: List[int], window: int = 1, stride: int = None) -> List[Span]:
+def get_spans(entity_spans: List[Span], pointers: List[int], window: int = 1, stride: int = None) -> List[Span]:
+    """
+
+    :param entity_spans: индексы токенов границ именных сущностей
+    :param pointers: индексы токенов, определяющий границы предложений.
+    :param window:
+    :param stride:
+    :return: spans: список спанов предложений
+    """
+    # stride
     if stride is None:
         stride = window
+    else:
+        assert stride <= window
 
-    pointers = [0] + list(accumulate(lengths))
-    num_sents = len(lengths)
+    # pointers
+    if len(pointers) == 0:
+        return []
+    elif len(pointers) == 1:
+        raise AssertionError
+    else:
+        assert pointers[0] == 0
+
+    num_sentences = len(pointers) - 1
+    if window >= num_sentences:
+        return [Span(start=0, end=num_sentences)]
+
     res = []
-    # start = 0  # начало накопленной последовательности
-    start_chunk = 0
-    for i in range(0, num_sents - window + 1, stride):
-        # разделение на предложения плохое, если оно проходит через именную сущность
-        is_bad_split = False
-        start_next = pointers[i + window]
-        start_next_chunk = i + window
-        # TODO: можно оптимизировать, бегая каждый раз не по всем сущностям
-        for span in entity_spans:
-            # это условие имеет есто, если сущности сортированы по спану:
-            # if entity.start_token_id >= start_next:
-            #     break
-            # начало находится в куске i, конец - в куске i + 1
-            if span[0] < start_next <= span[1]:
-                is_bad_split = True
+    start = 0
+    end = window
+    is_good_split = True  # разделение на предложения плохое, если оно проходит через именную сущность
+    span_ptr = 0
+    entity_spans_sorted = sorted(entity_spans)
+    while True:
+        # print(span_ptr)
+        end_token_id = pointers[end]
+
+        # провекра разделения на предложения
+        for span in entity_spans_sorted[span_ptr:]:
+            if span[0] < end_token_id:
+                span_ptr += 1
+                if span[1] >= end_token_id:
+                    is_good_split = False
+                    break
+            else:
                 break
-        if not is_bad_split:
-            res.append(Span(start=start_chunk, end=start_next_chunk))
-            # spans_tokens.append(Span(start=start, end=start_next))
-            # start = start_next
-            start_chunk = i + 1
+        # for span in entity_spans:
+        #     if span[0] < end_token_id <= span[1]:
+        #         is_good_split = False
+        #         break
+
+        if is_good_split:
+            res.append(Span(start=start, end=end))
+            start = min(num_sentences - 1, start + stride)
+            end = min(num_sentences, start + window)
+        else:
+            end = min(num_sentences, end + 1)
+
+        if end == num_sentences:
+            res.append(Span(start=start, end=end))
+            break
+
+        # присвоение флагу is_good_split дефолтного значения
+        is_good_split = True
+
     return res
 
 

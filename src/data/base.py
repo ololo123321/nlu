@@ -116,7 +116,7 @@ class Entity(ReprMixin):
         self.label = label
         self.text = text
         self.labels = labels
-        self.tokens = tokens
+        self.tokens = tokens if tokens is not None else []
         self.is_event_trigger = is_event_trigger
         self.attrs = attrs if attrs is not None else []
         self.comment = comment
@@ -171,8 +171,8 @@ class Example(ReprMixin):
         self.filename = filename
         self.id = id
         self.text = text
-        self.tokens = tokens
-        self.entities = entities
-        self.arcs = arcs
+        self.tokens = tokens if tokens is not None else []
+        self.entities = entities if entities is not None else []
+        self.arcs = arcs if arcs is not None else []
         self.events = events if events is not None else []
         self.label = label  # в случае классификации предложений
