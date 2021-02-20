@@ -1,6 +1,6 @@
 import pytest
-from src.data.base import Languages, Example, Token, Span, Entity
-from src.data.preprocessing import get_spans, split_example_v1, split_example_v2
+from src.data.base import Languages, Example, Token, Span
+from src.data.preprocessing import get_spans, split_example_v1, split_example_v2, apply_bpe
 
 
 # get spans
@@ -101,3 +101,45 @@ def _test_split_example(split_fn, example, window, stride, expected_num_chunks):
 def test_split_example(example, window, stride, expected_num_chunks):
     _test_split_example(split_example_v1, example, window, stride, expected_num_chunks)
     _test_split_example(split_example_v2, example, window, stride, expected_num_chunks)
+
+
+# apply bpe
+
+
+class Tokenizer:
+    vocab = {
+        "мама": ["мама"],
+        "мыла": ["мы", "#ла"],
+        "раму": ["ра", "#м", "#у"]
+    }
+    @classmethod
+    def tokenize(cls, text: str):
+        return cls.vocab[text]
+
+    @staticmethod
+    def convert_tokens_to_ids(tokens):
+        return [0] * len(tokens)
+
+
+@pytest.mark.parametrize("example, expected_pieces, expected_labels", [
+    pytest.param(
+        Example(
+            tokens=[
+                Token(text="мама", labels=["B-PER"]),
+                Token(text="мыла", labels=["I-PER"]),
+                Token(text="раму", labels=["O"])
+            ]
+        ),
+        ["мама", "мы", "#ла", "ра", "#м", "#у"],
+        ["B-PER", "I-PER", "I-PER", "O", "O", "O"]
+    )
+])
+def test_apply_bpe(example, expected_pieces, expected_labels):
+    apply_bpe(example=example, tokenizer=Tokenizer, ner_prefix_joiner="-", ner_encoding="bio")
+    actual_pieces = []
+    actual_labels = []
+    for t in example.tokens:
+        actual_pieces += t.pieces
+        actual_labels += t.labels_pieces
+    assert actual_pieces == expected_pieces
+    assert actual_labels == expected_labels
