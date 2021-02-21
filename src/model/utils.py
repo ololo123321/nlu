@@ -49,6 +49,36 @@ def infer_entities_bounds(
     return coords, num_entities
 
 
+# TODO: копипаста с infer_entities_bounds
+def infer_start_coords(mask):
+    """
+    mask - tf.Tensor of type tf.int32 and shape [batch_size, num_pieces]
+    returns: coords - tf.Tensor of type tf.int32 and shape [batch_size * num_tokens_max, 2]
+             num_tokens -tf.Tensor of type tf.int32 and shape [batch_size]
+    """
+    # вывод координаты y
+    num_tokens = tf.reduce_sum(tf.cast(mask, tf.int32), axis=-1)  # [N]
+    sequence_mask = tf.sequence_mask(num_tokens)  # [N, num_tokens_max]
+    indices = tf.cast(tf.where(sequence_mask), tf.int32)  # [num_entities_sum, 2]
+    updates = tf.cast(tf.where(mask)[:, -1], tf.int32)  # [num_entities_sum]
+    sequence_mask_shape = tf.shape(sequence_mask)
+    res = tf.scatter_nd(indices, updates, shape=sequence_mask_shape)  # [N, num_entities_max], res.dtype = updates.dtype
+
+    # вывод координаты x
+    # Пусть число примеров = 3, число сущностей = 2
+    batch_size = sequence_mask_shape[0]
+    num_tokens_max = sequence_mask_shape[1]
+    x_coord = tf.range(batch_size, dtype=tf.int32)  # [0, 1, 2]
+    x_coord = tf.tile(x_coord[:, None], [1, num_tokens_max])  # [[0, 0], [1, 1], [2, 2]]
+    x_coord = tf.reshape(x_coord, [-1, 1])  # [[0], [0], [1], [1], [2], [2]]
+
+    # объединение координат x и y
+    y_coord = tf.reshape(res, [-1, 1])  # [N * num_entities_max, 1]
+    coords = tf.concat([x_coord, y_coord], axis=-1)  # [N * num_entities_max, 2]
+
+    return coords, num_tokens
+
+
 def get_entity_embeddings(
         x: tf.Tensor,
         d_model: int,

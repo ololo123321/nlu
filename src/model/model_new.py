@@ -1,19 +1,25 @@
 import random
-# import json
 import os
-from typing import Dict
+from typing import Dict, List
+from functools import partial
 from abc import ABC, abstractmethod
-from collections import defaultdict
 
 import tensorflow as tf
-import tensorflow_hub as hub
-import numpy as np
 from sklearn.metrics import classification_report
 
-# from bert.modeling import BertModel, BertConfig
+from bert.modeling import BertModel, BertConfig
+from bert.optimization import create_optimizer
+
+from .utils import infer_start_coords
+from .layers import GraphEncoder, GraphEncoderInputs
+from ..data.base import Example
 
 
 class BaseModel(ABC):
+    """
+    Interface for all models
+    """
+
     def __init__(self, sess, config):
         self.sess = sess
         self.config = config
@@ -26,7 +32,7 @@ class BaseModel(ABC):
         pass
 
     @abstractmethod
-    def _get_feed_dict(self, examples, training: bool) -> Dict:
+    def _get_feed_dict(self, examples: List[Example], training: bool) -> Dict:
         pass
 
     @abstractmethod
@@ -34,7 +40,7 @@ class BaseModel(ABC):
         pass
 
     @abstractmethod
-    def _set_loss(self):
+    def _set_loss(self, *args, **kwargs):
         pass
 
     @abstractmethod
@@ -42,22 +48,23 @@ class BaseModel(ABC):
         pass
 
     @abstractmethod
-    def predict(self, examples, batch_size=16):
+    def predict(self, examples: List[Example], batch_size: int = 16):
         pass
 
     @abstractmethod
-    def evaluate(self, examples, batch_size=16) -> float:
+    def evaluate(self, examples: List[Example], batch_size: int = 16) -> float:
         pass
 
     def train(
             self,
-            examples_train,
-            examples_eval,
-            num_epochs=1,
-            batch_size=128,
-            train_op_name="train_op",
+            examples_train: List[Example],
+            examples_eval: List[Example],
+            num_epochs: int = 1,
+            batch_size: int = 128,
+            train_op_name: str = "train_op",
             id2label=None,
-            checkpoint_path=None
+            checkpoint_path: str = None,
+            scope_to_save: str = None
     ):
         train_loss = []
 
@@ -92,7 +99,10 @@ class BaseModel(ABC):
 
         saver = None
         if checkpoint_path is not None:
-            var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.scope)
+            if scope_to_save is not None:
+                var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope_to_save)
+            else:
+                var_list = tf.trainable_variables()
             saver = tf.train.Saver(var_list)
 
         for step in range(num_train_steps):
@@ -146,7 +156,7 @@ class BaseModel(ABC):
 
                 epoch += 1
 
-    def restore(self, model_dir, scope):  # TODO: scope вынести в config
+    def restore(self, model_dir: str, scope: str):  # TODO: scope вынести в config
         var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope)
         saver = tf.train.Saver(var_list)
         checkpoint_path = os.path.join(model_dir, "model.ckpt")
@@ -160,6 +170,213 @@ class BaseModel(ABC):
             self.sess.run(tf.variables_initializer(not_initialized_vars))
         self.sess.run(tf.tables_initializer())
 
+
+class BertJointModel(BaseModel):
+    """
+    1. Поиск сущностей и триггеров событий (flat ner)
+    2. Поиск отношений между сущностями и аргументов событий
+
+    https://arxiv.org/abs/1812.11275
+    """
+
+    def __init__(self, sess, config):
+        super().__init__(sess=sess, config=config)
+
+        # placeholders
+        self.input_ids_ph = None
+        self.input_mask_ph = None
+        self.segment_ids_ph = None
+
+        self.entity_start_ids = None
+        self.start_mask_ph = None
+        self.token_start_mask_ph = None
+        self.labels_ph = None
+        self.sequence_len_ph = None
+        self.training_ph = None
+        self.type_ids_ph = None
+        self.num_entities_ph = None
+
+    def build(self):
+        with tf.variable_scope("model"):
+            bert_out_train = self._build_bert(training=True)
+            bert_out_inference = self._build_bert(training=False)
+
+            # common tensors
+            sequence_mask = tf.sequence_mask(self.sequence_len_ph)
+
+            # ner
+            with tf.variable_scope("ner"):
+                num_labels = self.config["model"]["ner"]["num_labels"]
+                cell_dim = self.config["model"]["ner"]["rnn"]["cell_dim"]
+                dropout = self.config["model"]["ner"]["rnn"]["dropout"]
+                lstm = tf.keras.layers.LSTM(cell_dim, return_sequences=True, dropout=dropout)
+                bilstm = tf.keras.layers.Bidirectional(lstm)
+                # TODO: all pieces -> first pieces
+                dense_labels = tf.keras.layers.Dense(num_labels)
+                ner_head_fn = partial(
+                    self._build_ner_head,
+                    sequence_mask=sequence_mask,
+                    lstm=bilstm,
+                    dense_logits=dense_labels
+                )
+                ner_logits_train, _, transition_params = ner_head_fn(x=bert_out_train)
+                _, pred_ids_inference, _ = ner_head_fn(x=bert_out_inference)
+
+            # re
+            with tf.variable_scope("re"):
+                bert_dim = self.config["model"]["bert"]["dim"]
+                ner_emb = tf.keras.layers.Embedding(num_labels, bert_dim)
+                lstm = tf.keras.layers.LSTM(cell_dim, return_sequences=True, dropout=dropout)
+                bilstm = tf.keras.layers.Bidirectional(lstm)
+                enc = GraphEncoder(
+                    num_mlp_layers=self.config["model"]["re"]["num_mlp_layers"],
+                    head_dim=self.config["model"]["re"]["head_dim"],
+                    dep_dim=self.config["model"]["re"]["dep_dim"],
+                    output_dim=self.config["model"]["re"]["num_labels"],
+                    dropout=self.config["model"]["re"]["dropout"],
+                    activation=self.config["model"]["re"]["activation"],
+                )
+                re_head_fn = partial(
+                    self._build_re_head,
+                    ner_emb=ner_emb,
+                    lstm=bilstm,
+                    enc=enc,
+                    sequence_mask=sequence_mask
+                )
+                re_logits_train = re_head_fn(bert_out=bert_out_train, ner_labels=self.labels_ph)
+                re_logits_inference = re_head_fn(bert_out=bert_out_inference, ner_labels=pred_ids_inference)
+
+            self._set_loss(ner_logits=ner_logits_train, transition_params=transition_params, re_logits=re_logits_train)
+
+        # return outputs_train, outputs_inference
+
+    # TODO: implement
+    def evaluate(self, examples, batch_size=16) -> float:
+        pass
+
+    # TODO: implement
+    def predict(self, examples, batch_size=16):
+        pass
+
+    # TODO: implement
+    def _get_feed_dict(self, examples, training: bool) -> Dict:
+        pass
+
+    def _set_placeholders(self):
+        self.input_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_ids")
+        self.input_mask_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_mask")
+        self.segment_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="segment_ids")
+        self.entity_start_ids = tf.placeholder(dtype=tf.int32, shape=[None, None], name="entity_start_ids")
+        self.start_mask_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="start_mask")
+        self.token_start_mask_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="token_start_mask")
+        self.labels_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="labels")
+        self.sequence_len_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="sequence_len_ph")
+        self.training_ph = tf.placeholder(dtype=tf.int32, shape=None, name="training_ph")
+
+    def _set_loss(self, ner_logits, transition_params, re_logits):
+        ner_loss = self._get_ner_loss(logits=ner_logits, transition_params=transition_params)
+        re_loss = self._get_re_loss(logits=re_logits)
+        self.loss = ner_loss + re_loss
+
+    def _set_train_op(self):
+        train_op = create_optimizer(
+            loss=self.loss,
+            init_lr=self.config["training"]["init_lr"],
+            num_train_steps=self.config["training"]["num_train_steps"],
+            num_warmup_steps=self.config["training"]["num_warmup_steps"],
+            use_tpu=False
+        )
+        return train_op
+
+    def _build_bert(self, training):
+        bert_dir = ""  # TODO: брать из конфига
+        bert_scope = ""  # TODO: брать из конфига
+        reuse = not training
+        with tf.variable_scope(bert_scope, reuse=reuse):
+            bert_config = BertConfig.from_json_file(os.path.join(bert_dir, "bert_config.json"))
+            model = BertModel(
+                config=bert_config,
+                is_training=training,
+                input_ids=self.input_ids_ph,
+                input_mask=self.input_mask_ph,
+                token_type_ids=self.segment_ids_ph
+            )
+            x = model.get_sequence_output()
+        return x
+
+    def _build_ner_head(self,  x, sequence_mask, lstm, dense_logits):
+        use_crf = self.config["model"]["ner"]["use_crf"]
+        bert_dim = self.config["model"]["bert"]["dim"]
+        num_labels = self.config["model"]["ner"]["num_labels"]
+
+        x = lstm(x, training=self.training_ph, mask=sequence_mask)
+
+        x_shape = tf.shape(x)
+        coords, num_tokens = infer_start_coords(self.start_mask_ph)
+        x = tf.gather_nd(x, coords)  # [batch_size * num_tokens_max, d]
+        x = tf.reshape(x, [x_shape[0], -1, bert_dim])  # [batch_size, num_tokens_max, d]
+
+        logits = dense_logits(x)
+
+        if use_crf:
+            with tf.variable_scope("crf"):
+                transition_params = tf.get_variable("transition_params", [num_labels, num_labels], dtype=tf.float32)
+            pred_ids, _ = tf.contrib.crf.crf_decode(logits, transition_params, num_tokens)
+        else:
+            pred_ids = tf.argmax(logits, axis=-1)
+
+        return logits, pred_ids, transition_params
+
+    def _build_re_head(self, bert_out, ner_labels, ner_emb, lstm, enc, sequence_mask):
+        if ner_emb is not None:
+            x_emb = ner_emb(ner_labels)
+            x = bert_out + x_emb
+        else:
+            x = bert_out
+        x = lstm(x, training=self.training_ph, mask=sequence_mask)
+
+        inputs = GraphEncoderInputs(head=x, dep=x)
+        logits = enc(inputs=inputs, training=self.training_ph)
+        return logits
+
+    def _get_ner_loss(self, logits, transition_params):
+        use_crf = self.config["model"]["ner"]["use_crf"]
+        if use_crf:
+            log_likelihood, _ = tf.contrib.crf.crf_log_likelihood(
+                inputs=logits,
+                tag_indices=self.labels_ph,
+                sequence_lengths=self.sequence_len_ph,
+                transition_params=transition_params
+            )
+            loss = -tf.reduce_mean(log_likelihood)
+        else:
+            loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.labels_ph, logits=logits)
+            loss = tf.reduce_mean(loss)
+        return loss
+
+    def _get_re_loss(self, logits):
+        logits_shape = tf.shape(logits)
+        labels = tf.broadcast_to(self.config['model']['re']['no_rel_id'],
+                                 logits_shape[:3])  # [batch_size, num_entities, num_entities]
+        labels = tf.tensor_scatter_nd_update(
+            tensor=labels,
+            indices=self.type_ids_ph[:, :-1],
+            updates=self.type_ids_ph[:, -1],
+        )  # [batch_size, num_entities, num_entities]
+        # [batch_size, num_entities, num_entities]:
+        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits)
+        mask = tf.cast(tf.sequence_mask(self.num_entities_ph), tf.float32)  # [batch_size, num_entities]
+        masked_per_example_loss = per_example_loss * mask[:, :, None] * mask[:, None, :]
+        total_loss = tf.reduce_sum(masked_per_example_loss)
+        num_pairs = tf.cast(tf.reduce_sum(self.num_entities_ph ** 2), tf.float32)
+        loss = total_loss / num_pairs
+        return loss
+
+    # TODO: юзать при initialize
+    # def actual_name_to_checkpoint_name(name):
+    #     name = name[len(MODEL_SCOPE) + 1:]
+    #     name = name.replace(":0", "")
+    #     return name
 
 
 # class RelationExtractor:
