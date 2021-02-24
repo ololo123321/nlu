@@ -168,6 +168,7 @@ def split_example_v2(
         tokens = []
         # print(len(example.tokens), start_token)
         offset = example.tokens[start].span_abs.start
+        token_assignment_map = {}
         for j, t in enumerate(example.tokens[start:end]):
             t_copy = Token(
                 text=t.text,
@@ -179,6 +180,7 @@ def split_example_v2(
                 pieces=t.pieces.copy()
             )
             tokens.append(t_copy)
+            token_assignment_map[t] = t_copy
 
         # entities
         entity_ids = set()
@@ -189,7 +191,7 @@ def split_example_v2(
                     id=entity.id,
                     label=entity.label,
                     text=entity.text,
-                    tokens=tokens[start:end],
+                    tokens=[token_assignment_map[t] for t in entity.tokens],
                     is_event_trigger=entity.is_event_trigger,
                     attrs=entity.attrs.copy(),
                     comment=entity.comment

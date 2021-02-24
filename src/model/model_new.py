@@ -257,6 +257,7 @@ class BertJointModel(BaseModel):
         self.loss_re = None
         self.ner_preds_inference = None
         self.re_preds_inference = None
+        self.re_preds_valid = None
 
         self._id2index = {}
 
@@ -266,6 +267,14 @@ class BertJointModel(BaseModel):
         with tf.variable_scope("model"):
             bert_out_train = self._build_bert(training=True)  # [batch_size, num_pieces_max, bert_dim]
             bert_out_inference = self._build_bert(training=False)
+
+            bert_dim = self.config["model"]["bert"]["dim"]
+            bert_out_token_level_train = self._get_embeddings_by_coords(
+                x=bert_out_train, coords=self.first_pieces_coords_ph, d=bert_dim
+            )
+            bert_out_token_level_inference = self._get_embeddings_by_coords(
+                x=bert_out_inference, coords=self.first_pieces_coords_ph, d=bert_dim
+            )
 
             # common tensors
             # ner
@@ -283,8 +292,8 @@ class BertJointModel(BaseModel):
                     bilstm=bilstm,
                     dense_logits=dense_labels
                 )
-                x_emb_train, ner_logits_train, _, transition_params = ner_head_fn(x=bert_out_train)
-                x_emb_inference, _, self.ner_preds_inference, _ = ner_head_fn(x=bert_out_inference)
+                ner_logits_train, _, transition_params = ner_head_fn(x=bert_out_train)
+                _, self.ner_preds_inference, _ = ner_head_fn(x=bert_out_inference)
 
             # re
             with tf.variable_scope("re"):
@@ -309,9 +318,10 @@ class BertJointModel(BaseModel):
                     bilstm=bilstm,
                     enc=enc,
                 )
-                re_logits_train = re_head_fn(bert_out=x_emb_train, ner_labels=self.ner_labels_ph)
-                re_logits_valid = re_head_fn(bert_out=x_emb_inference, ner_labels=self.ner_labels_ph)
-                re_logits_inference = re_head_fn(bert_out=x_emb_inference, ner_labels=self.ner_preds_inference)
+
+                re_logits_train = re_head_fn(bert_out=bert_out_token_level_train, ner_labels=self.ner_labels_ph)
+                re_logits_valid = re_head_fn(bert_out=bert_out_token_level_inference, ner_labels=self.ner_labels_ph)
+                re_logits_inference = re_head_fn(bert_out=bert_out_token_level_inference, ner_labels=self.ner_preds_inference)
 
                 self.re_preds_valid = tf.argmax(re_logits_valid, axis=-1)
                 self.re_preds_inference = tf.argmax(re_logits_inference, axis=-1)
@@ -541,7 +551,7 @@ class BertJointModel(BaseModel):
 
             # entities
             num_entities_i = 0
-            for j, entity in enumerate(x.entities):
+            for j, entity in enumerate(sorted(x.entities, key=lambda e: e.tokens[0].index_rel)):
                 num_entities_i += 1
                 self._id2index[(x.id, entity.id)] = j
 
@@ -673,7 +683,7 @@ class BertJointModel(BaseModel):
         else:
             pred_ids = tf.argmax(logits, axis=-1)
 
-        return x, logits, pred_ids, transition_params
+        return logits, pred_ids, transition_params
 
     def _build_re_head(self, bert_out, ner_labels, ner_emb, bilstm, enc):
         if ner_emb is not None:
