@@ -50,6 +50,7 @@ def infer_entities_bounds(
 
 
 # TODO: копипаста с infer_entities_bounds
+# TODO: по сути не нужна, ибо на этапе _get_feed_dict получить coords и num_tokens
 def infer_start_coords(mask):
     """
     mask - tf.Tensor of type tf.int32 and shape [batch_size, num_pieces]

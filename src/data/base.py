@@ -54,7 +54,7 @@ class Languages:
 
 Attribute = namedtuple("Attribute", ["id", "type", "value"])
 EventArgument = namedtuple("EventArgument", ["id", "role"])
-Span = namedtuple("Span", ["start", "end"])
+Span = namedtuple("Span", ["start", "end"])  # TODO: в случае nested ner нужен ещё атрибут score
 
 
 # mutable structs
@@ -116,6 +116,17 @@ class Entity(ReprMixin):
             attrs: List[Attribute] = None,  # атрибуты сущности
             comment: str = None
     ):
+        """
+
+        :param id:
+        :param label:
+        :param text:
+        :param tokens:
+        :param labels:
+        :param is_event_trigger:
+        :param attrs:
+        :param comment:
+        """
         self.id = id
         self.label = label
         self.text = text

@@ -27,7 +27,7 @@ from .exceptions import (
     NestedNerSingleEntityTypeError,
     RegexError
 )
-from .preprocessing import split_example_fast
+from .preprocessing import split_example_v2
 
 
 def load_examples(
@@ -35,6 +35,7 @@ def load_examples(
         n: int = None,
         split: bool = True,
         window: int = 1,
+        stride: int = 1,
         fix_new_line_symbol: bool = True,
         ner_encoding: str = NerEncodings.BIO,
         ner_prefix_joiner: str = NerPrefixJoiners.HYPHEN,
@@ -51,6 +52,7 @@ def load_examples(
     :param n:
     :param split:
     :param window:
+    :param stride:
     :param fix_new_line_symbol:
     :param ner_encoding:
     :param ner_prefix_joiner:
@@ -86,7 +88,7 @@ def load_examples(
             continue
 
         if split:
-            for x_raw_chunk in split_example_fast(x_raw, window=window, lang=lang):
+            for x_raw_chunk in split_example_v2(x_raw, window=window, stride=stride, lang=lang):
                 num_examples += 1
                 # проверяем кусок примера
                 try:
@@ -145,6 +147,7 @@ def save_examples(
 
             # события
             for event in events.values():
+                assert event.id is not None
                 id_event = get_id(event.id, "E")
                 line = f"{id_event}\t{event.label}:{event.trigger}"
                 role2count = defaultdict(int)
@@ -459,6 +462,7 @@ def parse_example(
 
                     # если аргументов одной роли несколько, то всем, начиная со второго,
                     # приписывается в конце номер (см. пример)
+                    # TODO: должно гарантироваться отсутствие названий ролей вида ROLE_OF_EVENT_288
                     rel = re.sub(r'\d+', '', rel)
 
                     # запись отношения

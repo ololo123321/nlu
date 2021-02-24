@@ -310,6 +310,23 @@ def apply_bpe(
                     pad = label
                 t.labels_pieces += [pad] * (num_pieces - 1)
 
+
+def enumerate_entities(example: Example):
+    """
+    перевод строковых айдишников сущностей в порядковые номера.
+    нужно для создания входов модели и сопоставления выходов модели истинным лейблам.
+    """
+    id2index = {}
+
+    for i, entity in enumerate(example.entities):
+        id2index[entity.id] = i
+        entity.id = i
+
+    for arc in example.arcs:
+        arc.head = id2index[arc.head]
+        arc.dep = id2index[arc.dep]
+
+
 # def change_tokens_and_entities(x: Example) -> Example:
 #     """
 #     tokens = [иван иванов живёт в деревне жопа]
