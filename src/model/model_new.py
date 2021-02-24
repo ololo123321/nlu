@@ -258,6 +258,8 @@ class BertJointModel(BaseModel):
         self.ner_preds_inference = None
         self.re_preds_inference = None
 
+        self._id2index = {}
+
     def build(self):
         self._set_placeholders()
 
@@ -420,7 +422,9 @@ class BertJointModel(BaseModel):
                 arcs_true = np.full((num_entities, num_entities), no_rel_id, dtype=np.int32)
 
                 for arc in x.arcs:
-                    arcs_true[arc.head_index, arc.dep_index] = arc.rel_id
+                    head_index = self._id2index[(x.id, arc.head)]
+                    dep_index = self._id2index[(x.id, arc.dep)]
+                    arcs_true[head_index, dep_index] = arc.rel_id
 
                 arcs_pred = rel_labels_pred[i, :num_entities, :num_entities]
                 assert arcs_pred.shape[0] == num_entities, f"{arcs_pred.shape[0]} != {num_entities}"
@@ -502,6 +506,7 @@ class BertJointModel(BaseModel):
         ner_labels = []
 
         # re
+        self._id2index.clear()
         num_entities = []
         re_labels = []
 
@@ -535,11 +540,16 @@ class BertJointModel(BaseModel):
                 ptr += num_pieces_ij
 
             # entities
-            num_entities.append(len(x.entities))
+            num_entities_i = 0
+            for j, entity in enumerate(x.entities):
+                num_entities_i += 1
+                self._id2index[(x.id, entity.id)] = j
 
             # relations
             for arc in x.arcs:
-                re_labels.append((i, arc.head_index, arc.dep_index, arc.rel_id))
+                head_index = self._id2index[(x.id, arc.head)]
+                dep_index = self._id2index[(x.id, arc.dep)]
+                re_labels.append((i, head_index, dep_index, arc.rel_id))
 
             # [SEP]
             input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
@@ -549,6 +559,7 @@ class BertJointModel(BaseModel):
             # write
             num_pieces.append(num_pieces_i)
             num_tokens.append(num_tokens_i)
+            num_entities.append(num_entities_i)
             input_ids.append(input_ids_i)
             input_mask.append(input_mask_i)
             segment_ids.append(segment_ids_i)

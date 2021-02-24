@@ -102,23 +102,28 @@ def get_f1_precision_recall(tp: int, fp: int, fn: int) -> Dict:
     return d
 
 
+# TODO: упростить ифы
 def f1_score_micro(y_true: List, y_pred: List, trivial_label: Union[int, str] = 0):
     assert len(y_true) == len(y_pred)
     tp = 0
     fp = 0
     fn = 0
-    for y_true_i, y_pred_i in zip(y_true, y_pred):
-        if y_true_i != trivial_label or y_pred_i != trivial_label:
-            if y_true_i == y_pred_i:
+    for i in range(len(y_true)):
+        if y_true[i] == y_pred[i]:
+            if y_true[i] != trivial_label:
                 tp += 1
-            else:
-                if y_true_i == trivial_label:
-                    fn += 1
-                elif y_pred_i == trivial_label:
-                    fp += 1
+        else:
+            if y_true[i] == trivial_label:
+                if y_pred[i] == trivial_label:
+                    pass
                 else:
                     fp += 1
+            else:
+                if y_pred[i] == trivial_label:
                     fn += 1
+                else:
+                    fn += 1
+                    fp += 1
 
     d = get_f1_precision_recall(tp=tp, fp=fp, fn=fn)
     return d
