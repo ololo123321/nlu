@@ -1,5 +1,6 @@
 import random
 import os
+import json
 from typing import Dict, List
 from functools import partial
 from itertools import chain
@@ -198,6 +199,7 @@ class BertJointModel(BaseModel):
                     "no_entity_id": 0,
                     "start_ids": [1, 2, 3],  # id лейблов первых токенов сущностей. нужно для векторизации сущностей
                     "prefix_joiner": "-",
+                    "loss_coef": 1.0,
                     "rnn": {
                         "num_layers": 1,
                         "cell_dim": 128,
@@ -206,6 +208,7 @@ class BertJointModel(BaseModel):
                 },
                 "re": {
                     "no_relation_id": 0,
+                    "loss_coef": 10.0,
                     "rnn": {
                         "num_layers": 1,
                         "cell_dim": 128,
@@ -305,8 +308,10 @@ class BertJointModel(BaseModel):
                     enc=enc,
                 )
                 re_logits_train = re_head_fn(bert_out=x_emb_train, ner_labels=self.ner_labels_ph)
+                re_logits_valid = re_head_fn(bert_out=x_emb_inference, ner_labels=self.ner_labels_ph)
                 re_logits_inference = re_head_fn(bert_out=x_emb_inference, ner_labels=self.ner_preds_inference)
 
+                self.re_preds_valid = tf.argmax(re_logits_valid, axis=-1)
                 self.re_preds_inference = tf.argmax(re_logits_inference, axis=-1)
 
             self._set_loss(ner_logits=ner_logits_train, transition_params=transition_params, re_logits=re_logits_train)
@@ -346,7 +351,8 @@ class BertJointModel(BaseModel):
 
                 print(f"epoch {epoch} finished. evaluation starts.")
                 performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size, **kwargs)
-                print(performance_info)
+                print(json.dumps(performance_info, indent=4))  # TODO: вынести в отдельную функцию
+                print("=" * 50)
                 score = performance_info["score"]
 
                 if score > best_score:
@@ -397,7 +403,7 @@ class BertJointModel(BaseModel):
             examples_batch = examples[start:end]
             feed_dict = self._get_feed_dict(examples_batch, training=False)
             loss_i, loss_ner_i, loss_re_i, ner_labels_pred, rel_labels_pred = self.sess.run(
-                [self.loss, self.loss_ner, self.loss_re, self.ner_preds_inference, self.re_preds_inference],
+                [self.loss, self.loss_ner, self.loss_re, self.ner_preds_inference, self.re_preds_valid],
                 feed_dict=feed_dict
             )
             loss += loss_i
@@ -417,6 +423,8 @@ class BertJointModel(BaseModel):
                     arcs_true[arc.head_index, arc.dep_index] = arc.rel_id
 
                 arcs_pred = rel_labels_pred[i, :num_entities, :num_entities]
+                assert arcs_pred.shape[0] == num_entities, f"{arcs_pred.shape[0]} != {num_entities}"
+                assert arcs_pred.shape[1] == num_entities, f"{arcs_pred.shape[1]} != {num_entities}"
                 y_true_re += [id_to_re_label[j] for j in arcs_true.flatten()]
                 y_pred_re += [id_to_re_label[j] for j in arcs_pred.flatten()]
 
@@ -431,10 +439,12 @@ class BertJointModel(BaseModel):
         # ner
         joiner = self.config["model"]["ner"]["prefix_joiner"]
         entity_level_metrics = get_ner_metrics(y_true=y_true_ner, y_pred=y_pred_ner, joiner=joiner)
-        token_level_metrics = classification_report(y_true=y_true_re, y_pred=y_pred_re, output_dict=True)
+        y_true_ner_flat = list(chain(*y_true_ner))
+        y_pred_ner_flat = list(chain(*y_pred_ner))
+        token_level_metrics = classification_report(y_true=y_true_ner_flat, y_pred=y_pred_ner_flat, output_dict=True)
 
         # re
-        re_micro_metrics = f1_score_micro(y_true=y_true_re, y_pred=y_pred_re, trivial_label=no_rel_id)
+        re_micro_metrics = f1_score_micro(y_true=y_true_re, y_pred=y_pred_re, trivial_label="O")  # TODO
         label_level_metrics = classification_report(y_true=y_true_re, y_pred=y_pred_re, output_dict=True)
 
         # total
@@ -557,9 +567,8 @@ class BertJointModel(BaseModel):
             ner_labels[i] += [pad_label_id] * (num_tokens_max - num_tokens[i])
             first_pieces_coords[i] += [(i, 0)] * (num_tokens_max - num_tokens[i])
 
-        # TODO: костыль
-        # if len(re_labels) == 0:
-        #     re_labels.append((0, 0, 0, 0))
+        if len(re_labels) == 0:
+            re_labels.append((0, 0, 0, 0))
 
         first_pieces_coords = list(chain(*first_pieces_coords))
 
@@ -689,6 +698,8 @@ class BertJointModel(BaseModel):
         else:
             loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.ner_labels_ph, logits=logits)
             loss = tf.reduce_mean(loss)
+
+        loss *= self.config["model"]["ner"]["loss_coef"]
         return loss
 
     def _get_re_loss(self, logits):
@@ -708,6 +719,7 @@ class BertJointModel(BaseModel):
         total_loss = tf.reduce_sum(masked_per_example_loss)
         num_pairs = tf.cast(tf.reduce_sum(self.num_entities_ph ** 2), tf.float32)
         loss = total_loss / num_pairs
+        loss *= self.config["model"]["re"]["loss_coef"]
         return loss
 
     @classmethod
