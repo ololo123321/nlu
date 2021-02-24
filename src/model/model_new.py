@@ -266,10 +266,10 @@ class BertJointModel(BaseModel):
             # ner
             with tf.variable_scope("ner"):
                 num_labels = self.config["model"]["ner"]["num_labels"]
-                cell_dim = self.config["model"]["ner"]["rnn"]["cell_dim"]
+                cell_dim_ner = self.config["model"]["ner"]["rnn"]["cell_dim"]
                 dropout = self.config["model"]["ner"]["rnn"]["dropout"]
 
-                lstm = tf.keras.layers.LSTM(cell_dim, return_sequences=True, dropout=dropout)
+                lstm = tf.keras.layers.LSTM(cell_dim_ner, return_sequences=True, dropout=dropout)
                 bilstm = tf.keras.layers.Bidirectional(lstm)  # TODO: multi-layer support; "enabled" flag
                 dense_labels = tf.keras.layers.Dense(num_labels)
 
@@ -278,17 +278,16 @@ class BertJointModel(BaseModel):
                     bilstm=bilstm,
                     dense_logits=dense_labels
                 )
-                ner_logits_train, _, transition_params = ner_head_fn(x=bert_out_train)
-                _, self.ner_preds_inference, _ = ner_head_fn(x=bert_out_inference)
+                x_emb_train, ner_logits_train, _, transition_params = ner_head_fn(x=bert_out_train)
+                x_emb_inference, _, self.ner_preds_inference, _ = ner_head_fn(x=bert_out_inference)
 
             # re
             with tf.variable_scope("re"):
-                bert_dim = self.config["model"]["bert"]["dim"]
-                cell_dim = self.config["model"]["re"]["rnn"]["cell_dim"]
+                cell_dim_re = self.config["model"]["re"]["rnn"]["cell_dim"]
                 dropout = self.config["model"]["re"]["rnn"]["dropout"]
 
-                ner_emb = tf.keras.layers.Embedding(num_labels, bert_dim)
-                lstm = tf.keras.layers.LSTM(cell_dim, return_sequences=True, dropout=dropout)
+                ner_emb = tf.keras.layers.Embedding(num_labels, cell_dim_re * 2)
+                lstm = tf.keras.layers.LSTM(cell_dim_re, return_sequences=True, dropout=dropout)
                 bilstm = tf.keras.layers.Bidirectional(lstm)  # TODO: multi-layer support; "enabled" flag
                 enc = GraphEncoder(
                     num_mlp_layers=self.config["model"]["re"]["biaffine"]["num_mlp_layers"],
@@ -305,8 +304,8 @@ class BertJointModel(BaseModel):
                     bilstm=bilstm,
                     enc=enc,
                 )
-                re_logits_train = re_head_fn(bert_out=bert_out_train, ner_labels=self.ner_labels_ph)
-                re_logits_inference = re_head_fn(bert_out=bert_out_inference, ner_labels=self.ner_preds_inference)
+                re_logits_train = re_head_fn(bert_out=x_emb_train, ner_labels=self.ner_labels_ph)
+                re_logits_inference = re_head_fn(bert_out=x_emb_inference, ner_labels=self.ner_preds_inference)
 
                 self.re_preds_inference = tf.argmax(re_logits_inference, axis=-1)
 
@@ -522,7 +521,7 @@ class BertJointModel(BaseModel):
                 input_ids_i += t.token_ids
                 input_mask_i += [1] * num_pieces_ij
                 segment_ids_i += [0] * num_pieces_ij
-                ner_labels_i += t.label_ids
+                ner_labels_i.append(t.label_ids[0])  # ner решается на уровне токенов!
                 ptr += num_pieces_ij
 
             # entities
@@ -557,6 +556,10 @@ class BertJointModel(BaseModel):
             segment_ids[i] += [0] * (num_pieces_max - num_pieces[i])
             ner_labels[i] += [pad_label_id] * (num_tokens_max - num_tokens[i])
             first_pieces_coords[i] += [(i, 0)] * (num_tokens_max - num_tokens[i])
+
+        # TODO: костыль
+        # if len(re_labels) == 0:
+        #     re_labels.append((0, 0, 0, 0))
 
         first_pieces_coords = list(chain(*first_pieces_coords))
 
@@ -650,7 +653,7 @@ class BertJointModel(BaseModel):
         else:
             pred_ids = tf.argmax(logits, axis=-1)
 
-        return logits, pred_ids, transition_params
+        return x, logits, pred_ids, transition_params
 
     def _build_re_head(self, bert_out, ner_labels, ner_emb, bilstm, enc):
         if ner_emb is not None:
