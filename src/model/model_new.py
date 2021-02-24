@@ -69,9 +69,9 @@ class BaseModel(ABC):
             num_epochs: int = 1,
             batch_size: int = 128,
             train_op_name: str = "train_op",
-            id2label=None,
             checkpoint_path: str = None,
-            scope_to_save: str = None
+            scope_to_save: str = None,
+            **kwargs
     ):
         train_loss = []
 
@@ -114,7 +114,7 @@ class BaseModel(ABC):
             if step != 0 and step % epoch_steps == 0:
 
                 print(f"epoch {epoch} finished. evaluation starts.")
-                performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size, id2label=id2label)
+                performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size, **kwargs)
                 score = performance_info["score"]
 
                 if score > best_score:
@@ -313,6 +313,63 @@ class BertJointModel(BaseModel):
             self._set_loss(ner_logits=ner_logits_train, transition_params=transition_params, re_logits=re_logits_train)
             self._set_train_op()
 
+    def train(
+            self,
+            examples_train: List[Example],
+            examples_eval: List[Example],
+            num_epochs: int = 1,
+            batch_size: int = 128,
+            train_op_name: str = "train_op",
+            checkpoint_path: str = None,
+            scope_to_save: str = None,
+            **kwargs
+    ):
+        epoch = 1
+        best_score = -1
+        num_steps_wo_improvement = 0
+
+        epoch_steps = len(examples_train) // batch_size
+
+        saver = None
+        if checkpoint_path is not None:
+            if scope_to_save is not None:
+                var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope_to_save)
+            else:
+                var_list = tf.trainable_variables()
+            saver = tf.train.Saver(var_list)
+
+        for step in range(self.config["training"]["num_train_steps"]):
+            examples_batch = random.sample(examples_train, batch_size)
+            feed_dict = self._get_feed_dict(examples_batch, training=True)
+            _, loss = self.sess.run([self.train_op, self.loss], feed_dict=feed_dict)
+
+            if step != 0 and step % epoch_steps == 0:
+
+                print(f"epoch {epoch} finished. evaluation starts.")
+                performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size, **kwargs)
+                print(performance_info)
+                score = performance_info["score"]
+
+                if score > best_score:
+                    print("new best score:", score)
+                    best_score = score
+                    num_steps_wo_improvement = 0
+
+                    if saver is not None:
+                        saver.save(self.sess, checkpoint_path)
+                        print(f"saved new head to {checkpoint_path}")
+                else:
+                    num_steps_wo_improvement += 1
+                    print("current score:", score)
+                    print("best score:", best_score)
+                    print("steps wo improvement:", num_steps_wo_improvement)
+
+                    if num_steps_wo_improvement == self.config["training"]["max_steps_wo_improvement"]:
+                        print("training finished due to max number of steps wo improvement encountered.")
+                        break
+
+                epoch += 1
+
     def evaluate(self, examples: List[Example], batch_size: int = 16, **kwargs) -> Dict:
         """
         metrics = {
@@ -449,7 +506,7 @@ class BertJointModel(BaseModel):
             # [CLS]
             input_ids_i.append(self.config["model"]["bert"]["cls_token_id"])
             input_mask_i.append(1)
-            segment_ids.append(0)
+            segment_ids_i.append(0)
 
             num_pieces_i = 0
             num_tokens_i = 0
@@ -468,6 +525,9 @@ class BertJointModel(BaseModel):
                 ner_labels_i += t.label_ids
                 ptr += num_pieces_ij
 
+            # entities
+            num_entities.append(len(x.entities))
+
             # relations
             for arc in x.arcs:
                 re_labels.append((i, arc.head_index, arc.dep_index, arc.rel_id))
@@ -475,7 +535,7 @@ class BertJointModel(BaseModel):
             # [SEP]
             input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
             input_mask_i.append(1)
-            segment_ids.append(0)
+            segment_ids_i.append(0)
 
             # write
             num_pieces.append(num_pieces_i)
