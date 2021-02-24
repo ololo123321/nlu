@@ -320,11 +320,11 @@ def enumerate_entities(example: Example):
 
     for i, entity in enumerate(example.entities):
         id2index[entity.id] = i
-        entity.id = i
+        entity.index = i
 
     for arc in example.arcs:
-        arc.head = id2index[arc.head]
-        arc.dep = id2index[arc.dep]
+        arc.head_index = id2index[arc.head]
+        arc.dep_index = id2index[arc.dep]
 
 
 # def change_tokens_and_entities(x: Example) -> Example:

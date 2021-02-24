@@ -256,6 +256,8 @@ class BertJointModel(BaseModel):
         self.re_preds_inference = None
 
     def build(self):
+        self._set_placeholders()
+
         with tf.variable_scope("model"):
             bert_out_train = self._build_bert(training=True)  # [batch_size, num_pieces_max, bert_dim]
             bert_out_inference = self._build_bert(training=False)
@@ -309,6 +311,7 @@ class BertJointModel(BaseModel):
                 self.re_preds_inference = tf.argmax(re_logits_inference, axis=-1)
 
             self._set_loss(ner_logits=ner_logits_train, transition_params=transition_params, re_logits=re_logits_train)
+            self._set_train_op()
 
     def evaluate(self, examples: List[Example], batch_size: int = 16, **kwargs) -> Dict:
         """
@@ -355,7 +358,7 @@ class BertJointModel(BaseModel):
                 arcs_true = np.full((num_entities, num_entities), no_rel_id, dtype=np.int32)
 
                 for arc in x.arcs:
-                    arcs_true[arc.head, arc.dep] = arc.rel
+                    arcs_true[arc.head_index, arc.dep_index] = arc.rel_id
 
                 arcs_pred = rel_labels_pred[i, :num_entities, :num_entities]
                 y_true_re += [id_to_re_label[j] for j in arcs_true.flatten()]
@@ -408,10 +411,11 @@ class BertJointModel(BaseModel):
         pass
 
     def initialize(self):
-        bert_dir = ""  # TODO: брать из конфига
+        bert_dir = self.config["model"]["bert"]["dir"]
+        bert_scope = self.config["model"]["bert"]["scope"]
         var_list = {
             self._actual_name_to_checkpoint_name(x.name): x for x in tf.trainable_variables()
-            if x.name.startswith(f"{self.model_scope}/bert")
+            if x.name.startswith(f"{self.model_scope}/{bert_scope}")
         }
         saver = tf.train.Saver(var_list)
         checkpoint_path = os.path.join(bert_dir, "bert_model.ckpt")
@@ -466,10 +470,7 @@ class BertJointModel(BaseModel):
 
             # relations
             for arc in x.arcs:
-                assert isinstance(arc.head, int), "encode heads"
-                assert isinstance(arc.dep, int), "encode deps"
-                assert isinstance(arc.rel, int), "encode relations"
-                re_labels.append((i, arc.head, arc.dep, arc.rel))
+                re_labels.append((i, arc.head_index, arc.dep_index, arc.rel_id))
 
             # [SEP]
             input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
@@ -539,7 +540,7 @@ class BertJointModel(BaseModel):
         self.re_labels_ph = tf.placeholder(dtype=tf.int32, shape=[None, 4], name="re_labels")
 
         # common inputs
-        self.training_ph = tf.placeholder(dtype=tf.int32, shape=None, name="training_ph")
+        self.training_ph = tf.placeholder(dtype=tf.bool, shape=None, name="training_ph")
 
     def _set_loss(self, ner_logits, transition_params, re_logits):
         self.loss_ner = self._get_ner_loss(logits=ner_logits, transition_params=transition_params)
@@ -547,14 +548,13 @@ class BertJointModel(BaseModel):
         self.loss = self.loss_ner + self.loss_re
 
     def _set_train_op(self):
-        train_op = create_optimizer(
+        self.train_op = create_optimizer(
             loss=self.loss,
             init_lr=self.config["training"]["init_lr"],
             num_train_steps=self.config["training"]["num_train_steps"],
             num_warmup_steps=self.config["training"]["num_warmup_steps"],
             use_tpu=False
         )
-        return train_op
 
     def _build_bert(self, training):
         bert_dir = self.config["model"]["bert"]["dir"]
@@ -584,7 +584,7 @@ class BertJointModel(BaseModel):
         logits = dense_logits(x)
 
         if use_crf:
-            with tf.variable_scope("crf"):
+            with tf.variable_scope("crf", reuse=tf.AUTO_REUSE):
                 transition_params = tf.get_variable("transition_params", [num_labels, num_labels], dtype=tf.float32)
             pred_ids, _ = tf.contrib.crf.crf_decode(logits, transition_params, self.num_tokens_ph)
         else:
@@ -649,7 +649,8 @@ class BertJointModel(BaseModel):
 
     @classmethod
     def _actual_name_to_checkpoint_name(cls, name: str) -> str:
-        name = name[len(cls.model_scope) + 1:]
+        prefix = "model/bert/"  # TODO
+        name = name[len(prefix):]
         name = name.replace(":0", "")
         return name
 
