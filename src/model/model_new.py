@@ -300,7 +300,7 @@ class BertJointModel(BaseModel):
                 cell_dim_re = self.config["model"]["re"]["rnn"]["cell_dim"]
                 dropout = self.config["model"]["re"]["rnn"]["dropout"]
 
-                ner_emb = tf.keras.layers.Embedding(num_labels, cell_dim_re * 2)
+                ner_emb = tf.keras.layers.Embedding(num_labels, bert_dim)
                 lstm = tf.keras.layers.LSTM(cell_dim_re, return_sequences=True, dropout=dropout)
                 bilstm = tf.keras.layers.Bidirectional(lstm)  # TODO: multi-layer support; "enabled" flag
                 enc = GraphEncoder(
