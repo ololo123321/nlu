@@ -1,6 +1,5 @@
 import random
 import os
-import json
 from typing import Dict, List
 from functools import partial
 from itertools import chain
@@ -8,15 +7,14 @@ from abc import ABC, abstractmethod
 
 import tensorflow as tf
 import numpy as np
-from sklearn.metrics import classification_report
 
 from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 
-from .utils import infer_entities_bounds
+from .utils import infer_entities_bounds, display_metrics
 from .layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN
 from ..data.base import Example
-from ..metrics import get_ner_metrics, f1_score_micro
+from ..metrics import classification_report, classification_report_ner
 
 
 class BaseModel(ABC):
@@ -385,7 +383,7 @@ class BertJointModel(BaseModel):
 
                 print(f"epoch {epoch} finished. evaluation starts.")
                 performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size, **kwargs)
-                print(json.dumps(performance_info, indent=4))  # TODO: вынести в отдельную функцию
+                display_metrics(performance_info)
                 print("=" * 50)
                 score = performance_info["score"]
 
@@ -408,6 +406,10 @@ class BertJointModel(BaseModel):
                         break
 
                 epoch += 1
+
+        if saver is not None:
+            print(f"restoring model from {checkpoint_path}")
+            saver.restore(self.sess, checkpoint_path)
 
     def evaluate(self, examples: List[Example], batch_size: int = 16, **kwargs) -> Dict:
         """
@@ -474,33 +476,30 @@ class BertJointModel(BaseModel):
 
         # ner
         joiner = self.config["model"]["ner"]["prefix_joiner"]
-        entity_level_metrics = get_ner_metrics(y_true=y_true_ner, y_pred=y_pred_ner, joiner=joiner)
+        ner_metrics_entity_level = classification_report_ner(y_true=y_true_ner, y_pred=y_pred_ner, joiner=joiner)
         y_true_ner_flat = list(chain(*y_true_ner))
         y_pred_ner_flat = list(chain(*y_pred_ner))
-        token_level_metrics = classification_report(y_true=y_true_ner_flat, y_pred=y_pred_ner_flat, output_dict=True)
+        ner_metrics_token_level = classification_report(
+            y_true=y_true_ner_flat, y_pred=y_pred_ner_flat, trivial_label="O"
+        )
 
         # re
-        re_micro_metrics = f1_score_micro(y_true=y_true_re, y_pred=y_pred_re, trivial_label="O")  # TODO
-        label_level_metrics = classification_report(y_true=y_true_re, y_pred=y_pred_re, output_dict=True)
+        re_metrics = classification_report(y_true=y_true_re, y_pred=y_pred_re, trivial_label="O")
 
         # total
-        score = entity_level_metrics["micro"]["f1"] * 0.5 + re_micro_metrics["f1"] * 0.5
+        score = ner_metrics_entity_level["micro"]["f1"] * 0.5 + re_metrics["micro"]["f1"] * 0.5
 
-        # TODO: написать функцию, которая всё это красиво отображает (см. код classification_report)
         performance_info = {
             "ner": {
                 "loss": loss_ner,
                 "metrics": {
-                    "entity_level": entity_level_metrics,
-                    "token_level": token_level_metrics
+                    "entity_level": ner_metrics_entity_level,
+                    "token_level": ner_metrics_token_level
                 }
             },
             "re": {
                 "loss": loss_re,
-                "metrics": {
-                    "micro": re_micro_metrics,
-                    "label_level": label_level_metrics
-                },
+                "metrics": re_metrics,
             },
             "loss": loss,
             "score": score

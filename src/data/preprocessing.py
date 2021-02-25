@@ -1,7 +1,8 @@
 from copy import deepcopy
-from typing import List, Pattern
+from typing import List, Pattern, Tuple, Dict
 from itertools import accumulate
 from rusenttokenize import ru_sent_tokenize
+from collections import defaultdict
 import nltk
 
 from .base import (
@@ -60,7 +61,7 @@ def split_example_v1(
     entity_spans = [
         Span(start=entity.tokens[0].index_abs, end=entity.tokens[-1].index_abs) for entity in example.entities
     ]
-    sent_spans = get_spans(
+    sent_spans = get_sentences_spans(
         entity_spans=entity_spans,
         pointers=pointers,
         window=window,
@@ -146,7 +147,7 @@ def split_example_v2(
     entity_spans = [
         Span(start=entity.tokens[0].index_abs, end=entity.tokens[-1].index_abs) for entity in example.entities
     ]
-    sent_spans = get_spans(
+    sent_spans = get_sentences_spans(
         entity_spans=entity_spans,
         pointers=pointers,
         window=window,
@@ -221,7 +222,7 @@ def split_example_v2(
     return res
 
 
-def get_spans(entity_spans: List[Span], pointers: List[int], window: int = 1, stride: int = None) -> List[Span]:
+def get_sentences_spans(entity_spans: List[Span], pointers: List[int], window: int = 1, stride: int = None) -> List[Span]:
     """
 
     :param entity_spans: индексы токенов границ именных сущностей
@@ -322,6 +323,53 @@ def enumerate_entities(example: Example):
     for arc in example.arcs:
         arc.head_index = id2index[arc.head]
         arc.dep_index = id2index[arc.dep]
+
+
+def fit_encodings(
+        examples: List[Example],
+        ner_label_other: str = "O",
+        re_label_other: str = "O",
+        min_label_freq: int = 3
+) -> Tuple[Dict[str, int], Dict[str, int]]:
+    ner_labels = defaultdict(int)
+    re_labels = defaultdict(int)
+
+    for x in examples:
+        for t in x.tokens:
+            for label in t.labels_pieces:
+                if label != ner_label_other:
+                    ner_labels[label] += 1
+        for arc in x.arcs:
+            re_labels[arc.rel] += 1
+
+    ner_enc = {label: i for i, (label, count) in enumerate(ner_labels.items(), 1) if count >= min_label_freq}
+    re_enc = {label: i for i, (label, count) in enumerate(re_labels.items(), 1) if count >= min_label_freq}
+    ner_enc[ner_label_other] = 0
+    re_enc[re_label_other] = 0
+    return ner_enc, re_enc
+
+
+def apply_encodings(examples: List[Example], ner_enc: Dict[str, int], re_enc: Dict[str, int]):
+    unk_ner_labels = defaultdict(int)
+    unk_re_labels = defaultdict(int)
+
+    for x in examples:
+        for t in x.tokens:
+            for label in t.labels_pieces:
+                if label in ner_enc.keys():
+                    t.label_ids.append(ner_enc[label])
+                else:
+                    t.label_ids.append(0)
+                    unk_ner_labels[label] += 1
+        for arc in x.arcs:
+            if arc.rel in re_enc.keys():
+                arc.rel_id = re_enc[arc.rel]
+            else:
+                arc.rel_id = 0
+                unk_re_labels[arc.rel] += 1
+
+    print("unk_ner_labels:", unk_ner_labels)
+    print("unk_re_labels:", unk_re_labels)
 
 
 # def change_tokens_and_entities(x: Example) -> Example:

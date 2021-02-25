@@ -2,16 +2,67 @@ from typing import List, Dict, Union
 from collections import defaultdict
 
 
-def get_ner_metrics(y_true: List[List[str]], y_pred: List[List[str]], joiner: str = "-") -> Dict:
+def classification_report(
+        y_true: List[Union[int, str]],
+        y_pred: List[Union[int, str]],
+        trivial_label: Union[int, str] = 0
+) -> Dict:
+    """
+    {
+        "label_1": {"precision": 1.0, "recall": 1.0, "f1": 1.0, "support": 10, "tp": 10, "fp": 0, "fn": 0},
+        ...
+        "label_n": ...,
+        "micro": ...
+    }
+    """
     assert len(y_true) == len(y_pred)
+    d = defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0})
+    d["micro"] = d["micro"]  # обязательный ключ
 
-    d = defaultdict(lambda: defaultdict(int))
+    for i in range(len(y_true)):
+        if y_true[i] == y_pred[i]:
+            if y_true[i] != trivial_label:
+                d[y_true[i]]["tp"] += 1
+                d["micro"]["tp"] += 1
+        else:
+            if y_true[i] == trivial_label:
+                if y_pred[i] == trivial_label:
+                    pass
+                else:
+                    # y_true_i = 0, y_pred_i = 2
+                    d[y_pred[i]]["fp"] += 1
+                    d["micro"]["fp"] += 1
+            else:
+                if y_pred[i] == trivial_label:
+                    # y_true_i = 2, y_pred_i = 0
+                    d[y_true[i]]["fn"] += 1
+                    d["micro"]["fn"] += 1
+                else:
+                    # y_true_i = 2, y_pred_i = 1
+                    d[y_true[i]]["fn"] += 1
+                    d[y_pred[i]]["fp"] += 1
+                    d["micro"]["fn"] += 1
+                    d["micro"]["fp"] += 1
 
-    num_examples = len(y_true)
-    for i in range(num_examples):
+    for v in d.values():
+        d_tag = f1_precision_recall_support(**v)
+        v.update(d_tag)
+
+    return d
+
+
+def classification_report_ner(y_true: List[List[str]], y_pred: List[List[str]], joiner: str = "-") -> Dict:
+    """
+    тот же формат, что и classification_report
+    """
+    assert len(y_true) == len(y_pred)
+    d = defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0})
+    d["micro"] = d["micro"]  # обязательный ключ
+
+    for i in range(len(y_true)):
         assert len(y_true[i]) == len(y_pred[i])
-        d_true = get_spans(y_true[i], joiner=joiner)
-        d_pred = get_spans(y_pred[i], joiner=joiner)
+        d_true = get_entity_spans(y_true[i], joiner=joiner)
+        d_pred = get_entity_spans(y_pred[i], joiner=joiner)
         common_tags = set(d_true.keys()) | set(d_pred.keys())
         for tag in common_tags:
             tp = len(d_true[tag] & d_pred[tag])
@@ -24,14 +75,14 @@ def get_ner_metrics(y_true: List[List[str]], y_pred: List[List[str]], joiner: st
             d["micro"]["fp"] += fp
             d["micro"]["fn"] += fn
 
-    for tag, v in d.items():
-        d_tag = get_f1_precision_recall(**v)
+    for v in d.values():
+        d_tag = f1_precision_recall_support(**v)
         v.update(d_tag)
 
     return d
 
 
-def get_spans(labels: List[str], joiner: str = '-') -> Dict:
+def get_entity_spans(labels: List[str], joiner: str = '-') -> Dict:
     """
     поддерживает только кодировку BIO
     :param labels:
@@ -79,7 +130,7 @@ def get_spans(labels: List[str], joiner: str = '-') -> Dict:
     return tag2spans
 
 
-def get_f1_precision_recall(tp: int, fp: int, fn: int) -> Dict:
+def f1_precision_recall_support(tp: int, fp: int, fn: int) -> Dict:
     pos_pred = tp + fp
     if pos_pred == 0:
         precision = 0.0
@@ -102,34 +153,10 @@ def get_f1_precision_recall(tp: int, fp: int, fn: int) -> Dict:
     return d
 
 
-# TODO: упростить ифы
-def f1_score_micro(y_true: List, y_pred: List, trivial_label: Union[int, str] = 0):
-    assert len(y_true) == len(y_pred)
-    tp = 0
-    fp = 0
-    fn = 0
-    for i in range(len(y_true)):
-        if y_true[i] == y_pred[i]:
-            if y_true[i] != trivial_label:
-                tp += 1
-        else:
-            if y_true[i] == trivial_label:
-                if y_pred[i] == trivial_label:
-                    pass
-                else:
-                    fp += 1
-            else:
-                if y_pred[i] == trivial_label:
-                    fn += 1
-                else:
-                    fn += 1
-                    fp += 1
-
-    d = get_f1_precision_recall(tp=tp, fp=fp, fn=fn)
-    return d
-
-
-def f1_score_micro_v2(y_true: List, y_pred: List, trivial_label: Union[int, str] = 0):
+def _f1_score_micro_v2(y_true: List, y_pred: List, trivial_label: Union[int, str] = 0):
+    """
+    Альтернативная реализация f1_score_micro, для подстраховки.
+    """
     assert len(y_true) == len(y_pred)
     tp = 0
     num_pred = 0

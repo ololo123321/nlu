@@ -1,4 +1,5 @@
-from typing import Tuple
+import json
+from typing import Tuple, Dict
 import tensorflow as tf
 
 
@@ -133,3 +134,7 @@ def add_ones(x: tf.Tensor) -> tf.Tensor:
 def noam_scheme(init_lr: int, global_step: int, warmup_steps: int = 4000):
     step = tf.cast(global_step + 1, dtype=tf.float32)
     return init_lr * warmup_steps ** 0.5 * tf.minimum(step * warmup_steps ** -1.5, step ** -0.5)
+
+
+def display_metrics(d: Dict):
+    print(json.dumps(d, indent=4))
