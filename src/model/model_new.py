@@ -138,6 +138,7 @@ class BaseModel(ABC):
 
                     if self.config["optimizer"]["reduce_lr_on_plateau"]:
                         if num_steps_wo_improvement % self.config["optimizer"]["lr_reduce_patience"] == 0:
+                            # TODO: restore best checkpoint here
                             lr_old = lr
                             lr *= self.config["optimizer"]["lr_reduction_factor"]
                             num_lr_updates += 1
@@ -273,6 +274,7 @@ class BertJointModel(BaseModel):
         self.re_labels_true_entities = None
         self.re_labels_pred_entities = None
 
+    # TODO: вынести все слои на уровень атрибутов инстанса!
     def build(self):
         self._set_placeholders()
 
