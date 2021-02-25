@@ -313,6 +313,17 @@ def apply_bpe(
                 t.labels_pieces += [pad] * (num_pieces - 1)
 
 
+def enumerate_entities(example: Example):
+    id2index = {}
+    for i, entity in enumerate(sorted(example.entities, key=lambda e: e.tokens[0].index_rel)):
+        id2index[entity.id] = i
+        entity.index = i
+
+    for arc in example.arcs:
+        arc.head_index = id2index[arc.head]
+        arc.dep_index = id2index[arc.dep]
+
+
 # def change_tokens_and_entities(x: Example) -> Example:
 #     """
 #     tokens = [иван иванов живёт в деревне жопа]

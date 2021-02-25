@@ -50,7 +50,7 @@ def infer_entities_bounds(
 
 
 # TODO: копипаста с infer_entities_bounds
-# TODO: по сути не нужна, ибо на этапе _get_feed_dict получить coords и num_tokens
+# TODO: по сути не нужна, ибо на этапе _get_feed_dict можно получить coords и num_tokens
 def infer_start_coords(mask):
     """
     mask - tf.Tensor of type tf.int32 and shape [batch_size, num_pieces]
@@ -88,7 +88,7 @@ def get_entity_embeddings(
         entity_end_ids: tf.Tensor = None
 ) -> tf.Tensor:
     """
-    Векторизация сущностей
+    Векторизация сущностей. Предполагается, что границы сущностей известны.
 
     :param x:
     :param d_model:
@@ -133,72 +133,3 @@ def add_ones(x: tf.Tensor) -> tf.Tensor:
 def noam_scheme(init_lr: int, global_step: int, warmup_steps: int = 4000):
     step = tf.cast(global_step + 1, dtype=tf.float32)
     return init_lr * warmup_steps ** 0.5 * tf.minimum(step * warmup_steps ** -1.5, step ** -0.5)
-
-
-# def _stacked_attention(self, x, config, mask):
-#     d_model = config["num_heads"] * config["head_dim"]
-#     x = tf.keras.layers.Dense(d_model)(x)
-#     for i in range(config["num_layers"]):
-#         attn = DotProductAttention(**config)
-#         x = attn(x, training=self.training_ph, mask=mask)
-#     return x
-
-
-def stacked_bidirectional(
-        x,
-        cell_name: str,
-        cell_dim: int = 128,
-        dropout: float = 0.5,
-        recurrent_dropout: float = 0.0,
-        mask: tf.Tensor = None,
-        num_layers: int = 1,
-        add_skip_connections: bool = False,
-        training: tf.Tensor = None
-):
-    for i in range(num_layers):
-        with tf.variable_scope(f"recurrent_layer_{i}"):
-            xi = bidirectional(
-                x=x,
-                cell_name=cell_name,
-                cell_dim=cell_dim,
-                dropout=dropout,
-                recurrent_dropout=recurrent_dropout,
-                mask=mask,
-                training=training
-            )
-            if add_skip_connections:
-                if i == 0:
-                    x = xi
-                else:
-                    x += xi
-            else:
-                x = xi
-    return x
-
-
-def bidirectional(
-        x: tf.Tensor,
-        cell_name: str,
-        cell_dim: int = 128,
-        dropout: float = 0.5,
-        recurrent_dropout: float = 0.5,
-        mask: tf.Tensor = None,
-        training: tf.Tensor = None
-):
-    if cell_name == "lstm":
-        recurrent_layer = tf.keras.layers.LSTM
-    elif cell_name == "gru":
-        recurrent_layer = tf.keras.layers.GRU
-    else:
-        raise Exception(f"expected cell_name in {{lstm, gru}}, got {cell_name}")
-
-    recurrent_layer = recurrent_layer(
-        units=cell_dim,
-        dropout=dropout,
-        recurrent_dropout=recurrent_dropout,
-        return_sequences=True,
-        name=cell_name
-    )
-    bidirectional_layer = tf.keras.layers.Bidirectional(recurrent_layer, name="bidirectional")
-    x = bidirectional_layer(x, mask=mask, training=training)
-    return x

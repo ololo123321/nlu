@@ -136,6 +136,8 @@ class Entity(ReprMixin):
         self.attrs = attrs if attrs is not None else []
         self.comment = comment
 
+        self.index = None
+
 
 class Event(ReprMixin):
     def __init__(
@@ -171,6 +173,8 @@ class Arc(ReprMixin):
         self.comment = comment
 
         self.rel_id = None
+        self.head_index = None
+        self.dep_index = None
 
 
 class Example(ReprMixin):

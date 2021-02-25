@@ -20,6 +20,7 @@ BiLinearInputs = namedtuple("BiLinearInputs", ["head", "dep"])
 
 class BiLinear(tf.keras.layers.Layer):
     """
+    https://arxiv.org/abs/1611.01734
     https://arxiv.org/abs/1812.11275
 
     Билинейная форма:
@@ -132,7 +133,7 @@ class GraphEncoder(tf.keras.layers.Layer):
             num_mlp_layers: int,
             head_dim: int,
             dep_dim: int,
-            output_dim: int,
+            num_labels: int,
             dropout: float = 0.2,
             activation: str = "relu"
     ):
@@ -158,7 +159,7 @@ class GraphEncoder(tf.keras.layers.Layer):
         self.bilinear = BiLinear(
             head_dim=head_dim,
             dep_dim=dep_dim,
-            output_dim=output_dim
+            output_dim=num_labels
         )
 
     def call(self, inputs: GraphEncoderInputs, training: bool = False):
@@ -167,3 +168,41 @@ class GraphEncoder(tf.keras.layers.Layer):
         bilinear_inputs = BiLinearInputs(head=head, dep=dep)
         logits = self.bilinear(inputs=bilinear_inputs)  # [N, num_heads, num_deps, num_arc_labels]
         return logits
+
+
+class StackedBiRNN(tf.keras.layers.Layer):
+    def __init__(
+            self,
+            num_layers: int = 1,
+            cell_name: str = "lstm",
+            cell_dim: int = 128,
+            dropout: float = 0.5,
+            recurrent_dropout: float = 0.0,
+    ):
+        super().__init__()
+
+        self.layers = []
+        for _ in range(num_layers):
+            rnn = getattr(tf.keras.layers, cell_name.upper())(
+                units=cell_dim,
+                dropout=dropout,
+                recurrent_dropout=recurrent_dropout,
+                return_sequences=True,
+                name=cell_name
+            )
+            rnn = tf.keras.layers.Bidirectional(rnn)
+            self.layers.append(rnn)
+
+    def call(self, x, training=None, mask=None):
+        for rnn in self.layers:
+            x = rnn(x, training=training, mask=mask)
+        return x
+
+
+# def _stacked_attention(self, x, config, mask):
+#     d_model = config["num_heads"] * config["head_dim"]
+#     x = tf.keras.layers.Dense(d_model)(x)
+#     for i in range(config["num_layers"]):
+#         attn = DotProductAttention(**config)
+#         x = attn(x, training=self.training_ph, mask=mask)
+#     return x
