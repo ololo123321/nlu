@@ -190,6 +190,7 @@ class BertJointModel(BaseModel):
                     "dim": 768,
                     "attention_probs_dropout_prob": 0.5,  # default 0.1
                     "hidden_dropout_prob": 0.1,
+                    "dropout": 0.1,
                     "scope": "bert",
                     "pad_token_id": 0,
                     "cls_token_id": 1,
@@ -215,6 +216,7 @@ class BertJointModel(BaseModel):
                     "loss_coef": 10.0,
                     "use_birnn": True,
                     "use_entity_emb": True,
+                    "entity_emb_dropout": 0.2,
                     "rnn": {
                         "num_layers": 1,
                         "cell_dim": 128,
@@ -232,13 +234,14 @@ class BertJointModel(BaseModel):
                 }
             },
             "training": {
-                "num_epochs": 10,
+                "num_epochs": 100,
                 "batch_size": 16,
-                "optimizer": {
-                    "init_lr": 5e-5,
-                    "num_train_steps": 100000,
-                    "num_warmup_steps": 10000
-                }
+                "max_epochs_wo_improvement": 10
+            },
+            "optimizer": {
+                "init_lr": 2e-5,
+                "num_train_steps": 100000,
+                "num_warmup_steps": 10000
             }
         }
         """
@@ -285,7 +288,8 @@ class BertJointModel(BaseModel):
                 x=bert_out_inference, coords=self.first_pieces_coords_ph, d=bert_dim
             )  # [batch_size, num_tokens_max, bert_dim]
 
-            # common tensors
+            bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
+
             # ner
             with tf.variable_scope("ner"):
                 if self.config["model"]["ner"]["use_birnn"]:
@@ -298,6 +302,7 @@ class BertJointModel(BaseModel):
 
                 ner_head_fn = partial(
                     self._build_ner_head,
+                    bert_dropout=bert_dropout,
                     birnn=birnn,
                     dense_logits=dense_labels
                 )
@@ -308,8 +313,11 @@ class BertJointModel(BaseModel):
             with tf.variable_scope("re"):
                 if self.config["model"]["re"]["use_entity_emb"]:
                     ner_emb = tf.keras.layers.Embedding(num_labels, bert_dim)
+                    ner_emb_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["entity_emb_dropout"])
+                    # TODO: layernorm
                 else:
                     ner_emb = None
+                    ner_emb_dropout = None
 
                 if self.config["model"]["re"]["use_birnn"]:
                     birnn = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
@@ -318,7 +326,14 @@ class BertJointModel(BaseModel):
 
                 enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
 
-                re_head_fn = partial(self._build_re_head, ner_emb=ner_emb, birnn=birnn, enc=enc)
+                re_head_fn = partial(
+                    self._build_re_head,
+                    bert_dropout=bert_dropout,
+                    ner_emb=ner_emb,
+                    ner_emb_dropout=ner_emb_dropout,
+                    birnn=birnn,
+                    enc=enc
+                )
 
                 re_logits_train = re_head_fn(bert_out=bert_out_token_level_train, ner_labels=self.ner_labels_ph)
                 re_logits_true_entities = re_head_fn(
@@ -338,8 +353,7 @@ class BertJointModel(BaseModel):
             self,
             examples_train: List[Example],
             examples_eval: List[Example],
-            num_epochs: int = 1,
-            batch_size: int = 128,
+            batch_size: int = None,
             train_op_name: str = "train_op",
             checkpoint_path: str = None,
             scope_to_save: str = None,
@@ -349,6 +363,7 @@ class BertJointModel(BaseModel):
         best_score = -1
         num_steps_wo_improvement = 0
 
+        batch_size = batch_size if batch_size is not None else self.config["training"]["batch_size"]
         epoch_steps = len(examples_train) // batch_size
 
         saver = None
@@ -386,7 +401,7 @@ class BertJointModel(BaseModel):
                     print("best score:", best_score)
                     print("steps wo improvement:", num_steps_wo_improvement)
 
-                    if num_steps_wo_improvement == self.config["training"]["max_steps_wo_improvement"]:
+                    if num_steps_wo_improvement == self.config["training"]["max_epochs_wo_improvement"]:
                         print("training finished due to max number of steps wo improvement encountered.")
                         break
 
@@ -637,13 +652,7 @@ class BertJointModel(BaseModel):
         self.loss = self.loss_ner + self.loss_re
 
     def _set_train_op(self):
-        self.train_op = create_optimizer(
-            loss=self.loss,
-            init_lr=self.config["training"]["init_lr"],
-            num_train_steps=self.config["training"]["num_train_steps"],
-            num_warmup_steps=self.config["training"]["num_warmup_steps"],
-            use_tpu=False
-        )
+        self.train_op = create_optimizer(loss=self.loss, use_tpu=False, **self.config["optimizer"])
 
     def _build_bert(self, training):
         bert_dir = self.config["model"]["bert"]["dir"]
@@ -663,10 +672,12 @@ class BertJointModel(BaseModel):
             x = model.get_sequence_output()
         return x
 
-    def _build_ner_head(self,  x, birnn, dense_logits):
+    def _build_ner_head(self,  x, bert_dropout, birnn, dense_logits):
         use_crf = self.config["model"]["ner"]["use_crf"]
         num_labels = self.config["model"]["ner"]["num_labels"]
         cell_dim = self.config["model"]["ner"]["rnn"]["cell_dim"]
+
+        x = bert_dropout(x, training=self.training_ph)
 
         sequence_mask = tf.sequence_mask(self.num_pieces_ph)
         if birnn is not None:
@@ -688,9 +699,12 @@ class BertJointModel(BaseModel):
 
         return logits, pred_ids, transition_params
 
-    def _build_re_head(self, bert_out, ner_labels, ner_emb, birnn, enc):
+    def _build_re_head(self, bert_out, bert_dropout, ner_labels, ner_emb, ner_emb_dropout, birnn, enc):
+        bert_out = bert_dropout(bert_out, training=self.training_ph)
+
         if ner_emb is not None:
             x_emb = ner_emb(ner_labels)
+            x_emb = ner_emb_dropout(x_emb, training=self.training_ph)
             x = bert_out + x_emb
         else:
             x = bert_out
