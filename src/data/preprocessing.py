@@ -361,6 +361,7 @@ def apply_encodings(examples: List[Example], ner_enc: Dict[str, int], re_enc: Di
 
     for x in examples:
         for t in x.tokens:
+            t.label_ids = []
             for label in t.labels_pieces:
                 if label in ner_enc.keys():
                     t.label_ids.append(ner_enc[label])
