@@ -327,9 +327,8 @@ def enumerate_entities(example: Example):
 
 def fit_encodings(
         examples: List[Example],
-        ner_label_other: str = "O",
-        re_label_other: str = "O",
-        min_label_freq: int = 3
+        min_label_freq: int = 3,
+        label_other: str = "O",
 ) -> Tuple[Dict[str, int], Dict[str, int]]:
     ner_labels = defaultdict(int)
     re_labels = defaultdict(int)
@@ -337,15 +336,22 @@ def fit_encodings(
     for x in examples:
         for t in x.tokens:
             for label in t.labels_pieces:
-                if label != ner_label_other:
+                if label != label_other:
                     ner_labels[label] += 1
         for arc in x.arcs:
             re_labels[arc.rel] += 1
 
-    ner_enc = {label: i for i, (label, count) in enumerate(ner_labels.items(), 1) if count >= min_label_freq}
-    re_enc = {label: i for i, (label, count) in enumerate(re_labels.items(), 1) if count >= min_label_freq}
-    ner_enc[ner_label_other] = 0
-    re_enc[re_label_other] = 0
+    def build_enc(labels):
+        enc = {label_other: 0}
+        index = 1
+        for l, count in labels.items():
+            if count >= min_label_freq:
+                enc[l] = index
+                index += 1
+        return enc
+
+    ner_enc = build_enc(ner_labels)
+    re_enc = build_enc(re_labels)
     return ner_enc, re_enc
 
 
