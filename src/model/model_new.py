@@ -323,7 +323,7 @@ class BertJointModel(BaseModel):
                     ner_emb_dropout = None
 
                 if self.config["model"]["re"]["use_birnn"]:
-                    birnn = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
+                    birnn = StackedBiRNN(**self.config["model"]["re"]["rnn"])
                 else:
                     birnn = None
 
