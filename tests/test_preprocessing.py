@@ -1,6 +1,6 @@
 import pytest
 from src.data.base import Languages, Example, Token, Span
-from src.data.preprocessing import get_spans, split_example_v1, split_example_v2, apply_bpe
+from src.data.preprocessing import get_sentences_spans, split_example_v1, split_example_v2, apply_bpe
 
 
 # get spans
@@ -20,8 +20,8 @@ from src.data.preprocessing import get_spans, split_example_v1, split_example_v2
     # w=2, s=2
     pytest.param([(0, 1), (2, 3), (4, 5)], [0, 2, 4, 6], 2, 2, [(0, 2), (2, 3)]),
 ])
-def test_get_spans(entity_spans, pointers, window, stride, expected):
-    actual = get_spans(
+def test_get_sentences_spans(entity_spans, pointers, window, stride, expected):
+    actual = get_sentences_spans(
         entity_spans=entity_spans,
         pointers=pointers,
         window=window,
@@ -31,18 +31,18 @@ def test_get_spans(entity_spans, pointers, window, stride, expected):
     assert actual == expected
 
 
-def test_get_spans_raise():
+def test_get_sentences_spans_raise():
     # pointers состоит из одного элемента
     with pytest.raises(AssertionError):
-        get_spans(entity_spans=[], pointers=[1])
+        get_sentences_spans(entity_spans=[], pointers=[1])
 
     # первый элемент pointers не ноль
     with pytest.raises(AssertionError):
-        get_spans(entity_spans=[], pointers=[1, 2])
+        get_sentences_spans(entity_spans=[], pointers=[1, 2])
 
     # stride > window
     with pytest.raises(AssertionError):
-        get_spans(entity_spans=[], pointers=[], stride=2, window=1)
+        get_sentences_spans(entity_spans=[], pointers=[], stride=2, window=1)
 
 
 # split example

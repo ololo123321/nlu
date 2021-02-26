@@ -172,6 +172,9 @@ class BaseModel(ABC):
         self.sess.run(tf.tables_initializer())
 
 
+# TODO: сделать базовый класс для joint моделей. потом от него отнаследовать ElmoJoinModel
+
+
 class BertJointModel(BaseModel):
     """
     1. Поиск сущностей и триггеров событий (flat ner)
@@ -374,10 +377,12 @@ class BertJointModel(BaseModel):
                 var_list = tf.trainable_variables()
             saver = tf.train.Saver(var_list)
 
+        train_op = getattr(self, train_op_name)
+
         for step in range(self.config["training"]["num_train_steps"]):
             examples_batch = random.sample(examples_train, batch_size)
             feed_dict = self._get_feed_dict(examples_batch, training=True)
-            _, loss = self.sess.run([self.train_op, self.loss], feed_dict=feed_dict)
+            _, loss = self.sess.run([train_op, self.loss], feed_dict=feed_dict)
 
             if step != 0 and step % epoch_steps == 0:
 
