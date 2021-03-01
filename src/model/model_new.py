@@ -1,6 +1,6 @@
 import random
 import os
-from typing import Dict, List
+from typing import Dict, List, Callable
 from functools import partial
 from itertools import chain
 from abc import ABC, abstractmethod
@@ -11,7 +11,7 @@ import numpy as np
 from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 
-from .utils import infer_entities_bounds, display_metrics
+from .utils import infer_entities_bounds
 from .layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN
 from ..data.base import Example
 from ..metrics import classification_report, classification_report_ner
@@ -275,6 +275,9 @@ class BertJointModel(BaseModel):
         self.re_labels_true_entities = None
         self.re_labels_pred_entities = None
 
+        # LAYERS
+
+
     # TODO: вынести все слои на уровень атрибутов инстанса!
     def build(self):
         self._set_placeholders()
@@ -360,14 +363,32 @@ class BertJointModel(BaseModel):
             train_op_name: str = "train_op",
             checkpoint_path: str = None,
             scope_to_save: str = None,
+            verbose: bool = True,
+            verbose_fn: Callable = None,
             **kwargs
     ):
+        """
+
+        :param examples_train:
+        :param examples_eval:
+        :param batch_size:
+        :param train_op_name:
+        :param checkpoint_path:
+        :param scope_to_save:
+        :param verbose:
+        :param verbose_fn: вход - словарь с метриками (выход self.evaluate); выход - None. функция должна вывести
+                           релевантные метрики в stdout
+        :param kwargs:
+        :return:
+        """
         epoch = 1
         best_score = -1
         num_steps_wo_improvement = 0
 
         batch_size = batch_size if batch_size is not None else self.config["training"]["batch_size"]
         epoch_steps = len(examples_train) // batch_size
+
+        verbose_fn = verbose_fn if verbose_fn is not None else print
 
         saver = None
         if checkpoint_path is not None:
@@ -388,9 +409,12 @@ class BertJointModel(BaseModel):
 
                 print(f"epoch {epoch} finished. evaluation starts.")
                 performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size, **kwargs)
-                display_metrics(performance_info)
-                print("=" * 50)
+                if verbose is not None:
+                    verbose_fn(performance_info)
+                    print("=" * 50)
                 score = performance_info["score"]
+
+                print("current score:", score)
 
                 if score > best_score:
                     print("new best score:", score)
@@ -402,7 +426,6 @@ class BertJointModel(BaseModel):
                         print(f"saved new head to {checkpoint_path}")
                 else:
                     num_steps_wo_improvement += 1
-                    print("current score:", score)
                     print("best score:", best_score)
                     print("steps wo improvement:", num_steps_wo_improvement)
 
