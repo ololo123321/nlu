@@ -631,8 +631,6 @@ class BertJointModel(BaseModel):
         if len(re_labels) == 0:
             re_labels.append((0, 0, 0, 0))
 
-        first_pieces_coords = list(chain(*first_pieces_coords))
-
         d = {
             # bert
             self.input_ids_ph: input_ids,
@@ -662,7 +660,7 @@ class BertJointModel(BaseModel):
 
         # ner inputs
         # [id_example, id_piece]
-        self.first_pieces_coords_ph = tf.placeholder(dtype=tf.int32, shape=[None, 2], name="first_pieces_coords")
+        self.first_pieces_coords_ph = tf.placeholder(dtype=tf.int32, shape=[None, None, 2], name="first_pieces_coords")
         self.num_pieces_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_pieces")
         self.num_tokens_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_tokens")
         self.ner_labels_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="ner_labels")
@@ -785,7 +783,7 @@ class BertJointModel(BaseModel):
             x = self.birnn_re(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
 
         # вывод координат первых токенов сущностей
-        start_ids = tf.constant(self.config["model"]["ner"]["start_ids"])
+        start_ids = tf.constant(self.config["model"]["ner"]["start_ids"], dtype=tf.int32)
         coords, _ = get_batched_coords_from_labels(
             labels_2d=ner_labels, values=start_ids, sequence_len=self.num_tokens_ph
         )
@@ -844,7 +842,7 @@ class BertJointModelV2(BertJointModel):
     def __init__(self, sess, config):
         super().__init__(sess=sess, config=config)
 
-    def _get_tokens_and_entities_representation(self, bert_out, ner_labels) -> tf.Tensor:
+    def _get_entities_representation(self, bert_out, ner_labels) -> tf.Tensor:
         assert self.ner_emb is not None
         assert self.ner_emb_dropout is not None
         assert self.birnn_re is not None
@@ -855,6 +853,7 @@ class BertJointModelV2(BertJointModel):
         # pieces -> tokens
         x_bert = tf.gather_nd(bert_out, self.first_pieces_coords_ph)  # [batch_size, num_tokens, bert_dim]
 
+        # tokens -> [tokens_wo_entity_tokens; entity_labels]
         x, coords, num_tokens_new, num_entities = self._vectorize_whole_entities(
             x_tokens=x_bert,
             ner_labels=ner_labels,
@@ -903,18 +902,15 @@ class BertJointModelV2(BertJointModel):
             num_entities: то же, что и в get_padded_coords
         """
         ner_other_label_id = 0  # TODO
-        token_start_ids = tf.constant([ner_other_label_id] + self.config["model"]["ner"]["token_start_ids"])
-        entity_start_ids = tf.constant(self.config["model"]["ner"]["entity_start_ids"])
-        event_start_ids = tf.constant(self.config["model"]["ner"]["event_start_ids"])
+        token_start_ids = tf.constant([ner_other_label_id] + self.config["model"]["ner"]["token_start_ids"], dtype=tf.int32)
+        entity_start_ids = tf.constant(self.config["model"]["ner"]["entity_start_ids"], dtype=tf.int32)
+        event_start_ids = tf.constant(self.config["model"]["ner"]["event_start_ids"], dtype=tf.int32)
 
         coords, num_tokens_new = get_batched_coords_from_labels(
             labels_2d=ner_labels, values=token_start_ids, sequence_len=self.num_tokens_ph
         )  # [batch_size, max_num_tokens_new, 2], [batch_size]
         x_tokens_new = tf.gather_nd(x_tokens, coords)  # [batch_size, max_num_tokens_new, d]
         ner_labels_new = tf.gather_nd(ner_labels, coords)  # [batch_size, max_num_tokens_new]
-        coords_new, _ = get_batched_coords_from_labels(
-            labels_2d=ner_labels_new, values=token_start_ids, sequence_len=num_tokens_new
-        )  # [batch_size, max_num_tokens_new, 2]
 
         x_emb = self.ner_emb(ner_labels_new)
         x_emb = self.ner_emb_dropout(x_emb, training=self.training_ph)
@@ -929,10 +925,14 @@ class BertJointModelV2(BertJointModel):
         mask_entity = tf.cast(tf.expand_dims(mask_entity, -1), tf.float32)
         mask_event = tf.cast(tf.expand_dims(mask_event, -1), tf.float32)
 
+        # merge
         x_new = x_tokens_new * mask_tok + x_emb * mask_entity + x_tokens_plus_emb * mask_event
 
-        num_entities_new = tf.cast(tf.reduce_sum(mask_entity + mask_event, axis=-1), tf.int32)
-
+        # coords of entities and events
+        entity_and_event_start_ids = tf.concat([entity_start_ids, event_start_ids], axis=-1)
+        coords_new, num_entities_new = get_batched_coords_from_labels(
+            labels_2d=ner_labels_new, values=entity_and_event_start_ids, sequence_len=num_tokens_new
+        )
         return x_new, coords_new, num_tokens_new, num_entities_new
 
 

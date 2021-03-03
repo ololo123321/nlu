@@ -6,7 +6,7 @@ def get_labels_mask(labels_2d: tf.Tensor, values: tf.Tensor, sequence_len: tf.Te
     """
     Получение маски: mask[i, j] = any(labels[i, j] == v for v in values)
     :param labels_2d: tf.Tensor of shape [N, T] and type tf.int32 - label ids
-    :param values: tf.Tensor of shape [num_ids] and type tf.int32 - start label ids
+    :param values: tf.Tensor of shape [num_ids] and type tf.int32 - start label ids. может быть пустым
     :param sequence_len: tf.Tensor of shape [N] and type tf.int32 - sequence lengths
     :return: tf.Tensor of shape [N, T] and type tf.bool
     """
