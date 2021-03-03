@@ -1,17 +1,17 @@
 import random
 import os
 from typing import Dict, List, Callable
-from functools import partial
 from itertools import chain
 from abc import ABC, abstractmethod
 
 import tensorflow as tf
+# import tensorflow_hub as hub
 import numpy as np
 
 from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 
-from .utils import infer_entities_bounds
+from .utils import get_batched_coords_from_labels, get_labels_mask
 from .layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN
 from ..data.base import Example
 from ..metrics import classification_report, classification_report_ner
@@ -23,6 +23,8 @@ class BaseModel(ABC):
     """
 
     model_scope = "model"
+    ner_scope = "ner"
+    re_scope = "re"
 
     def __init__(self, sess, config):
         self.sess = sess
@@ -271,88 +273,76 @@ class BertJointModel(BaseModel):
         # TENSORS
         self.loss_ner = None
         self.loss_re = None
+        self.ner_logits_train = None
+        self.transition_params = None
         self.ner_preds_inference = None
+        self.re_logits_train = None
         self.re_labels_true_entities = None
         self.re_labels_pred_entities = None
 
         # LAYERS
+        self.bert_dropout = None
+        self.birnn_ner = None
+        self.birnn_re = None
+        self.dense_ner_labels = None
+        self.ner_emb = None
+        self.ner_emb_dropout = None
+        self.entity_pairs_enc = None
 
+        # OPS
+        self.train_op_head = None
 
-    # TODO: вынести все слои на уровень атрибутов инстанса!
     def build(self):
         self._set_placeholders()
 
-        with tf.variable_scope("model"):
-            bert_out_train = self._build_bert(training=True)  # [batch_size, num_pieces_max, bert_dim]
-            bert_out_inference = self._build_bert(training=False)
+        # N - batch size
+        # D - bert dim
+        # T_pieces - число bpe-сиволов (включая [CLS] и [SEP])
+        # T_tokens - число токенов (не вклчая [CLS] и [SEP])
+        with tf.variable_scope(self.model_scope):
+            bert_out_train = self._build_bert(training=True)  # [N, T_pieces, D]
+            bert_out_pred = self._build_bert(training=False)  # [N, T_pieces, D]
 
-            bert_dim = self.config["model"]["bert"]["dim"]
-            bert_out_token_level_train = self._get_embeddings_by_coords(
-                x=bert_out_train, coords=self.first_pieces_coords_ph, d=bert_dim
-            )  # [batch_size, num_tokens_max, bert_dim]
-            bert_out_token_level_inference = self._get_embeddings_by_coords(
-                x=bert_out_inference, coords=self.first_pieces_coords_ph, d=bert_dim
-            )  # [batch_size, num_tokens_max, bert_dim]
-
-            bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
+            self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
 
             # ner
-            with tf.variable_scope("ner"):
+            with tf.variable_scope(self.ner_scope):
                 if self.config["model"]["ner"]["use_birnn"]:
-                    birnn = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
-                else:
-                    birnn = None
+                    self.birnn_ner = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
 
                 num_labels = self.config["model"]["ner"]["num_labels"]
-                dense_labels = tf.keras.layers.Dense(num_labels)
+                self.dense_ner_labels = tf.keras.layers.Dense(num_labels)
 
-                ner_head_fn = partial(
-                    self._build_ner_head,
-                    bert_dropout=bert_dropout,
-                    birnn=birnn,
-                    dense_logits=dense_labels
-                )
-                ner_logits_train, _, transition_params = ner_head_fn(x=bert_out_train)
-                _, self.ner_preds_inference, _ = ner_head_fn(x=bert_out_inference)
+                self.ner_logits_train, _, self.transition_params = self._build_ner_head(bert_out=bert_out_train)
+                _, self.ner_preds_inference, _ = self._build_ner_head(bert_out=bert_out_pred)
 
             # re
-            with tf.variable_scope("re"):
+            with tf.variable_scope(self.re_scope):
                 if self.config["model"]["re"]["use_entity_emb"]:
-                    ner_emb = tf.keras.layers.Embedding(num_labels, bert_dim)
-                    ner_emb_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["entity_emb_dropout"])
-                    # TODO: layernorm
-                else:
-                    ner_emb = None
-                    ner_emb_dropout = None
+                    bert_dim = self.config["model"]["bert"]["dim"]
+                    self.ner_emb = tf.keras.layers.Embedding(num_labels, bert_dim)
+                    self.ner_emb_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["entity_emb_dropout"])
+                    # TODO: layernorm (optional)
 
                 if self.config["model"]["re"]["use_birnn"]:
-                    birnn = StackedBiRNN(**self.config["model"]["re"]["rnn"])
-                else:
-                    birnn = None
+                    self.birnn_re = StackedBiRNN(**self.config["model"]["re"]["rnn"])
 
-                enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
+                self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
 
-                re_head_fn = partial(
-                    self._build_re_head,
-                    bert_dropout=bert_dropout,
-                    ner_emb=ner_emb,
-                    ner_emb_dropout=ner_emb_dropout,
-                    birnn=birnn,
-                    enc=enc
+                self.re_logits_train = self._build_re_head(
+                    bert_out=bert_out_train, ner_labels=self.ner_labels_ph
                 )
-
-                re_logits_train = re_head_fn(bert_out=bert_out_token_level_train, ner_labels=self.ner_labels_ph)
-                re_logits_true_entities = re_head_fn(
-                    bert_out=bert_out_token_level_inference, ner_labels=self.ner_labels_ph
+                re_logits_true_entities = self._build_re_head(
+                    bert_out=bert_out_pred, ner_labels=self.ner_labels_ph
                 )
-                re_logits_pred_entities = re_head_fn(
-                    bert_out=bert_out_token_level_inference, ner_labels=self.ner_preds_inference
+                re_logits_pred_entities = self._build_re_head(
+                    bert_out=bert_out_pred, ner_labels=self.ner_preds_inference
                 )
 
                 self.re_labels_true_entities = tf.argmax(re_logits_true_entities, axis=-1)
                 self.re_labels_pred_entities = tf.argmax(re_logits_pred_entities, axis=-1)
 
-            self._set_loss(ner_logits=ner_logits_train, transition_params=transition_params, re_logits=re_logits_train)
+            self._set_loss()
             self._set_train_op()
 
     def train(
@@ -411,13 +401,12 @@ class BertJointModel(BaseModel):
                 performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size, **kwargs)
                 if verbose is not None:
                     verbose_fn(performance_info)
-                    print("=" * 50)
                 score = performance_info["score"]
 
                 print("current score:", score)
 
                 if score > best_score:
-                    print("new best score:", score)
+                    print("!!! new best score:", score)
                     best_score = score
                     num_steps_wo_improvement = 0
 
@@ -433,6 +422,7 @@ class BertJointModel(BaseModel):
                         print("training finished due to max number of steps wo improvement encountered.")
                         break
 
+                print("=" * 50)
                 epoch += 1
 
         if saver is not None:
@@ -551,6 +541,16 @@ class BertJointModel(BaseModel):
         saver.restore(self.sess, checkpoint_path)
 
         super().initialize()
+
+    def set_train_op_head(self):
+        """
+        [опционально] операция для предобучения только новых слоёв
+        TODO: хардкоды скопов
+        """
+        tvars = [x for x in tf.trainable_variables() if x.name.startswith("model/ner") or x.name.startswith("model/re")]
+        opt = tf.train.AdamOptimizer()
+        grads = tf.gradients(self.loss, tvars)
+        self.train_op_head = opt.apply_gradients(zip(grads, tvars))
 
     def _get_feed_dict(self, examples: List[Example], training: bool):
         # bert
@@ -675,9 +675,9 @@ class BertJointModel(BaseModel):
         # common inputs
         self.training_ph = tf.placeholder(dtype=tf.bool, shape=None, name="training_ph")
 
-    def _set_loss(self, ner_logits, transition_params, re_logits):
-        self.loss_ner = self._get_ner_loss(logits=ner_logits, transition_params=transition_params)
-        self.loss_re = self._get_re_loss(logits=re_logits)
+    def _set_loss(self):
+        self.loss_ner = self._get_ner_loss()
+        self.loss_re = self._get_re_loss()
         self.loss = self.loss_ner + self.loss_re
 
     def _set_train_op(self):
@@ -701,82 +701,121 @@ class BertJointModel(BaseModel):
             x = model.get_sequence_output()
         return x
 
-    def _build_ner_head(self,  x, bert_dropout, birnn, dense_logits):
+    def _build_ner_head(self,  bert_out):
+        """
+        bert_out -> dropout -> stacked birnn (optional) -> dense(num_labels) -> crf (optional)
+        :param bert_out:
+        :return:
+        """
         use_crf = self.config["model"]["ner"]["use_crf"]
         num_labels = self.config["model"]["ner"]["num_labels"]
-        cell_dim = self.config["model"]["ner"]["rnn"]["cell_dim"]
 
-        x = bert_dropout(x, training=self.training_ph)
-
-        sequence_mask = tf.sequence_mask(self.num_pieces_ph)
-        if birnn is not None:
-            x = birnn(x, training=self.training_ph, mask=sequence_mask)
-            d_model = cell_dim * 2
+        # dropout
+        if (self.birnn_ner is None) or (self.config["model"]["ner"]["rnn"]["dropout"] == 0.0):
+            x = self.bert_dropout(bert_out, training=self.training_ph)
         else:
-            d_model = self.config["model"]["bert"]["dim"]
+            x = bert_out
 
-        x = self._get_embeddings_by_coords(x, coords=self.first_pieces_coords_ph, d=d_model)
+        # birnn
+        sequence_mask = tf.sequence_mask(self.num_pieces_ph)
+        if self.birnn_ner is not None:
+            x = self.birnn_ner(x, training=self.training_ph, mask=sequence_mask)
 
-        logits = dense_logits(x)
+        # pieces -> tokens
+        x = tf.gather_nd(x, self.first_pieces_coords_ph)  # [N, num_tokens_tokens, bert_dim or cell_dim * 2]
 
+        # label logits
+        logits = self.dense_ner_labels(x)
+
+        # label ids
         if use_crf:
             with tf.variable_scope("crf", reuse=tf.AUTO_REUSE):
                 transition_params = tf.get_variable("transition_params", [num_labels, num_labels], dtype=tf.float32)
             pred_ids, _ = tf.contrib.crf.crf_decode(logits, transition_params, self.num_tokens_ph)
         else:
             pred_ids = tf.argmax(logits, axis=-1)
+            transition_params = None
 
         return logits, pred_ids, transition_params
 
-    def _build_re_head(self, bert_out, bert_dropout, ner_labels, ner_emb, ner_emb_dropout, birnn, enc):
-        bert_out = bert_dropout(bert_out, training=self.training_ph)
+    def _build_re_head(self, bert_out, ner_labels):
+        x = self._get_entities_representation(bert_out=bert_out, ner_labels=ner_labels)
 
-        if ner_emb is not None:
-            x_emb = ner_emb(ner_labels)
-            x_emb = ner_emb_dropout(x_emb, training=self.training_ph)
-            x = bert_out + x_emb
-        else:
-            x = bert_out
-
-        if birnn is not None:
-            sequence_mask = tf.sequence_mask(self.num_tokens_ph)
-            x = birnn(x, training=self.training_ph, mask=sequence_mask)  # [batch_size, num_tokens, cell_dim * 2]
-            d_model = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
-        else:
-            d_model = self.config["model"]["bert"]["dim"]
-
-        start_ids = tf.constant(self.config["model"]["ner"]["start_ids"])
-        coords, num_entities = infer_entities_bounds(
-            label_ids=ner_labels, sequence_len=self.num_tokens_ph, bound_ids=start_ids
-        )
-
-        x = self._get_embeddings_by_coords(x, coords=coords, d=d_model)  # [batch_size, num_entities, cell_dim * 2]
-
+        # encoding of pairs
         inputs = GraphEncoderInputs(head=x, dep=x)
-        logits = enc(inputs=inputs, training=self.training_ph)  # [batch_size, num_ent, num_ent, num_relations]
+        logits = self.entity_pairs_enc(inputs=inputs, training=self.training_ph)  # [N, num_ent, num_ent, num_relation]
         return logits
 
-    def _get_ner_loss(self, logits, transition_params):
+    def _get_entities_representation(self, bert_out, ner_labels) -> tf.Tensor:
+        """
+        bert_out ->
+        ner_labels -> x_ner
+
+        Выход - логиты отношений
+
+        Пусть v_context - контекстный вектор первого токена сущности или триггера события,
+              v_label - обучаемый с нуля вектор лейбла или триггера события
+              v_entity - обучаемый с нуля вектор именной сущности
+
+        Есть несколько способов векторизации сущностей и триггеров событий:
+
+        1. v_context
+        2. v_context + v_label
+        3. сущнсоть - v_entity, триггер - v_context + v_label
+
+        :param bert_out: tf.Tensor of shape [batch_size, num_pieces_max, bert_dim] and type tf.float32
+        :param ner_labels: tf.Tensor of shape [batch_size, num_tokens_max] and type tf.int32
+        :return:
+        """
+        # dropout
+        bert_out = self.bert_dropout(bert_out, training=self.training_ph)
+
+        # pieces -> tokens
+        x_bert = tf.gather_nd(bert_out, self.first_pieces_coords_ph)  # [batch_size, num_tokens, bert_dim]
+
+        if self.ner_emb is not None:
+            x_emb = self.ner_emb(ner_labels)
+            x_emb = self.ner_emb_dropout(x_emb, training=self.training_ph)
+            x = x_bert + x_emb
+        else:
+            x = x_bert
+
+        if self.birnn_re is not None:
+            sequence_mask = tf.sequence_mask(self.num_tokens_ph)
+            x = self.birnn_re(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
+
+        # вывод координат первых токенов сущностей
+        start_ids = tf.constant(self.config["model"]["ner"]["start_ids"])
+        coords, _ = get_batched_coords_from_labels(
+            labels_2d=ner_labels, values=start_ids, sequence_len=self.num_tokens_ph
+        )
+
+        # tokens -> entities
+        x = tf.gather_nd(x, coords)   # [batch_size, num_entities_max, bert_bim or cell_dim * 2]
+        return x
+
+    def _get_ner_loss(self):
         use_crf = self.config["model"]["ner"]["use_crf"]
         if use_crf:
             log_likelihood, _ = tf.contrib.crf.crf_log_likelihood(
-                inputs=logits,
+                inputs=self.ner_logits_train,
                 tag_indices=self.ner_labels_ph,
                 sequence_lengths=self.num_tokens_ph,
-                transition_params=transition_params
+                transition_params=self.transition_params
             )
             loss = -tf.reduce_mean(log_likelihood)
         else:
-            loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.ner_labels_ph, logits=logits)
+            loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                labels=self.ner_labels_ph, logits=self.ner_logits_train
+            )
             loss = tf.reduce_mean(loss)
 
         loss *= self.config["model"]["ner"]["loss_coef"]
         return loss
 
-    def _get_re_loss(self, logits):
+    def _get_re_loss(self):
         no_rel_id = self.config["model"]["re"]["no_relation_id"]
-
-        logits_shape = tf.shape(logits)
+        logits_shape = tf.shape(self.re_logits_train)
         labels = tf.broadcast_to(no_rel_id, logits_shape[:3])  # [batch_size, num_entities, num_entities]
         labels = tf.tensor_scatter_nd_update(
             tensor=labels,
@@ -784,7 +823,7 @@ class BertJointModel(BaseModel):
             updates=self.re_labels_ph[:, -1],
         )  # [batch_size, num_entities, num_entities]
         # [batch_size, num_entities, num_entities]:
-        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits)
+        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=self.re_logits_train)
         mask = tf.cast(tf.sequence_mask(self.num_entities_ph), tf.float32)  # [batch_size, num_entities]
         masked_per_example_loss = per_example_loss * mask[:, :, None] * mask[:, None, :]
         total_loss = tf.reduce_sum(masked_per_example_loss)
@@ -793,19 +832,110 @@ class BertJointModel(BaseModel):
         loss *= self.config["model"]["re"]["loss_coef"]
         return loss
 
-    @classmethod
-    def _actual_name_to_checkpoint_name(cls, name: str) -> str:
-        prefix = "model/bert/"  # TODO
+    def _actual_name_to_checkpoint_name(self, name: str) -> str:
+        bert_scope = self.config["model"]["bert"]["scope"]
+        prefix = f"{self.model_scope}/{bert_scope}/"
         name = name[len(prefix):]
         name = name.replace(":0", "")
         return name
 
-    @staticmethod
-    def _get_embeddings_by_coords(x, coords, d: int):
-        """
-        Итоговую размерность (d) нужно задавать явно, иначе её не получится вывести для полносвязного слоя
-        """
-        batch_size = tf.shape(x)[0]
-        x = tf.gather_nd(x, coords)  # [batch_size * num_tokens_max, d]
-        x = tf.reshape(x, [batch_size, -1, d])  # [batch_size, num_tokens_max, d]
+
+class BertJointModelV2(BertJointModel):
+    def __init__(self, sess, config):
+        super().__init__(sess=sess, config=config)
+
+    def _get_tokens_and_entities_representation(self, bert_out, ner_labels) -> tf.Tensor:
+        assert self.ner_emb is not None
+        assert self.ner_emb_dropout is not None
+        assert self.birnn_re is not None
+
+        # dropout
+        bert_out = self.bert_dropout(bert_out, training=self.training_ph)
+
+        # pieces -> tokens
+        x_bert = tf.gather_nd(bert_out, self.first_pieces_coords_ph)  # [batch_size, num_tokens, bert_dim]
+
+        x, coords, num_tokens_new, num_entities = self._vectorize_whole_entities(
+            x_tokens=x_bert,
+            ner_labels=ner_labels,
+        )
+
+        sequence_mask = tf.sequence_mask(num_tokens_new)
+        x = self.birnn_re(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
+
+        # tokens -> entities
+        x = tf.gather_nd(x, coords)
         return x
+
+    def _vectorize_whole_entities(self, x_tokens, ner_labels):
+        """
+        Векторизация сущностей, инвариантная к их значениям.
+
+        * Пусть r(A, B) - отношение между A и B.
+          Если A и B - именные сущности, то важны их лейблы и контекст, но не важны конкретные значения.
+          Например, в предложении `ООО "Ромашка" обанкротила ООО "Одуванчик"` названия организаций
+          `ООО "Ромашка"` и `ООО "Одуванчик"` можно заменить на `[ORG]`, чтоб модель не переобучалась под конкретные
+          названия.
+        * Словоформа триггера события важна: например, если пример выше заменить на `[ORG] [BANKRUPTCY] [ORG]`,
+          то не будет ясно, кто конкретно стал банкротом.
+        * В то же время было бы полезно модели понять, к какому конкретно событию относится триггер, чтоб проще учить
+          условное распределение на роли. Например, если модель будет знать, что слово "обанкротила" является триггером
+          события "банкротство", то ей будет проще понять, что роли могут быть только {банкрот, тот_кто_банкротит}, потому
+          что в разметке других ролей нет у данного события.
+
+        emb types:
+        0 - эмбеддинг токена
+        1 - эмбеддинг сущности
+        2 - эмбеддинг токена + эмбеддинг сущности
+
+        tokens:     Компания	ООО     "	    Ромашка     "	    обанкротила     Газпром    .
+        labels:     O		    B_ORG	I_ORG	I_ORG	    I_ORG	B_BANKRUPTCY    B_ORG      O
+        mask:       True        True    False   False       False   True            True       True
+        emb_type    0           1       None    None        None    2               1          0
+
+        Args:
+            x_tokens: tf.Tensor of shape [batch_size, num_tokens_max, hidden] and dtype tf.float32 - векторизованные токены
+            ner_labels: tf.Tensor of shape [batch_size, num_tokens_max] and dtype tf.int32 - ner лейблы
+
+        Returns:
+            x: tf.Tensor of shape [batch_size, num_tokens_new_max, hidden] and dtype tf.float32
+            coords: то же, что и в get_padded_coords
+            num_entities: то же, что и в get_padded_coords
+        """
+        ner_other_label_id = 0  # TODO
+        token_start_ids = tf.constant([ner_other_label_id] + self.config["model"]["ner"]["token_start_ids"])
+        entity_start_ids = tf.constant(self.config["model"]["ner"]["entity_start_ids"])
+        event_start_ids = tf.constant(self.config["model"]["ner"]["event_start_ids"])
+
+        coords, num_tokens_new = get_batched_coords_from_labels(
+            labels_2d=ner_labels, values=token_start_ids, sequence_len=self.num_tokens_ph
+        )  # [batch_size, max_num_tokens_new, 2], [batch_size]
+        x_tokens_new = tf.gather_nd(x_tokens, coords)  # [batch_size, max_num_tokens_new, d]
+        ner_labels_new = tf.gather_nd(ner_labels, coords)  # [batch_size, max_num_tokens_new]
+        coords_new, _ = get_batched_coords_from_labels(
+            labels_2d=ner_labels_new, values=token_start_ids, sequence_len=num_tokens_new
+        )  # [batch_size, max_num_tokens_new, 2]
+
+        x_emb = self.ner_emb(ner_labels_new)
+        x_emb = self.ner_emb_dropout(x_emb, training=self.training_ph)
+        x_tokens_plus_emb = x_tokens_new + x_emb
+
+        # маски таковы, что sum(masks) = ones_like(ner_labels_new)
+        mask_tok = tf.equal(ner_labels_new, ner_other_label_id)  # O
+        mask_entity = get_labels_mask(labels_2d=ner_labels_new, values=entity_start_ids, sequence_len=num_tokens_new)
+        mask_event = get_labels_mask(labels_2d=ner_labels_new, values=event_start_ids, sequence_len=num_tokens_new)
+
+        mask_tok = tf.cast(tf.expand_dims(mask_tok, -1), tf.float32)
+        mask_entity = tf.cast(tf.expand_dims(mask_entity, -1), tf.float32)
+        mask_event = tf.cast(tf.expand_dims(mask_event, -1), tf.float32)
+
+        x_new = x_tokens_new * mask_tok + x_emb * mask_entity + x_tokens_plus_emb * mask_event
+
+        num_entities_new = tf.cast(tf.reduce_sum(mask_entity + mask_event, axis=-1), tf.int32)
+
+        return x_new, coords_new, num_tokens_new, num_entities_new
+
+
+# class ElmoJointModel(BertJointModel):
+#     def __init__(self, sess, config):
+#         super().__init__(sess=sess, config=config)
