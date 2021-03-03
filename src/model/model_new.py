@@ -220,6 +220,7 @@ class BertJointModel(BaseModel):
                     "loss_coef": 10.0,
                     "use_birnn": True,
                     "use_entity_emb": True,
+                    "use_entity_emb_layer_norm": True,
                     "entity_emb_dropout": 0.2,
                     "rnn": {
                         "num_layers": 1,
@@ -286,6 +287,7 @@ class BertJointModel(BaseModel):
         self.birnn_re = None
         self.dense_ner_labels = None
         self.ner_emb = None
+        self.ner_emb_layer_norm = None
         self.ner_emb_dropout = None
         self.entity_pairs_enc = None
 
@@ -321,8 +323,9 @@ class BertJointModel(BaseModel):
                 if self.config["model"]["re"]["use_entity_emb"]:
                     bert_dim = self.config["model"]["bert"]["dim"]
                     self.ner_emb = tf.keras.layers.Embedding(num_labels, bert_dim)
+                    if self.config["model"]["re"]["use_entity_emb_layer_norm"]:
+                        self.ner_emb_layer_norm = tf.keras.layers.LayerNormalization()
                     self.ner_emb_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["entity_emb_dropout"])
-                    # TODO: layernorm (optional)
 
                 if self.config["model"]["re"]["use_birnn"]:
                     self.birnn_re = StackedBiRNN(**self.config["model"]["re"]["rnn"])
@@ -772,8 +775,7 @@ class BertJointModel(BaseModel):
         x_bert = tf.gather_nd(bert_out, self.first_pieces_coords_ph)  # [batch_size, num_tokens, bert_dim]
 
         if self.ner_emb is not None:
-            x_emb = self.ner_emb(ner_labels)
-            x_emb = self.ner_emb_dropout(x_emb, training=self.training_ph)
+            x_emb = self._get_ner_embeddings(ner_labels=ner_labels)
             x = x_bert + x_emb
         else:
             x = x_bert
@@ -837,9 +839,21 @@ class BertJointModel(BaseModel):
         name = name.replace(":0", "")
         return name
 
+    def _get_ner_embeddings(self, ner_labels):
+        x_emb = self.ner_emb(ner_labels)
+        if self.ner_emb_layer_norm is not None:
+            x_emb = self.ner_emb_layer_norm(x_emb)
+        x_emb = self.ner_emb_dropout(x_emb, training=self.training_ph)
+        return x_emb
+
 
 class BertJointModelV2(BertJointModel):
     def __init__(self, sess, config):
+        """
+        Изменения в config:
+        - model.ner.start_ids
+        + model.ner.{token_start_ids, entity_start_ids, event_start_ids}
+        """
         super().__init__(sess=sess, config=config)
 
     def _get_entities_representation(self, bert_out, ner_labels) -> tf.Tensor:
@@ -901,8 +915,8 @@ class BertJointModelV2(BertJointModel):
             coords: то же, что и в get_padded_coords
             num_entities: то же, что и в get_padded_coords
         """
-        ner_other_label_id = 0  # TODO
-        token_start_ids = tf.constant([ner_other_label_id] + self.config["model"]["ner"]["token_start_ids"], dtype=tf.int32)
+        no_entity_id = self.config["model"]["ner"]["no_entity_id"]
+        token_start_ids = tf.constant([no_entity_id] + self.config["model"]["ner"]["token_start_ids"], dtype=tf.int32)
         entity_start_ids = tf.constant(self.config["model"]["ner"]["entity_start_ids"], dtype=tf.int32)
         event_start_ids = tf.constant(self.config["model"]["ner"]["event_start_ids"], dtype=tf.int32)
 
@@ -912,12 +926,11 @@ class BertJointModelV2(BertJointModel):
         x_tokens_new = tf.gather_nd(x_tokens, coords)  # [batch_size, max_num_tokens_new, d]
         ner_labels_new = tf.gather_nd(ner_labels, coords)  # [batch_size, max_num_tokens_new]
 
-        x_emb = self.ner_emb(ner_labels_new)
-        x_emb = self.ner_emb_dropout(x_emb, training=self.training_ph)
+        x_emb = self._get_ner_embeddings(ner_labels=ner_labels_new)
         x_tokens_plus_emb = x_tokens_new + x_emb
 
         # маски таковы, что sum(masks) = ones_like(ner_labels_new)
-        mask_tok = tf.equal(ner_labels_new, ner_other_label_id)  # O
+        mask_tok = tf.equal(ner_labels_new, no_entity_id)  # O
         mask_entity = get_labels_mask(labels_2d=ner_labels_new, values=entity_start_ids, sequence_len=num_tokens_new)
         mask_event = get_labels_mask(labels_2d=ner_labels_new, values=event_start_ids, sequence_len=num_tokens_new)
 
