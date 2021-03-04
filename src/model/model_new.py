@@ -583,7 +583,6 @@ class BertJointModel(BaseModel):
             input_mask_i.append(1)
             segment_ids_i.append(0)
 
-            num_pieces_i = 0
             ner_labels_i = []
             ptr = 1
 
@@ -591,7 +590,6 @@ class BertJointModel(BaseModel):
             for t in x.tokens:
                 first_pieces_coords_i.append((i, ptr))
                 num_pieces_ij = len(t.pieces)
-                num_pieces_i += num_pieces_ij
                 input_ids_i += t.token_ids
                 input_mask_i += [1] * num_pieces_ij
                 segment_ids_i += [0] * num_pieces_ij
@@ -610,7 +608,7 @@ class BertJointModel(BaseModel):
                 re_labels.append((i, arc.head_index, arc.dep_index, arc.rel_id))
 
             # write
-            num_pieces.append(num_pieces_i)
+            num_pieces.append(len(input_ids_i))
             num_tokens.append(len(x.tokens))
             num_entities.append(len(x.entities))
             input_ids.append(input_ids_i)
@@ -845,6 +843,257 @@ class BertJointModel(BaseModel):
             x_emb = self.ner_emb_layer_norm(x_emb)
         x_emb = self.ner_emb_dropout(x_emb, training=self.training_ph)
         return x_emb
+
+
+class BertForRelationExtraction(BertJointModel):
+    """
+    ner уже решён.
+    сущности заменены на соответствующие лейблы: Иван Иванов работает в ООО "Ромашка". -> [PER] работает в [ORG].
+    """
+    def __init__(self, sess, config):
+        super().__init__(sess=sess, config=config)
+
+        self.entity_coords_ph = None
+
+    def build(self):
+        self._set_placeholders()
+
+        # N - batch size
+        # D - bert dim
+        # T_pieces - число bpe-сиволов (включая [CLS] и [SEP])
+        # T_tokens - число токенов (не вклчая [CLS] и [SEP])
+        with tf.variable_scope(self.model_scope):
+            bert_out_train = self._build_bert(training=True)  # [N, T_pieces, D]
+            bert_out_pred = self._build_bert(training=False)  # [N, T_pieces, D]
+
+            self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
+
+            with tf.variable_scope(self.re_scope):
+                if self.config["model"]["re"]["use_birnn"]:
+                    self.birnn_re = StackedBiRNN(**self.config["model"]["re"]["rnn"])
+
+                self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
+
+                self.re_logits_train = self._build_re_head(
+                    bert_out=bert_out_train, ner_labels=self.ner_labels_ph
+                )
+                re_logits_true_entities = self._build_re_head(
+                    bert_out=bert_out_pred, ner_labels=self.ner_labels_ph
+                )
+
+                self.re_labels_true_entities = tf.argmax(re_logits_true_entities, axis=-1)
+
+            self._set_loss()
+            self._set_train_op()
+
+    def evaluate(self, examples: List[Example], batch_size: int = 16, **kwargs) -> Dict:
+        """
+        metrics = {
+            "ner": {},
+            "re": {},
+            "total": {}
+        }
+        """
+        y_true_re = []
+        y_pred_re = []
+
+        no_rel_id = self.config["model"]["re"]["no_relation_id"]
+        id_to_re_label = kwargs["id_to_re_label"]
+
+        loss = 0.0
+        num_batches = 0
+
+        for start in range(0, len(examples), batch_size):
+            end = start + batch_size
+            examples_batch = examples[start:end]
+            feed_dict = self._get_feed_dict(examples_batch, training=False)
+            loss_i, rel_labels_pred = self.sess.run([self.loss, self.re_labels_true_entities], feed_dict=feed_dict)
+            loss += loss_i
+
+            for i, x in enumerate(examples_batch):
+                # re TODO: рассмотреть случаи num_events == 0
+                num_entities = len(x.entities)
+                arcs_true = np.full((num_entities, num_entities), no_rel_id, dtype=np.int32)
+
+                for arc in x.arcs:
+                    assert arc.head_index is not None
+                    assert arc.dep_index is not None
+                    arcs_true[arc.head_index, arc.dep_index] = arc.rel_id
+
+                arcs_pred = rel_labels_pred[i, :num_entities, :num_entities]
+                assert arcs_pred.shape[0] == num_entities, f"{arcs_pred.shape[0]} != {num_entities}"
+                assert arcs_pred.shape[1] == num_entities, f"{arcs_pred.shape[1]} != {num_entities}"
+                y_true_re += [id_to_re_label[j] for j in arcs_true.flatten()]
+                y_pred_re += [id_to_re_label[j] for j in arcs_pred.flatten()]
+
+            num_batches += 1
+
+        # loss
+        # TODO: учитывать, что последний батч может быть меньше. тогда среднее не совсем корректно так считать
+        loss /= num_batches
+
+        re_metrics = classification_report(y_true=y_true_re, y_pred=y_pred_re, trivial_label="O")
+
+        # total
+        performance_info = {
+            "loss": loss,
+            "metrics": re_metrics,
+            "score": re_metrics["micro"]["f1"]
+        }
+
+        return performance_info
+
+    # TODO: implement
+    def predict(self, examples: List[Example], batch_size: int = 16, **kwargs):
+        pass
+
+    def _get_feed_dict(self, examples: List[Example], training: bool):
+        # bert
+        input_ids = []
+        input_mask = []
+        segment_ids = []
+
+        entity_coords = []
+        num_pieces = []
+        num_entities = []
+        re_labels = []
+
+        label2id = self.config["model"]["bert"]["entity_label_to_token_id"]  # TODO
+
+        # filling
+        for i, x in enumerate(examples):
+            input_ids_i = []
+            input_mask_i = []
+            segment_ids_i = []
+            entity_coords_i = []
+
+            # [CLS]
+            input_ids_i.append(self.config["model"]["bert"]["cls_token_id"])
+            input_mask_i.append(1)
+            segment_ids_i.append(0)
+
+            ptr = 1
+
+            if len(x.entities) == 0:
+                for t in x.tokens:
+                    num_pieces_ij = len(t.pieces)
+                    input_ids_i += t.token_ids
+                    input_mask_i += [1] * num_pieces_ij
+                    segment_ids_i += [0] * num_pieces_ij
+                    ptr += num_pieces_ij
+            else:
+                sorted_entities = sorted(x.entities, key=lambda e: e.tokens[0].index_rel)
+                idx_start = 0
+                for entity in sorted_entities:
+                    idx_end = entity.tokens[0].index_rel
+                    for t in x.tokens[idx_start:idx_end]:
+                        # кусочки токена TODO: копипаста
+                        num_pieces_ij = len(t.pieces)
+                        input_ids_i += t.token_ids
+                        input_mask_i += [1] * num_pieces_ij
+                        segment_ids_i += [0] * num_pieces_ij
+                        ptr += num_pieces_ij
+
+                        # кусочек сущности
+                        entity_coords_i.append((i, ptr))
+                        input_ids_i.append(label2id[entity.label])
+                        input_mask_i.append(1)
+                        segment_ids_i.append(0)
+                        ptr += 1
+
+                    # обновление границы
+                    idx_start = entity.tokens[-1].index_rel
+
+                for t in x.tokens[idx_start:]:
+                    # кусочки токена TODO: копипаста
+                    num_pieces_ij = len(t.pieces)
+                    input_ids_i += t.token_ids
+                    input_mask_i += [1] * num_pieces_ij
+                    segment_ids_i += [0] * num_pieces_ij
+                    ptr += num_pieces_ij
+
+            # [SEP]
+            input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
+            input_mask_i.append(1)
+            segment_ids_i.append(0)
+
+            # relations
+            for arc in x.arcs:
+                assert arc.head_index is not None
+                assert arc.dep_index is not None
+                re_labels.append((i, arc.head_index, arc.dep_index, arc.rel_id))
+
+            # write
+            num_pieces.append(len(input_ids_i))
+            num_entities.append(len(x.entities))
+            input_ids.append(input_ids_i)
+            input_mask.append(input_mask_i)
+            segment_ids.append(segment_ids_i)
+            entity_coords.append(entity_coords_i)
+
+        # padding
+        pad_token_id = self.config["model"]["bert"]["pad_token_id"]
+        num_pieces_max = max(num_pieces)
+        num_entities_max = max(num_entities)
+        for i in range(len(examples)):
+            input_ids[i] += [pad_token_id] * (num_pieces_max - num_pieces[i])
+            input_mask[i] += [0] * (num_pieces_max - num_pieces[i])
+            segment_ids[i] += [0] * (num_pieces_max - num_pieces[i])
+            entity_coords[i] += [(i, 0)] * (num_entities_max - num_entities[i])
+
+        if len(re_labels) == 0:
+            re_labels.append((0, 0, 0, 0))
+
+        if len(entity_coords) == 0:
+            entity_coords.append([(0, 0)])
+
+        d = {
+            # bert
+            self.input_ids_ph: input_ids,
+            self.input_mask_ph: input_mask,
+            self.segment_ids_ph: segment_ids,
+
+            self.num_pieces_ph: num_pieces,
+            self.num_entities_ph: num_entities,
+            self.entity_coords_ph: entity_coords,
+            self.re_labels_ph: re_labels,
+            self.training_ph: training
+        }
+        return d
+
+    def _set_placeholders(self):
+        # bert inputs
+        self.input_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_ids")
+        self.input_mask_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_mask")
+        self.segment_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="segment_ids")
+
+        # [id_example, id_piece]
+        self.first_pieces_coords_ph = tf.placeholder(
+            dtype=tf.int32, shape=[None, None, 2], name="first_pieces_coords"
+        )  # [id_example, id_piece]
+        self.num_pieces_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_pieces")
+        self.entity_coords_ph = tf.placeholder(dtype=tf.int32, shape=[None, None, 2], name="entity_coords")
+        self.num_entities_ph = tf.placeholder(
+            dtype=tf.int32, shape=[None], name="num_entities"
+        )  # [id_example, id_head, id_dep, id_rel]
+        self.re_labels_ph = tf.placeholder(dtype=tf.int32, shape=[None, 4], name="re_labels")
+
+        # common inputs
+        self.training_ph = tf.placeholder(dtype=tf.bool, shape=None, name="training_ph")
+
+    def _set_loss(self):
+        self.loss_re = self._get_re_loss()
+        self.loss = self.loss_re
+
+    def _get_entities_representation(self, bert_out, ner_labels) -> tf.Tensor:
+        if self.birnn_re is not None:
+            sequence_mask = tf.sequence_mask(self.num_pieces_ph)
+            x = self.birnn_re(bert_out, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
+        else:
+            x = bert_out
+
+        x = tf.gather_nd(x, self.entity_coords_ph)   # [batch_size, num_entities_max, bert_bim or cell_dim * 2]
+        return x
 
 
 class BertJointModelV2(BertJointModel):
