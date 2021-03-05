@@ -549,6 +549,8 @@ class BertJointModel(BaseModel):
         """
         [опционально] операция для предобучения только новых слоёв
         TODO: хардкоды скопов
+        TODO: по-хорошему нужно global_step обновлять до нуля, если хочется продолжать обучение с помощью train_op.
+         иначе learning rate будет считаться не совсем ожидаемо
         """
         tvars = [x for x in tf.trainable_variables() if x.name.startswith("model/ner") or x.name.startswith("model/re")]
         opt = tf.train.AdamOptimizer()
@@ -994,15 +996,15 @@ class BertForRelationExtraction(BertJointModel):
                         segment_ids_i += [0] * num_pieces_ij
                         ptr += num_pieces_ij
 
-                        # кусочек сущности
-                        entity_coords_i.append((i, ptr))
-                        input_ids_i.append(label2id[entity.label])
-                        input_mask_i.append(1)
-                        segment_ids_i.append(0)
-                        ptr += 1
+                    # кусочек сущности
+                    entity_coords_i.append((i, ptr))
+                    input_ids_i.append(label2id[entity.label])
+                    input_mask_i.append(1)
+                    segment_ids_i.append(0)
+                    ptr += 1
 
                     # обновление границы
-                    idx_start = entity.tokens[-1].index_rel
+                    idx_start = entity.tokens[-1].index_rel + 1
 
                 for t in x.tokens[idx_start:]:
                     # кусочки токена TODO: копипаста
