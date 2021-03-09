@@ -58,7 +58,7 @@ def get_padded_coords(mask_2d: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
 
     # фейковые координаты в случае отсутствия сущностей
     coords_dummy = tf.zeros([batch_size, 1, 2], dtype=tf.int32)
-    cond = tf.equal(tf.shape(coords)[0], 0)
+    cond = tf.equal(tf.reduce_max(num_elements), 0)
     coords = tf.cond(cond, true_fn=lambda: coords_dummy, false_fn=lambda: coords)
 
     return coords, num_elements
