@@ -5,7 +5,7 @@ from src.data.preprocessing import get_sentences_spans, split_example_v1, split_
 
 # get spans
 
-
+# TODO: лучше покрыть тестами случаи (w=2, s=1); (w=2, s=2)
 @pytest.mark.parametrize("entity_spans, pointers, window, stride, expected", [
     # w=1, s=1
     pytest.param([], [], 1, 1, [], id="no pointers"),
@@ -13,6 +13,12 @@ from src.data.preprocessing import get_sentences_spans, split_example_v1, split_
     pytest.param([(0, 1)], [0, 2], 1, 1, [(0, 1)], id="one entity"),
     pytest.param([(0, 1), (2, 3)], [0, 2, 4], 1, 1, [(0, 1), (1, 2)], id="two sentences, one entity in each one"),
     pytest.param([(0, 1), (1, 2)], [0, 2, 4], 1, 1, [(0, 2)], id="two sentences, bad split"),
+    pytest.param([(0, 1), (1, 2), (4, 5)], [0, 2, 4, 6], 1, 1, [(0, 2), (2, 3)],
+                 id="three sentences, 1st split is bad"),
+    pytest.param([(2, 3), (3, 4), (5, 6)], [0, 2, 4, 6], 1, 1, [(0, 1), (1, 3)],
+                 id="three sentences, 2nd split is bad"),
+    pytest.param([(1, 2), (3, 4)], [0, 2, 4, 6], 1, 1, [(0, 3)],
+                 id="three sentences, all splits are bad"),
     # w=2, s=1
     pytest.param([(0, 1), (2, 3)], [0, 2, 4], 2, 1, [(0, 2)]),
     pytest.param([(0, 1), (2, 3), (4, 5)], [0, 2, 4, 6], 2, 1, [(0, 2), (1, 3)]),

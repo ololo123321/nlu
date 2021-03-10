@@ -265,7 +265,6 @@ class BertJointModel(BaseModel):
         self.ner_labels_ph = None
 
         # re
-        self.num_entities_ph = None
         self.re_labels_ph = None
 
         # common
@@ -280,6 +279,7 @@ class BertJointModel(BaseModel):
         self.re_logits_train = None
         self.re_labels_true_entities = None
         self.re_labels_pred_entities = None
+        self.num_entities = None
 
         # LAYERS
         self.bert_dropout = None
@@ -332,13 +332,13 @@ class BertJointModel(BaseModel):
 
                 self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
 
-                self.re_logits_train = self._build_re_head(
+                self.re_logits_train, self.num_entities = self._build_re_head(
                     bert_out=bert_out_train, ner_labels=self.ner_labels_ph
                 )
-                re_logits_true_entities = self._build_re_head(
+                re_logits_true_entities, _ = self._build_re_head(
                     bert_out=bert_out_pred, ner_labels=self.ner_labels_ph
                 )
-                re_logits_pred_entities = self._build_re_head(
+                re_logits_pred_entities, _ = self._build_re_head(
                     bert_out=bert_out_pred, ner_labels=self.ner_preds_inference
                 )
 
@@ -573,7 +573,6 @@ class BertJointModel(BaseModel):
         ner_labels = []
 
         # re
-        num_entities = []
         re_labels = []
 
         # filling
@@ -615,7 +614,6 @@ class BertJointModel(BaseModel):
             # write
             num_pieces.append(len(input_ids_i))
             num_tokens.append(len(x.tokens))
-            num_entities.append(len(x.entities))
             input_ids.append(input_ids_i)
             input_mask.append(input_mask_i)
             segment_ids.append(segment_ids_i)
@@ -650,7 +648,6 @@ class BertJointModel(BaseModel):
             self.ner_labels_ph: ner_labels,
 
             # re
-            self.num_entities_ph: num_entities,
             self.re_labels_ph: re_labels,
 
             # common
@@ -673,7 +670,6 @@ class BertJointModel(BaseModel):
 
         # re inputs
         # [id_example, id_head, id_dep, id_rel]
-        self.num_entities_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_entities")
         self.re_labels_ph = tf.placeholder(dtype=tf.int32, shape=[None, 4], name="re_labels")
 
         # common inputs
@@ -743,14 +739,14 @@ class BertJointModel(BaseModel):
         return logits, pred_ids, transition_params
 
     def _build_re_head(self, bert_out, ner_labels):
-        x = self._get_entities_representation(bert_out=bert_out, ner_labels=ner_labels)
+        x, num_entities = self._get_entities_representation(bert_out=bert_out, ner_labels=ner_labels)
 
         # encoding of pairs
         inputs = GraphEncoderInputs(head=x, dep=x)
         logits = self.entity_pairs_enc(inputs=inputs, training=self.training_ph)  # [N, num_ent, num_ent, num_relation]
-        return logits
+        return logits, num_entities
 
-    def _get_entities_representation(self, bert_out, ner_labels) -> tf.Tensor:
+    def _get_entities_representation(self, bert_out, ner_labels):
         """
         bert_out ->
         ner_labels -> x_ner
@@ -789,18 +785,13 @@ class BertJointModel(BaseModel):
 
         # вывод координат первых токенов сущностей
         start_ids = tf.constant(self.config["model"]["ner"]["start_ids"], dtype=tf.int32)
-        coords, num_elements = get_batched_coords_from_labels(
+        coords, num_entities = get_batched_coords_from_labels(
             labels_2d=ner_labels, values=start_ids, sequence_len=self.num_tokens_ph
         )
 
-        # # TODO: debug
-        # if ner_labels == self.ner_labels_ph:
-        #     self.coords_debug = coords
-        #     self.num_elements_debug = num_elements
-
         # tokens -> entities
         x = tf.gather_nd(x, coords)   # [batch_size, num_entities_max, bert_bim or cell_dim * 2]
-        return x
+        return x, num_entities
 
     def _get_ner_loss(self):
         use_crf = self.config["model"]["ner"]["use_crf"]
@@ -823,6 +814,7 @@ class BertJointModel(BaseModel):
 
     def _get_re_loss(self):
         no_rel_id = self.config["model"]["re"]["no_relation_id"]
+        # должно гарантироваться, что min(logits_shape)) >= 1
         logits_shape = tf.shape(self.re_logits_train)
         labels = tf.broadcast_to(no_rel_id, logits_shape[:3])  # [batch_size, num_entities, num_entities]
         labels = tf.tensor_scatter_nd_update(
@@ -834,18 +826,17 @@ class BertJointModel(BaseModel):
             labels=labels, logits=self.re_logits_train
         )  # [batch_size, num_entities, num_entities]
 
-        # mask = tf.cast(tf.sequence_mask(self.num_entities_ph), tf.float32)  # [batch_size, num_entities]
-        mask = tf.cond(
-            tf.equal(tf.reduce_max(self.num_entities_ph), 0),
-            true_fn=lambda: tf.zeros((logits_shape[0], logits_shape[1]), dtype=tf.float32),
-            false_fn=lambda: tf.cast(tf.sequence_mask(self.num_entities_ph), tf.float32)
-        )  # [batch_size, num_entities]
+        # mask = tf.cond(
+        #     tf.equal(tf.reduce_max(self.num_entities), 0),
+        #     true_fn=lambda: tf.zeros((logits_shape[0], logits_shape[1]), dtype=tf.float32),
+        #     false_fn=lambda: tf.cast(tf.sequence_mask(self.num_entities), tf.float32)
+        # )  # [batch_size, num_entities]
         # TODO: проверить это:
-        # mask = tf.cast(tf.sequence_mask(self.num_entities_ph, maxlen=logits_shape[1]), tf.float32)
+        mask = tf.cast(tf.sequence_mask(self.num_entities, maxlen=logits_shape[1]), tf.float32)
 
         masked_per_example_loss = per_example_loss * mask[:, :, None] * mask[:, None, :]
         total_loss = tf.reduce_sum(masked_per_example_loss)
-        num_pairs = tf.cast(tf.reduce_sum(self.num_entities_ph ** 2), tf.float32)
+        num_pairs = tf.cast(tf.reduce_sum(self.num_entities ** 2), tf.float32)
         num_pairs = tf.maximum(num_pairs, 1.0)
         loss = total_loss / num_pairs
         loss *= self.config["model"]["re"]["loss_coef"]
@@ -1075,7 +1066,6 @@ class BertForRelationExtraction(BertJointModel):
             self.segment_ids_ph: segment_ids,
 
             self.num_pieces_ph: num_pieces,
-            self.num_entities_ph: num_entities,
             self.entity_coords_ph: entity_coords,
             self.re_labels_ph: re_labels,
             self.training_ph: training
@@ -1088,16 +1078,14 @@ class BertForRelationExtraction(BertJointModel):
         self.input_mask_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_mask")
         self.segment_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="segment_ids")
 
-        # [id_example, id_piece]
         self.first_pieces_coords_ph = tf.placeholder(
             dtype=tf.int32, shape=[None, None, 2], name="first_pieces_coords"
         )  # [id_example, id_piece]
         self.num_pieces_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_pieces")
         self.entity_coords_ph = tf.placeholder(dtype=tf.int32, shape=[None, None, 2], name="entity_coords")
-        self.num_entities_ph = tf.placeholder(
-            dtype=tf.int32, shape=[None], name="num_entities"
+        self.re_labels_ph = tf.placeholder(
+            dtype=tf.int32, shape=[None, 4], name="re_labels"
         )  # [id_example, id_head, id_dep, id_rel]
-        self.re_labels_ph = tf.placeholder(dtype=tf.int32, shape=[None, 4], name="re_labels")
 
         # common inputs
         self.training_ph = tf.placeholder(dtype=tf.bool, shape=None, name="training_ph")

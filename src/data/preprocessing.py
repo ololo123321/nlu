@@ -253,31 +253,24 @@ def get_sentences_spans(entity_spans: List[Span], pointers: List[int], window: i
     start = 0
     end = window
     is_good_split = True  # разделение на предложения плохое, если оно проходит через именную сущность
-    span_ptr = 0
-    entity_spans_sorted = sorted(entity_spans)
+    bad_starts = set()  # индексы предложений, которые содержат только часть сущности
     while True:
         # print(span_ptr)
         end_token_id = pointers[end]
 
-        # провекра разделения на предложения
-        for span in entity_spans_sorted[span_ptr:]:
-            if span[0] < end_token_id:
-                span_ptr += 1
-                if span[1] >= end_token_id:
-                    is_good_split = False
-                    break
-            else:
+        for span in entity_spans:
+            if span[0] < end_token_id <= span[1]:
+                is_good_split = False
                 break
-        # for span in entity_spans:
-        #     if span[0] < end_token_id <= span[1]:
-        #         is_good_split = False
-        #         break
 
         if is_good_split:
             res.append(Span(start=start, end=end))
             start = min(num_sentences - 1, start + stride)
+            while start in bad_starts:
+                start += 1
             end = min(num_sentences, start + window)
         else:
+            bad_starts.add(end)
             end = min(num_sentences, end + 1)
 
         if end == num_sentences:
