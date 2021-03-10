@@ -103,6 +103,8 @@ class Token(ReprMixin):
         self.token_ids = []
         self.label_ids = []
 
+        self.labels_pred = []
+
 
 class Entity(ReprMixin):
     def __init__(
@@ -197,3 +199,5 @@ class Example(ReprMixin):
         self.arcs = arcs if arcs is not None else []
         self.events = events if events is not None else []
         self.label = label  # в случае классификации предложений
+
+        self.arcs_pred = []

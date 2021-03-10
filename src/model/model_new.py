@@ -13,7 +13,7 @@ from bert.optimization import create_optimizer
 
 from .utils import get_batched_coords_from_labels, get_labels_mask
 from .layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN
-from ..data.base import Example
+from ..data.base import Example, Arc
 from ..metrics import classification_report, classification_report_ner
 
 
@@ -280,6 +280,7 @@ class BertJointModel(BaseModel):
         self.re_labels_true_entities = None
         self.re_labels_pred_entities = None
         self.num_entities = None
+        self.num_entities_pred = None
 
         # LAYERS
         self.bert_dropout = None
@@ -338,7 +339,7 @@ class BertJointModel(BaseModel):
                 re_logits_true_entities, _ = self._build_re_head(
                     bert_out=bert_out_pred, ner_labels=self.ner_labels_ph
                 )
-                re_logits_pred_entities, _ = self._build_re_head(
+                re_logits_pred_entities, self.num_entities_pred = self._build_re_head(
                     bert_out=bert_out_pred, ner_labels=self.ner_preds_inference
                 )
 
@@ -459,11 +460,15 @@ class BertJointModel(BaseModel):
             end = start + batch_size
             examples_batch = examples[start:end]
             feed_dict = self._get_feed_dict(examples_batch, training=False)
-            # coords, num_elements = self.sess.run([self.coords_debug, self.num_elements_debug], feed_dict=feed_dict)
-            # print("coords:", coords)
-            # print("num elements:", num_elements)
-            loss_i, loss_ner_i, loss_re_i, ner_labels_pred, rel_labels_pred = self.sess.run(
-                [self.loss, self.loss_ner, self.loss_re, self.ner_preds_inference, self.re_labels_true_entities],
+            loss_i, loss_ner_i, loss_re_i, ner_labels_pred, rel_labels_pred, num_entities = self.sess.run(
+                [
+                    self.loss,
+                    self.loss_ner,
+                    self.loss_re,
+                    self.ner_preds_inference,
+                    self.re_labels_true_entities,
+                    self.num_entities
+                ],
                 feed_dict=feed_dict
             )
             loss += loss_i
@@ -472,21 +477,27 @@ class BertJointModel(BaseModel):
 
             for i, x in enumerate(examples_batch):
                 # ner
-                y_true_ner.append([t.labels[0] for t in x.tokens])
-                y_pred_ner.append([id_to_ner_label[j] for j in ner_labels_pred[i, :len(x.tokens)]])
+                y_true_ner_i = []
+                y_pred_ner_i = []
+                for j, t in enumerate(x.tokens):
+                    y_true_ner_i.append(t.labels[0])
+                    y_pred_ner_i.append(id_to_ner_label[ner_labels_pred[i, j]])
+                y_true_ner.append(y_true_ner_i)
+                y_pred_ner.append(y_pred_ner_i)
 
                 # re TODO: рассмотреть случаи num_events == 0
-                num_entities = len(x.entities)
-                arcs_true = np.full((num_entities, num_entities), no_rel_id, dtype=np.int32)
+                num_entities_i = num_entities[i]
+                assert num_entities_i == len(x.entities)
+                arcs_true = np.full((num_entities_i, num_entities_i), no_rel_id, dtype=np.int32)
 
                 for arc in x.arcs:
                     assert arc.head_index is not None
                     assert arc.dep_index is not None
                     arcs_true[arc.head_index, arc.dep_index] = arc.rel_id
 
-                arcs_pred = rel_labels_pred[i, :num_entities, :num_entities]
-                assert arcs_pred.shape[0] == num_entities, f"{arcs_pred.shape[0]} != {num_entities}"
-                assert arcs_pred.shape[1] == num_entities, f"{arcs_pred.shape[1]} != {num_entities}"
+                arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
+                assert arcs_pred.shape[0] == num_entities_i, f"{arcs_pred.shape[0]} != {num_entities_i}"
+                assert arcs_pred.shape[1] == num_entities_i, f"{arcs_pred.shape[1]} != {num_entities_i}"
                 y_true_re += [id_to_re_label[j] for j in arcs_true.flatten()]
                 y_pred_re += [id_to_re_label[j] for j in arcs_pred.flatten()]
 
@@ -531,9 +542,37 @@ class BertJointModel(BaseModel):
 
         return performance_info
 
-    # TODO: implement
     def predict(self, examples: List[Example], batch_size: int = 16, **kwargs):
-        pass
+        """
+        ner - запись лейблов в Token.labels_pred
+        re - создание новых инстансов Arc и запись их в Example.arcs_pred
+        """
+        no_rel_id = self.config["model"]["re"]["no_relation_id"]
+        id_to_ner_label = kwargs["id_to_ner_label"]
+        id_to_re_label = kwargs["id_to_re_label"]
+
+        for start in range(0, len(examples), batch_size):
+            end = start + batch_size
+            examples_batch = examples[start:end]
+            feed_dict = self._get_feed_dict(examples_batch, training=False)
+            ner_labels_pred, rel_labels_pred, num_entities = self.sess.run(
+                [self.ner_preds_inference, self.re_labels_pred_entities, self.num_entities_pred],
+                feed_dict=feed_dict
+            )
+
+            for i, x in enumerate(examples_batch):
+                # ner
+                for j, t in enumerate(x.tokens):
+                    id_label = ner_labels_pred[i, j]
+                    t.labels_pred.append(id_to_ner_label[id_label])
+
+                # re
+                num_entities_i = num_entities[i]
+                arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
+                for j, k in np.where(arcs_pred != no_rel_id):
+                    id_label = arcs_pred[i, j, k]
+                    arc = Arc(id=f"{j}_{k}", head=j, dep=k, rel=id_to_re_label[id_label])
+                    x.arcs_pred.append(arc)
 
     def initialize(self):
         bert_dir = self.config["model"]["bert"]["dir"]
