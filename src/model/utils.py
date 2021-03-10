@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, Dict
 import tensorflow as tf
 
 
@@ -126,3 +126,56 @@ def add_ones(x: tf.Tensor) -> tf.Tensor:
 def noam_scheme(init_lr: int, global_step: int, warmup_steps: int = 4000):
     step = tf.cast(global_step + 1, dtype=tf.float32)
     return init_lr * warmup_steps ** 0.5 * tf.minimum(step * warmup_steps ** -1.5, step ** -0.5)
+
+
+def classification_report_to_string(d: Dict, digits: int = 4) -> str:
+    """
+    :param d: словарь вида {"label": {"f1": 0.9, ....}, ...}. см. src.metrics.classification_report
+    :param digits: до скольки цифр округлять не целые числа
+    :return:
+    """
+    cols = ["f1", "precision", "recall", "support", "tp", "fp", "fn"]
+    float_cols = {"f1", "precision", "recall"}
+    col_dist = 2  # расстояние между столбцами
+    micro = "micro"
+    # так как значения метрик лежат в промежутке [0.0, 1.0], стоит ровно одна цифра слева от точки
+    # таким образом длина числа равна 1 ("0" или "1") + 1 (".") + digits (точность округления)
+    max_float_length = digits + 2  # 0.1234
+
+    indices = d.keys()
+    index_length = max(map(len, indices))
+    index_length += col_dist
+
+    column_length = max(map(len, cols))
+    column_length = max(column_length, max_float_length)
+    column_length += col_dist
+
+    report = ' ' * index_length
+    for col in cols:
+        report += col.ljust(column_length)
+    report += "\n\n"
+
+    def build_row(key):
+        row = key.ljust(index_length)
+        for metric in cols:
+            if metric in float_cols:
+                cell = str(round(d[key][metric], digits))
+            else:
+                cell = str(int(d[key][metric]))
+            cell = cell.ljust(column_length)
+            row += cell
+        return row
+
+    for index in indices:
+        if index == micro:
+            continue
+        r = build_row(index)
+        report += r + '\n'
+
+    if micro in indices:
+        r = build_row(micro)
+        report += "\n" + r
+    else:
+        report = report.rstrip()
+
+    return report
