@@ -546,6 +546,7 @@ class BertJointModel(BaseModel):
         """
         ner - запись лейблов в Token.labels_pred
         re - создание новых инстансов Arc и запись их в Example.arcs_pred
+        TODO: реализовать группировку токенов в сущности
         """
         no_rel_id = self.config["model"]["re"]["no_relation_id"]
         id_to_ner_label = kwargs["id_to_ner_label"]
@@ -560,6 +561,8 @@ class BertJointModel(BaseModel):
                 feed_dict=feed_dict
             )
 
+            assert ner_labels_pred.shape[1] == max(len(x.tokens) for x in examples)
+
             for i, x in enumerate(examples_batch):
                 # ner
                 for j, t in enumerate(x.tokens):
@@ -569,8 +572,8 @@ class BertJointModel(BaseModel):
                 # re
                 num_entities_i = num_entities[i]
                 arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
-                for j, k in np.where(arcs_pred != no_rel_id):
-                    id_label = arcs_pred[i, j, k]
+                for j, k in zip(*np.where(arcs_pred != no_rel_id)):
+                    id_label = arcs_pred[j, k]
                     arc = Arc(id=f"{j}_{k}", head=j, dep=k, rel=id_to_re_label[id_label])
                     x.arcs_pred.append(arc)
 
