@@ -187,3 +187,57 @@ def _f1_score_micro_v2(y_true: List, y_pred: List, trivial_label: Union[int, str
     d = {"f1": f1, "precision": precision, "recall": recall, "support": num_gold}
 
     return d
+
+
+def classification_report_to_string(d: Dict, digits: int = 4) -> str:
+    """
+    :param d: словарь вида {"label": {"f1": 0.9, ....}, ...}. см. src.metrics.classification_report
+    :param digits: до скольки цифр округлять float
+    :return:
+    """
+    cols = ["f1", "precision", "recall", "support", "tp", "fp", "fn"]
+    float_cols = {"f1", "precision", "recall"}
+    col_dist = 2  # расстояние между столбцами
+    micro = "micro"
+    # так как значения метрик лежат в промежутке [0.0, 1.0], стоит ровно одна цифра слева от точки
+    # таким образом длина числа равна 1 ("0" или "1") + 1 (".") + digits (точность округления)
+    max_float_length = digits + 2  # 0.1234
+
+    indices = d.keys()
+    index_length = max(map(len, indices))
+    index_length += col_dist
+
+    column_length = max(map(len, cols))
+    column_length = max(column_length, max_float_length)
+    column_length += col_dist
+
+    report = ' ' * index_length
+    for col in cols:
+        report += col.ljust(column_length)
+    report += "\n\n"
+
+    def build_row(key):
+        row = key.ljust(index_length)
+        for metric in cols:
+            if metric in float_cols:
+                cell = round(d[key][metric], digits)
+            else:
+                cell = int(d[key][metric])
+            cell = str(cell)
+            cell = cell.ljust(column_length)
+            row += cell
+        return row
+
+    for index in indices:
+        if index == micro:
+            continue
+        r = build_row(index)
+        report += r + '\n'
+
+    if micro in indices:
+        r = build_row(micro)
+        report += "\n" + r
+    else:
+        report = report.rstrip()
+
+    return report

@@ -117,15 +117,15 @@
 #             prefix + f"num start ids: {num_start_ids}, num end ids: {num_end_ids}"
 
 
-def _check_ner(example: Example):
-    """
-    1. число токенов = число лейблов
-    2. индекс начала сущности <= индекс конца сущности
-    3. символ начала сущности <= символ конца сущности
-    4. entity.text == example.text[entity.span_rel[0]:entity.stan_rel[1]]
-    """
-    for entity in example.entities:
-        pass
+# def _check_ner(example: Example):
+#     """
+#     1. число токенов = число лейблов
+#     2. индекс начала сущности <= индекс конца сущности
+#     3. символ начала сущности <= символ конца сущности
+#     4. entity.text == example.text[entity.span_rel[0]:entity.stan_rel[1]]
+#     """
+#     for entity in example.entities:
+#         pass
 
 
 # encoding

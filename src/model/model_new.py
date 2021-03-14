@@ -873,7 +873,6 @@ class BertJointModel(BaseModel):
         #     true_fn=lambda: tf.zeros((logits_shape[0], logits_shape[1]), dtype=tf.float32),
         #     false_fn=lambda: tf.cast(tf.sequence_mask(self.num_entities), tf.float32)
         # )  # [batch_size, num_entities]
-        # TODO: проверить это:
         mask = tf.cast(tf.sequence_mask(self.num_entities, maxlen=logits_shape[1]), tf.float32)
 
         masked_per_example_loss = per_example_loss * mask[:, :, None] * mask[:, None, :]
@@ -1402,7 +1401,6 @@ class ElmoJointModel(BertJointModel):
         ner_labels = []
 
         # re
-        num_entities = []
         re_labels = []
 
         # filling
@@ -1424,7 +1422,6 @@ class ElmoJointModel(BertJointModel):
             # write
             tokens.append(tokens_i)
             num_tokens.append(len(x.tokens))
-            num_entities.append(len(x.entities))
             ner_labels.append(ner_labels_i)
 
         # padding
@@ -1446,13 +1443,11 @@ class ElmoJointModel(BertJointModel):
             self.ner_labels_ph: ner_labels,
 
             # re
-            self.num_entities_ph: num_entities,
             self.re_labels_ph: re_labels,
 
             # common
             self.training_ph: training
         }
-        # print(d[self.num_entities_ph])
         return d
 
     def _set_placeholders(self):
@@ -1465,7 +1460,6 @@ class ElmoJointModel(BertJointModel):
 
         # re inputs
         # [id_example, id_head, id_dep, id_rel]
-        self.num_entities_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_entities")
         self.re_labels_ph = tf.placeholder(dtype=tf.int32, shape=[None, 4], name="re_labels")
 
         # common inputs
