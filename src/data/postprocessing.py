@@ -1,17 +1,37 @@
-from typing import List, Tuple
-from collections import namedtuple
+from typing import List
+import numpy as np
+from .base import SpanExtended
 
 
-Span = namedtuple("Span", ["start", "end", "score"])
-
-
-def select_valid_spans(spans: List[Span], nested: bool = False) -> List[Span]:
+def get_valid_spans(logits: np.ndarray, is_flat_ner: bool) -> List[SpanExtended]:
     """
-    При решении задачи NER как задачи классификации спанов, могут возникунть слдеюущие ситуации:
-    1. пересекающиеся спаны: ООО "Ромашка" -> {(ООО "Ромашка), ("Ромашка")}
-    2. вложенные спаны: ООО "Ромашка - Калининград" -> {(ООО "Ромашка - Калининград"), (Калининград)}
-    Первый кейс нужно рассматривать для "плоского" и "вложенного" NER-а: из двух пересекающихся спанов выбирать
-    тот, у которого скор больше
-    Второй кейс нужно рассматривать только для "плоского" NER-а: игнорировать вложенные спаны.
+
+    :param logits: np.array of shape [num_tokens, num_tokens, num_labels]
+    :param is_flat_ner:
+    :return:
     """
-    pass
+    labels = logits.argmax(-1)  # [num_tokens, num_tokens]
+    candidates = []
+    for start, end in zip(*np.where(labels != 0)):
+        if start <= end:
+            label = labels[start, end]
+            score = logits[start, end, label]
+            span = SpanExtended(start=start, end=end, label=label, score=score)
+            candidates.append(span)
+
+    candidates = sorted(candidates, reverse=True, key=lambda x: x.score)
+    res = []
+    for candidate in candidates:
+        for approved in res:
+            if (candidate.start < approved.start <= candidate.end < approved.end) \
+                    or (approved.start < candidate.start <= approved.end < candidate.end):
+                # for both nested and flat ner no clash is allowed
+                break
+            if is_flat_ner and \
+                    (candidate.start <= approved.start <= approved.end <= candidate.end
+                     or approved.start <= candidate.start <= candidate.end <= approved.end):
+                # for flat ner nested mentions are not allowed
+                break
+        else:
+            res.append(candidate)
+    return res

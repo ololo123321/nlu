@@ -54,7 +54,8 @@ class Languages:
 
 Attribute = namedtuple("Attribute", ["id", "type", "value"])
 EventArgument = namedtuple("EventArgument", ["id", "role"])
-Span = namedtuple("Span", ["start", "end"])  # TODO: в случае nested ner нужен ещё атрибут score
+Span = namedtuple("Span", ["start", "end"])
+SpanExtended = namedtuple("Span", ["start", "end", "label", "score"])
 
 
 # mutable structs

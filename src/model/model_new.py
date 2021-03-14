@@ -1249,6 +1249,11 @@ class BertJointModelV2(BertJointModel):
         return x_new, coords_new, num_tokens_new, num_entities_new
 
 
+class BertForNestedNer(BertJointModel):
+    def __init__(self, sess, config):
+        super().__init__(sess=sess, config=config)
+
+
 # TODO: избавиться от кучи копипасты!
 class ElmoJointModel(BertJointModel):
     def __init__(self, sess, config):

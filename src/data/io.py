@@ -12,7 +12,6 @@ from .base import (
     Event,
     EventArgument,
     Example,
-    Languages,
     LineTypes,
     NerEncodings,
     NerPrefixJoiners,
@@ -269,6 +268,7 @@ def parse_example(
                 entity_label, start_index, end_index = entity.split()
                 start_index = int(start_index)
                 end_index = int(end_index)
+                entity_label = fix_entity_label(label=entity_label, ner_prefix_joiner=ner_prefix_joiner)
 
                 # проверка того, что в файле .txt в спане из файла .ann находится
                 # правильная именная сущность
@@ -387,8 +387,7 @@ def parse_example(
 
                     # если аргументов одной роли несколько, то всем, начиная со второго,
                     # приписывается в конце номер (см. пример)
-                    # TODO: должно гарантироваться отсутствие названий ролей вида ROLE_OF_EVENT_288
-                    rel = re.sub(r'\d+', '', rel)
+                    rel = remove_role_index(rel)
 
                     # запись отношения
                     # id должен быть уникальным
@@ -486,8 +485,65 @@ def get_label_prefix(entity_token_index: int, num_entity_tokens: int, ner_encodi
     return prefix
 
 
-def check_example(example: Example, ner_encoding: str = NerEncodings.BIO):
+def fix_entity_label(label: str, ner_prefix_joiner: str) -> str:
     """
-    по-хорошему здесь надо тестить корректность разбиения на кусочки
+    Нужна гарантия того, что лейбл не содержит разделитель
     """
-    pass
+    if ner_prefix_joiner == NerPrefixJoiners.HYPHEN:
+        repl = NerPrefixJoiners.UNDERSCORE
+    elif ner_prefix_joiner == NerPrefixJoiners.UNDERSCORE:
+        repl = NerPrefixJoiners.HYPHEN
+    else:
+        raise Exception
+    label = label.replace(ner_prefix_joiner, repl)
+    return label
+
+
+def remove_role_index(s: str) -> str:
+    """
+    если с сущностью E связано несколько сущностей отношением R,
+    то к отношению добавляется индекс.
+    Пример: [ORG1 ООО "Ромашка"] и [ORG2 ПАО "Одуванчик"] признаны [BANKRUPTCY банкротами]
+    в файле .ann это будет записано так:
+    T1 ORG start1 end1 ООО "Ромашка"
+    T2 ORG start2 end2 ПАО "Одуванчик"
+    T3 BANKRUPTCY start3 end3 банкротами
+    E0 BANKRUPTCY:T3 Bankrupt1:T1 Bankrupt2:T2
+    чтобы понять, что Bankrupt1 и Bankrupt2 - одна и та же роль, нужно убрать индекс в конце
+    """
+    matches = list(re.finditer(r"\d+", s))
+    if matches:
+        m = matches[-1]
+        start, end = m.span()
+        if end == len(s):
+            s = s[:start]
+    return s
+
+
+def check_example(example: Example):
+    """
+    sanity check
+    """
+    # число токенов сущности больше нуля
+    entity_ids = set()
+    for entity in example.entities:
+        assert len(entity.tokens) > 0, f"[{example.id}] entity {entity.id} has no tokens!"
+        entity_ids.add(entity.id)
+
+    # пример не начинвается в середине сущности
+    assert example.tokens[0].labels[0][0] != "I", f"[{example.id}] contains only part of entity!"
+
+    # число сущностей равно числу лейблов начала сущности
+    expected = len(example.entities)
+    actual = 0
+    for t in example.tokens:
+        l = t.labels[0]
+        if l[0] == "B":
+            actual += 1
+    assert actual == expected, \
+        f"[{example.id}] number os entities ({expected}) does not match number of start tokens ({actual})"
+
+    # head и dep отношения содердатся с множетсве сущностей примера
+    for arc in example.arcs:
+        assert arc.head in entity_ids
+        assert arc.dep in entity_ids
