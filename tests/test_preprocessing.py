@@ -33,7 +33,7 @@ def test_get_sentences_spans(entity_spans, pointers, window, stride, expected):
         window=window,
         stride=stride
     )
-    print(actual)
+    # print(actual)
     assert actual == expected
 
 

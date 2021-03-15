@@ -1251,6 +1251,44 @@ class BertJointModelV2(BertJointModel):
 class BertForNestedNer(BertJointModel):
     def __init__(self, sess, config):
         super().__init__(sess=sess, config=config)
+        # ner_logits_train have shape [batch_size, num_tokens, num_tokens, num_entities + 1]
+
+    def _get_ner_loss(self):
+        # per example loss
+        # TODO: копипаста
+        no_entity_id = self.config["model"]["ner"]["no_entity_id"]
+        # должно гарантироваться, что min(logits_shape)) >= 1
+        logits_shape = tf.shape(self.ner_logits_train)
+        labels = tf.broadcast_to(no_entity_id, logits_shape[:3])  # [batch_size, num_entities, num_entities]
+        labels = tf.tensor_scatter_nd_update(
+            tensor=labels,
+            indices=self.ner_labels_ph[:, :-1],  # TODO: переопределить
+            updates=self.ner_labels_ph[:, -1],
+        )  # [batch_size, num_entities, num_entities]
+        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            labels=labels, logits=self.ner_logits_train
+        )  # [batch_size, num_entities, num_entities]
+
+        # mask
+        maxlen = logits_shape[1]
+        span_mask = tf.linalg.band_part(tf.ones((maxlen, maxlen)), 0, -1)  # [num_tokens, num_tokens]; upper-triangular
+        span_mask = tf.cast(span_mask, tf.float32)
+        sequence_mask = tf.sequence_mask(self.num_tokens_ph)  # [batch_size, num_tokens]
+        sequence_mask = tf.cast(sequence_mask, tf.float32)
+        mask = span_mask[None, :, :] * sequence_mask[:, None, :] * sequence_mask[:, :, None]  # [batch_size, num_tokens, num_tokens]
+
+        masked_per_example_loss = per_example_loss * mask
+        total_loss = tf.reduce_sum(masked_per_example_loss)
+
+        num_valid_spans = tf.cast(tf.reduce_sum(mask), tf.float32)
+
+        loss = total_loss / num_valid_spans
+        loss *= self.config["model"]["re"]["loss_coef"]
+
+        return loss
+
+    def _get_feed_dict(self, examples: List[Example], training: bool):
+        pass
 
 
 # TODO: избавиться от кучи копипасты!
