@@ -1,4 +1,4 @@
-from typing import Tuple, Dict
+from typing import Tuple
 import tensorflow as tf
 
 
@@ -117,10 +117,28 @@ def get_entity_embeddings(
     return x_span
 
 
-def add_ones(x: tf.Tensor) -> tf.Tensor:
-    ones = tf.ones_like(x[..., :1])
-    x = tf.concat([x, ones], axis=-1)
-    return x
+def get_dense_labels_from_indices(indices: tf.Tensor, shape: tf.Tensor, no_label_id: int = 0):
+    """
+    лейблы отношений.
+    должно гарантироваться, что reduce_min(shape)) >= 1
+    :param indices: tf.Tensor of shape [num_elements, ndims] - индексы логитов
+    :param shape: tf.Tensor of shape [ndims] - размерность лейблов
+    :param no_label_id: int
+    :return:
+    """
+    labels = tf.broadcast_to(no_label_id, shape)  # [batch_size, num_entities, num_entities]
+    labels = tf.tensor_scatter_nd_update(
+        tensor=labels,
+        indices=indices[:, :-1],
+        updates=indices[:, -1],
+    )  # [batch_size, num_entities, num_entities]
+    return labels
+
+
+# def add_ones(x: tf.Tensor) -> tf.Tensor:
+#     ones = tf.ones_like(x[..., :1])
+#     x = tf.concat([x, ones], axis=-1)
+#     return x
 
 
 def noam_scheme(init_lr: int, global_step: int, warmup_steps: int = 4000):

@@ -11,7 +11,11 @@ import numpy as np
 from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 
-from .utils import get_batched_coords_from_labels, get_labels_mask
+from .utils import (
+    get_batched_coords_from_labels,
+    get_labels_mask,
+    get_dense_labels_from_indices,
+)
 from .layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN
 from ..data.base import Example, Arc
 from ..metrics import classification_report, classification_report_ner
@@ -856,28 +860,19 @@ class BertJointModel(BaseModel):
 
     def _get_re_loss(self):
         no_rel_id = self.config["model"]["re"]["no_relation_id"]
-        # должно гарантироваться, что min(logits_shape)) >= 1
         logits_shape = tf.shape(self.re_logits_train)
-        labels = tf.broadcast_to(no_rel_id, logits_shape[:3])  # [batch_size, num_entities, num_entities]
-        labels = tf.tensor_scatter_nd_update(
-            tensor=labels,
-            indices=self.re_labels_ph[:, :-1],
-            updates=self.re_labels_ph[:, -1],
-        )  # [batch_size, num_entities, num_entities]
+        labels_shape = logits_shape[:3]
+        labels = get_dense_labels_from_indices(indices=self.re_labels_ph, shape=labels_shape, no_label_id=no_rel_id)
         per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=labels, logits=self.re_logits_train
         )  # [batch_size, num_entities, num_entities]
 
-        # mask = tf.cond(
-        #     tf.equal(tf.reduce_max(self.num_entities), 0),
-        #     true_fn=lambda: tf.zeros((logits_shape[0], logits_shape[1]), dtype=tf.float32),
-        #     false_fn=lambda: tf.cast(tf.sequence_mask(self.num_entities), tf.float32)
-        # )  # [batch_size, num_entities]
-        mask = tf.cast(tf.sequence_mask(self.num_entities, maxlen=logits_shape[1]), tf.float32)
+        sequence_mask = tf.sequence_mask(self.num_entities, maxlen=logits_shape[1], dtype=tf.float32)
+        mask = sequence_mask[:, None, :] * sequence_mask[:, :, None]
 
-        masked_per_example_loss = per_example_loss * mask[:, :, None] * mask[:, None, :]
+        masked_per_example_loss = per_example_loss * mask
         total_loss = tf.reduce_sum(masked_per_example_loss)
-        num_pairs = tf.cast(tf.reduce_sum(self.num_entities ** 2), tf.float32)
+        num_pairs = tf.cast(tf.reduce_sum(mask), tf.float32)
         num_pairs = tf.maximum(num_pairs, 1.0)
         loss = total_loss / num_pairs
         loss *= self.config["model"]["re"]["loss_coef"]
@@ -1255,26 +1250,24 @@ class BertForNestedNer(BertJointModel):
 
     def _get_ner_loss(self):
         # per example loss
-        # TODO: копипаста
         no_entity_id = self.config["model"]["ner"]["no_entity_id"]
-        # должно гарантироваться, что min(logits_shape)) >= 1
         logits_shape = tf.shape(self.ner_logits_train)
-        labels = tf.broadcast_to(no_entity_id, logits_shape[:3])  # [batch_size, num_entities, num_entities]
-        labels = tf.tensor_scatter_nd_update(
-            tensor=labels,
-            indices=self.ner_labels_ph[:, :-1],  # TODO: переопределить
-            updates=self.ner_labels_ph[:, -1],
-        )  # [batch_size, num_entities, num_entities]
+        labels_shape = logits_shape[:3]
+        labels = get_dense_labels_from_indices(indices=self.ner_labels_ph, shape=labels_shape, no_label_id=no_entity_id)
         per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=labels, logits=self.ner_logits_train
         )  # [batch_size, num_entities, num_entities]
 
         # mask
         maxlen = logits_shape[1]
+
+        # 1 1 1
+        # 0 1 1
+        # 0 0 1
+        # i - start, j - end
         span_mask = tf.linalg.band_part(tf.ones((maxlen, maxlen)), 0, -1)  # [num_tokens, num_tokens]; upper-triangular
         span_mask = tf.cast(span_mask, tf.float32)
-        sequence_mask = tf.sequence_mask(self.num_tokens_ph)  # [batch_size, num_tokens]
-        sequence_mask = tf.cast(sequence_mask, tf.float32)
+        sequence_mask = tf.sequence_mask(self.num_tokens_ph, dtype=tf.float32)  # [batch_size, num_tokens]
         mask = span_mask[None, :, :] * sequence_mask[:, None, :] * sequence_mask[:, :, None]  # [batch_size, num_tokens, num_tokens]
 
         masked_per_example_loss = per_example_loss * mask
@@ -1283,7 +1276,7 @@ class BertForNestedNer(BertJointModel):
         num_valid_spans = tf.cast(tf.reduce_sum(mask), tf.float32)
 
         loss = total_loss / num_valid_spans
-        loss *= self.config["model"]["re"]["loss_coef"]
+        loss *= self.config["model"]["ner"]["loss_coef"]
 
         return loss
 
