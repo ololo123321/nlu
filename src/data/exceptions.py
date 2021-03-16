@@ -24,3 +24,7 @@ class NestedNerSingleEntityTypeError(Exception):
 
 class RegexError(Exception):
     """регуляркой не получается токенизировать сущность: то есть expression.findall(entity_pattern) == []"""
+
+
+class MultiRelationError(Exception):
+    """одной упорядоченной паре спанов соответстует более одного лейбла"""

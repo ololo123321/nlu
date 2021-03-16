@@ -22,6 +22,7 @@ from .base import (
 from .exceptions import (
     BadLineError,
     EntitySpanError,
+    MultiRelationError,
     NestedNerError,
     NestedNerSingleEntityTypeError,
     RegexError
@@ -156,7 +157,7 @@ def parse_collection(
                 allow_nested_similar_entities=allow_nested_similar_entities
             )
             examples.append(example)
-        except (BadLineError, EntitySpanError, NestedNerError, NestedNerSingleEntityTypeError, RegexError) as e:
+        except (BadLineError, EntitySpanError, MultiRelationError, NestedNerError, NestedNerSingleEntityTypeError, RegexError) as e:
             err_name = type(e).__name__
             print(f"[{filename}] known error {err_name} occurred:")
             print(e)
@@ -250,6 +251,9 @@ def parse_example(
     id2event = {}
     id2arc = {}
     id2arg = {}
+    span2label = {}
+    entity2span = {}
+
     with open(os.path.join(data_dir, f'{filename}.ann'), 'r') as f:
         for line in f:
             line = line.strip()
@@ -277,6 +281,16 @@ def parse_example(
                     raise EntitySpanError(f"[{filename}]: something is wrong with markup; "
                                               f"expected entity is {expected_entity_pattern}, "
                                               f"but got {actual_entity_pattern}")
+
+                # проверка на то, что в файле .ann нет дубликатов по сущностям
+                entity_span = Span(start=start_index, end=end_index)
+                if entity_span in span2label:
+                    if span2label[entity_span] == entity_label:
+                        raise EntitySpanError(f"[{filename}]: tried to assign one more label {entity_label} "
+                                              f"to span {entity_span}")
+                else:
+                    span2label[entity_span] = entity_label
+                    entity2span[line_tag] = entity_span
 
                 entity_matches = list(tokens_expression.finditer(expected_entity_pattern))
 
@@ -443,14 +457,48 @@ def parse_example(
             else:
                 raise Exception(f"invalid line: {line}")
 
+    # POSTPROCESSING
+
+    # отношения: одной упорядоченной паре спанов соответствует не более одного уникального лейбла
+    arcs_filtered = {}  # (Span, Span) -> arc
+
+    def get_entity_span(id_entity):
+        _entity = id2entity[id_entity]
+        start = _entity.tokens[0].span_abs.start
+        end = _entity.tokens[-1].span_abs.end
+        return Span(start, end)
+
+    for arc in id2arc.values():
+        head_span = get_entity_span(arc.head)
+        dep_span = get_entity_span(arc.dep)
+        key = head_span, dep_span
+        if key in arcs_filtered:
+            if arcs_filtered[key].rel == arc.rel:
+                raise MultiRelationError(f"[{filename}] there is more than one relation {head_span} -> {dep_span}")
+        else:
+            arcs_filtered[key] = arc
+    arcs = list(arcs_filtered.values())
+
+    # TODO: в целом нет проблемы, если одному триггеру соответствуют несколько событий:
+    #  это частный случай вложенного нера.
+    # события: одному триггеру соответствует не более одного события
+    events_filtered = {}  # Span -> event
+    for id_event, event in id2event.items():
+        trigger_span = get_entity_span(event.trigger)
+        if trigger_span in events_filtered:
+            # TODO: сделать отдельный тип ошибки
+            assert events_filtered[trigger_span].label == event.label
+        else:
+            events_filtered[trigger_span] = event
+    events = list(events_filtered.values())
+
+    # сущности: расставление флагов is_event_trigger
     # оказывается, событие может быть указано раньше триггера в файле .ann
-    for event in id2event.values():
+    for event in events:
         id2entity[event.trigger].is_event_trigger = True
-
     entities = list(id2entity.values())
-    events = list(id2event.values())
-    arcs = list(id2arc.values())
 
+    # создание инстанса класса Example
     example = Example(
         filename=filename,
         id=filename,
