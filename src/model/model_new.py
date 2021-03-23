@@ -1376,7 +1376,7 @@ class BertForNestedNer(BertJointModel):
         labels = get_dense_labels_from_indices(indices=self.ner_labels_ph, shape=labels_shape, no_label_id=no_entity_id)
         per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=labels, logits=self.ner_logits_train
-        )  # [batch_size, num_entities, num_entities]
+        )  # [batch_size, num_tokens, num_tokens]
 
         # mask
         maxlen = logits_shape[1]
