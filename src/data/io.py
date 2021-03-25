@@ -595,9 +595,49 @@ def simplify(example: Example):
     E0  Bankruptcy:T0 EventArg:T2
     E1  Bankruptcy:T0 EventArg:T2
 
+    сущность: span -> label
+    событие: span -> label
+    ребро: (span, span) -> label
+
+    предпосылка: одному спану соответствует один лейбл
+
     :param example:
     :return:
     """
+    span_to_label = {}
+    span_pair_to_label = {}
+
+    id2entity = {}
+    for entity in example.entities:
+        id2entity[entity.id] = entity
+        span_to_label[(entity.start_index, entity.end_index)] = entity.label
+
+    id2event = {event.id: event for event in example.events}
+
+    for arc in example.arcs:
+        # TODO: arc.head и arc.dep могут быть не только T, но и E
+        if arc.head[0] == LineTypes.ENTITY:
+            head = id2entity[arc.head]
+        elif arc.head[0] == LineTypes.EVENT:
+            event = id2event[arc.head]
+            head = id2entity[event.trigger]
+        else:
+            raise
+
+        if arc.dep[0] == LineTypes.ENTITY:
+            dep = id2entity[arc.dep]
+        elif arc.dep[0] == LineTypes.EVENT:
+            event = id2event[arc.dep]
+            dep = id2entity[event.trigger]
+        else:
+            raise
+
+        key = head.start_index, head.end_index, dep.start_index, dep.end_index
+        span_pair_to_label[key] = arc.rel
+
+    entities_new = []
+    # TODO: доделать
+
     # # POSTPROCESSING
     #
     # # TODO: отфильтровать лишние сущности -> лишние отношения
