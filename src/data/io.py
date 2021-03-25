@@ -116,8 +116,10 @@ def parse_collection(
         ner_encoding: str = NerEncodings.BIO,
         ner_prefix_joiner: str = NerPrefixJoiners.HYPHEN,
         tokens_pattern: Union[str, Pattern] = None,
-        allow_nested_ner: bool = False,
-        allow_nested_similar_entities: bool = False,
+        allow_nested_entities: bool = False,
+        allow_nested_entities_one_label: bool = False,
+        allow_many_entities_per_span_one_label: bool = False,
+        allow_many_entities_per_span_different_labels: bool = False,
         ignore_bad_examples: bool = False
 ) -> List[Example]:
     """
@@ -153,8 +155,10 @@ def parse_collection(
                 ner_encoding=ner_encoding,
                 ner_prefix_joiner=ner_prefix_joiner,
                 tokens_expression=tokens_expression,
-                allow_nested_ner=allow_nested_ner,
-                allow_nested_similar_entities=allow_nested_similar_entities
+                allow_nested_entities=allow_nested_entities,
+                allow_nested_entities_one_label=allow_nested_entities_one_label,
+                allow_many_entities_per_span_one_label=allow_many_entities_per_span_one_label,
+                allow_many_entities_per_span_different_labels=allow_many_entities_per_span_different_labels
             )
             examples.append(example)
         except (BadLineError, EntitySpanError, MultiRelationError, NestedNerError, NestedNerSingleEntityTypeError, RegexError) as e:
@@ -182,8 +186,10 @@ def parse_example(
         ner_encoding: str = NerEncodings.BIO,
         ner_prefix_joiner: str = NerPrefixJoiners.HYPHEN,
         tokens_expression: Pattern = TOKENS_EXPRESSION,
-        allow_nested_ner: bool = False,
-        allow_nested_similar_entities: bool = False
+        allow_nested_entities: bool = False,
+        allow_nested_entities_one_label: bool = False,
+        allow_many_entities_per_span_one_label: bool = False,
+        allow_many_entities_per_span_different_labels: bool = False
 ) -> Example:
     """
     строчка файла filename.ann:
@@ -218,16 +224,10 @@ def parse_example(
     A10     Negation E3
     #1      AnnotatorNotes E3  foobar
 
-    нужно игнорить:
-    * дубликаты триггеров:
-    T0  Bankruptcy 1866 1877    банкротства
-    T1  Bankruptcy 1866 1877    банкротства
-    * дубликаты событий:
-    E0  Bankruptcy:T0
-    E1  Bankruptcy:T0
-    * дубликаты рёбер:
-    E0  Bankruptcy:T0 EventArg:T2
-    E1  Bankruptcy:T0 EventArg:T2
+    allow_nested_entities: разрешена ли вложенность такого вида: <ORG> foo <LOC> bar </LOC></ORG>
+    allow_nested_entities_one_label: разрешена ли вложенность такого вида: <ORG> foo <ORG> bar </ORG></ORG>
+    allow_many_entities_per_span_one_label: разрешена ли вложенность такого вида: <ORG><ORG>foo</ORG></ORG>
+    allow_many_entities_per_span_different_labels: разрешена ли вложенность такого вида: <ORG><LOC>foo</LOC></ORG>
     """
     # подгрузка текста
     with open(os.path.join(data_dir, f'{filename}.txt')) as f:
@@ -265,8 +265,8 @@ def parse_example(
     id2event = {}
     id2arc = {}
     id2arg = {}
+
     span2label = {}
-    entity2span = {}
 
     with open(os.path.join(data_dir, f'{filename}.ann'), 'r') as f:
         for line in f:
@@ -293,18 +293,23 @@ def parse_example(
                 actual_entity_pattern = text[start_index:end_index]
                 if actual_entity_pattern != expected_entity_pattern:
                     raise EntitySpanError(f"[{filename}]: something is wrong with markup; "
-                                              f"expected entity is {expected_entity_pattern}, "
-                                              f"but got {actual_entity_pattern}")
+                                          f"expected entity is {expected_entity_pattern}, "
+                                          f"but got {actual_entity_pattern}")
 
                 # проверка на то, что в файле .ann нет дубликатов по сущностям
-                entity_span = Span(start=start_index, end=end_index)
+                entity_span = start_index, end_index
                 if entity_span in span2label:
                     if span2label[entity_span] == entity_label:
-                        raise EntitySpanError(f"[{filename}]: tried to assign one more label {entity_label} "
-                                              f"to span {entity_span}")
+                        if not allow_many_entities_per_span_one_label:
+                            raise EntitySpanError(f"[{filename}]: tried to assign one more label {entity_label} "
+                                                  f"to span {entity_span}")
+                    else:
+                        if not allow_many_entities_per_span_different_labels:
+                            raise EntitySpanError(f"[{filename}]: span {entity_span} has already "
+                                                  f"label {span2label[entity_span]},"
+                                                  f"but tried to assign also label {entity_label}")
                 else:
                     span2label[entity_span] = entity_label
-                    entity2span[line_tag] = entity_span
 
                 entity_matches = list(tokens_expression.finditer(expected_entity_pattern))
 
@@ -341,7 +346,7 @@ def parse_example(
                         token = span2token[token_span_abs]
                     except KeyError:
                         s, e = token_span_abs
-                        msg = "can not infer token id from span or span is a part of token\n"
+                        msg = "can not infer token id from span or span is a part of a token\n"
                         msg += f"absolute span: {token_span_abs}\n"
                         msg += f'entity token: <bos>{token}<eos>\n'
                         msg += f'corresponding text token: <bos>{text[s:e]}<eos>\n'
@@ -351,12 +356,12 @@ def parse_example(
                     # запись лейблов
                     if token.labels == no_labels:
                         token.labels = [label]
-                    elif allow_nested_ner:
+                    elif allow_nested_entities:
                         token_entity_labels = {l.split(ner_prefix_joiner)[-1] for l in token.labels}
                         if entity_label not in token_entity_labels:
                             token.labels.append(label)
                         else:
-                            if allow_nested_similar_entities:
+                            if allow_nested_entities_one_label:
                                 token.labels.append(label)
                             else:
                                 raise NestedNerSingleEntityTypeError(
@@ -368,8 +373,6 @@ def parse_example(
 
                     # добавление токена
                     entity_tokens.append(token)
-
-                # assert TOKENS_EXPRESSION.findall(actual_entity_pattern) == entity_tokens
 
                 # создание сущности
                 entity = Entity(
@@ -390,12 +393,9 @@ def parse_example(
                     re_label, arg1, arg2 = relation.split()
                 except ValueError:
                     raise BadLineError(f"[{filename}]: something is wrong with line: {line}")
-                arc = Arc(
-                    id=line_tag,
-                    head=arg1.split(":")[1],
-                    dep=arg2.split(":")[1],
-                    rel=re_label
-                )
+                head = arg1.split(":")[1]
+                dep = arg2.split(":")[1]
+                arc = Arc(id=line_tag, head=head, dep=dep, rel=re_label)
                 id2arc[arc.id] = arc
                 id2arg[arc.id] = arc
 
@@ -471,45 +471,14 @@ def parse_example(
             else:
                 raise Exception(f"invalid line: {line}")
 
-    # POSTPROCESSING
-
-    # отношения: одной упорядоченной паре спанов соответствует не более одного уникального лейбла
-    arcs_filtered = {}  # (Span, Span) -> arc
-
-    def get_entity_span(id_entity):
-        _entity = id2entity[id_entity]
-        start = _entity.tokens[0].span_abs.start
-        end = _entity.tokens[-1].span_abs.end
-        return Span(start, end)
-
-    for arc in id2arc.values():
-        head_span = get_entity_span(arc.head)
-        dep_span = get_entity_span(arc.dep)
-        key = head_span, dep_span
-        if key in arcs_filtered:
-            if arcs_filtered[key].rel == arc.rel:
-                raise MultiRelationError(f"[{filename}] there is more than one relation {head_span} -> {dep_span}")
-        else:
-            arcs_filtered[key] = arc
-    arcs = list(arcs_filtered.values())
-
-    # TODO: в целом нет проблемы, если одному триггеру соответствуют несколько событий:
-    #  это частный случай вложенного нера.
-    # события: одному триггеру соответствует не более одного события
-    events_filtered = {}  # Span -> event
-    for id_event, event in id2event.items():
-        trigger_span = get_entity_span(event.trigger)
-        if trigger_span in events_filtered:
-            # TODO: сделать отдельный тип ошибки
-            assert events_filtered[trigger_span].label == event.label
-        else:
-            events_filtered[trigger_span] = event
-    events = list(events_filtered.values())
+    arcs = list(id2arc.values())
+    events = list(id2event.values())
 
     # сущности: расставление флагов is_event_trigger
     # оказывается, событие может быть указано раньше триггера в файле .ann
     for event in events:
         id2entity[event.trigger].is_event_trigger = True
+
     entities = list(id2entity.values())
 
     # создание инстанса класса Example
@@ -605,7 +574,74 @@ def check_example(example: Example):
     assert actual == expected, \
         f"[{example.id}] number os entities ({expected}) does not match number of start tokens ({actual})"
 
-    # head и dep отношения содердатся с множетсве сущностей примера
+    # head и dep отношения содержатся с множетсве сущностей примера
     for arc in example.arcs:
         assert arc.head in entity_ids
         assert arc.dep in entity_ids
+
+
+def simplify(example: Example):
+    """
+    упрощение графа путём удаления тривиальных сущностей и рёбер
+
+    нужно игнорить:
+    * дубликаты триггеров:
+    T0  Bankruptcy 1866 1877    банкротства
+    T1  Bankruptcy 1866 1877    банкротства
+    * дубликаты событий:
+    E0  Bankruptcy:T0
+    E1  Bankruptcy:T0
+    * дубликаты рёбер:
+    E0  Bankruptcy:T0 EventArg:T2
+    E1  Bankruptcy:T0 EventArg:T2
+
+    :param example:
+    :return:
+    """
+    # # POSTPROCESSING
+    #
+    # # TODO: отфильтровать лишние сущности -> лишние отношения
+    #
+    # # отношения: одной упорядоченной паре спанов соответствует не более одного уникального лейбла
+    # arcs_filtered = {}  # (Span, Span) -> arc
+    #
+    # def get_entity_span(id_entity):
+    #     _entity = id2entity[id_entity]
+    #     start = _entity.tokens[0].span_abs.start
+    #     end = _entity.tokens[-1].span_abs.end
+    #     return Span(start, end)
+    #
+    # for arc in id2arc.values():
+    #     if arc.head[0] == LineTypes.EVENT:
+    #         arc.head = id2event[arc.head].trigger
+    #     if arc.dep[0] == LineTypes.EVENT:
+    #         arc.dep = id2event[arc.dep].trigger
+    #     head_span = get_entity_span(arc.head)
+    #     dep_span = get_entity_span(arc.dep)
+    #     key = head_span, dep_span
+    #     if key in arcs_filtered:
+    #         if arcs_filtered[key].rel != arc.rel:
+    #             raise MultiRelationError(f"[{filename}] there is more than one relation {head_span} -> {dep_span}: "
+    #                                      f"{arcs_filtered[key].rel} and {arc.rel}")
+    #     else:
+    #         arcs_filtered[key] = arc
+    # arcs = list(arcs_filtered.values())
+    #
+    # # TODO: в целом нет проблемы, если одному триггеру соответствуют несколько событий:
+    # #  это частный случай вложенного нера.
+    # # события: одному триггеру соответствует не более одного события
+    # events_filtered = {}  # Span -> event
+    # for id_event, event in id2event.items():
+    #     trigger_span = get_entity_span(event.trigger)
+    #     if trigger_span in events_filtered:
+    #         # TODO: сделать отдельный тип ошибки
+    #         assert events_filtered[trigger_span].label == event.label
+    #     else:
+    #         events_filtered[trigger_span] = event
+    # events = list(events_filtered.values())
+    #
+    # # сущности: расставление флагов is_event_trigger
+    # # оказывается, событие может быть указано раньше триггера в файле .ann
+    # for event in events:
+    #     id2entity[event.trigger].is_event_trigger = True
+    # entities = list(id2entity.values())
