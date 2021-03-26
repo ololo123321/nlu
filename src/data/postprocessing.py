@@ -5,6 +5,7 @@ from .base import SpanExtended
 
 def get_valid_spans(logits: np.ndarray, is_flat_ner: bool) -> List[SpanExtended]:
     """
+    https://arxiv.org/abs/2005.07150
 
     :param logits: np.array of shape [num_tokens, num_tokens, num_labels]
     :param is_flat_ner:

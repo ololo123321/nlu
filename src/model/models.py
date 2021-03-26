@@ -1245,6 +1245,11 @@ class BertJointModelV2(BertJointModel):
 
 
 class BertForNestedNer(BertJointModel):
+    """
+    https://arxiv.org/abs/2005.07150
+
+    решается только NER
+    """
     def __init__(self, sess, config):
         super().__init__(sess=sess, config=config)
         self.ner_logits_inference = None
