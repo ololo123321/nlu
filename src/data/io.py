@@ -595,27 +595,32 @@ def simplify(example: Example):
     E0  Bankruptcy:T0 EventArg:T2
     E1  Bankruptcy:T0 EventArg:T2
 
-    сущность: span -> label
-    событие: span -> label
-    ребро: (span, span) -> label
+    сущность: одному спану соответствует не более одной сущности
+    событие: одной сущности соответствует не более одного события
+    ребро: одной паре спанов соответствует не более одного ребра
 
     предпосылка: одному спану соответствует один лейбл
 
     :param example:
     :return:
     """
-    span_to_label = {}
-    span_pair_to_label = {}
+    span_to_entities = defaultdict(set)
+    span_pair_to_arcs = defaultdict(set)
+
+    # событие: {id, trigger, label}
+    # @ trigger.is_event_flag = True
+    # @ label == trigger.label
+    # то есть по сути инстансы класса Event избыточны
 
     id2entity = {}
     for entity in example.entities:
         id2entity[entity.id] = entity
-        span_to_label[(entity.start_index, entity.end_index)] = entity.label
+        span = entity.tokens[0].span_abs.start, entity.tokens[-1].span_abs.end
+        span_to_entities[span].add(entity)
 
     id2event = {event.id: event for event in example.events}
-
     for arc in example.arcs:
-        # TODO: arc.head и arc.dep могут быть не только T, но и E
+        # arc.head и arc.dep могут быть T и E
         if arc.head[0] == LineTypes.ENTITY:
             head = id2entity[arc.head]
         elif arc.head[0] == LineTypes.EVENT:
@@ -632,56 +637,54 @@ def simplify(example: Example):
         else:
             raise
 
-        key = head.start_index, head.end_index, dep.start_index, dep.end_index
-        span_pair_to_label[key] = arc.rel
+        key = (head.tokens[0].span_abs.start, head.tokens[-1].span_abs.end), \
+              (dep.tokens[0].span_abs.start, dep.tokens[-1].span_abs.end)
+        span_pair_to_arcs[key].add(arc)
 
     entities_new = []
-    # TODO: доделать
+    span_to_id = {}
+    id_span = 0
+    for i, (span, entities) in enumerate(span_to_entities.items()):
+        unique_labels = {x.label for x in entities}
+        assert len(unique_labels) == 1, f"expected one unique label per span, but got {unique_labels} for span {span}"
+        entity = entities.pop()
+        entity_new = Entity(
+            id=f"T{id_span}",
+            label=entity.label,
+            text=entity.text,
+            tokens=entity.tokens,
+            is_event_trigger=entity.is_event_trigger,
+            attrs=entity.attrs.copy(),
+            comment=entity.comment
+        )
+        entities_new.append(entity_new)
+        span_to_id[span] = entity_new.id
+        id_span += 1
 
-    # # POSTPROCESSING
-    #
-    # # TODO: отфильтровать лишние сущности -> лишние отношения
-    #
-    # # отношения: одной упорядоченной паре спанов соответствует не более одного уникального лейбла
-    # arcs_filtered = {}  # (Span, Span) -> arc
-    #
-    # def get_entity_span(id_entity):
-    #     _entity = id2entity[id_entity]
-    #     start = _entity.tokens[0].span_abs.start
-    #     end = _entity.tokens[-1].span_abs.end
-    #     return Span(start, end)
-    #
-    # for arc in id2arc.values():
-    #     if arc.head[0] == LineTypes.EVENT:
-    #         arc.head = id2event[arc.head].trigger
-    #     if arc.dep[0] == LineTypes.EVENT:
-    #         arc.dep = id2event[arc.dep].trigger
-    #     head_span = get_entity_span(arc.head)
-    #     dep_span = get_entity_span(arc.dep)
-    #     key = head_span, dep_span
-    #     if key in arcs_filtered:
-    #         if arcs_filtered[key].rel != arc.rel:
-    #             raise MultiRelationError(f"[{filename}] there is more than one relation {head_span} -> {dep_span}: "
-    #                                      f"{arcs_filtered[key].rel} and {arc.rel}")
-    #     else:
-    #         arcs_filtered[key] = arc
-    # arcs = list(arcs_filtered.values())
-    #
-    # # TODO: в целом нет проблемы, если одному триггеру соответствуют несколько событий:
-    # #  это частный случай вложенного нера.
-    # # события: одному триггеру соответствует не более одного события
-    # events_filtered = {}  # Span -> event
-    # for id_event, event in id2event.items():
-    #     trigger_span = get_entity_span(event.trigger)
-    #     if trigger_span in events_filtered:
-    #         # TODO: сделать отдельный тип ошибки
-    #         assert events_filtered[trigger_span].label == event.label
-    #     else:
-    #         events_filtered[trigger_span] = event
-    # events = list(events_filtered.values())
-    #
-    # # сущности: расставление флагов is_event_trigger
-    # # оказывается, событие может быть указано раньше триггера в файле .ann
-    # for event in events:
-    #     id2entity[event.trigger].is_event_trigger = True
-    # entities = list(id2entity.values())
+    arcs_new = []
+    id_span_pair = 0
+    for (span_head, span_dep), arcs in span_pair_to_arcs.items():
+        unique_labels = {x.rel for x in arcs}
+        assert len(unique_labels) == 1, f"expected one unique label per span pair, " \
+            f"but got {unique_labels} for span pair ({span_head}, {span_dep})"
+        arc = arcs.pop()
+        arc_new = Arc(
+            id=f"R{id_span_pair}",
+            head=span_to_id[span_head],
+            dep=span_to_id[span_dep],
+            rel=arc.rel
+        )
+        arcs_new.append(arc_new)
+        id_span_pair += 1
+
+    example_copy = Example(
+        filename=example.filename,
+        id=example.id,
+        text=example.text,
+        tokens=example.tokens,
+        entities=entities_new,
+        arcs=arcs_new,
+        label=example.label
+    )
+
+    return example_copy
