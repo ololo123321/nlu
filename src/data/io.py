@@ -37,17 +37,21 @@ def save_examples(
         examples: List[Example],
         output_dir: str,
         copy_texts: bool = False,
-        collection_dir: str = None
+        collection_dir: str = None,
+        write_mode: str = "a"
 ):
+    assert write_mode in {"a", "w"}
     event_counter = defaultdict(int)
     filenames = set()
     for x in examples:
         filenames.add(x.filename)
-        with open(os.path.join(output_dir, f"{x.filename}.ann"), "a") as f:
+        with open(os.path.join(output_dir, f"{x.filename}.ann"), write_mode) as f:
             events = {}
             # сущности
             for entity in x.entities:
-                line = f"{entity.id}\t{entity.label} {entity.start_index} {entity.end_index}\t{entity.text}\n"
+                start = entity.tokens[0].span_abs.start
+                end = entity.tokens[-1].span_abs.end
+                line = f"{entity.id}\t{entity.label} {start} {end}\t{entity.text}\n"
                 f.write(line)
                 if entity.is_event_trigger:
                     if entity.id not in events:
@@ -551,7 +555,7 @@ def remove_role_index(s: str) -> str:
     return s
 
 
-def check_example(example: Example):
+def check_example(example: Example, allow_nested_entities: bool = False):
     """
     sanity check
     """
@@ -568,11 +572,12 @@ def check_example(example: Example):
     expected = len(example.entities)
     actual = 0
     for t in example.tokens:
-        l = t.labels[0]
-        if l[0] == "B":
-            actual += 1
+        for label in t.labels:
+            actual += label[0] == "B"
+            if not allow_nested_entities:
+                break
     assert actual == expected, \
-        f"[{example.id}] number os entities ({expected}) does not match number of start tokens ({actual})"
+        f"[{example.id}] number of entities ({expected}) does not match number of start tokens ({actual})"
 
     # head и dep отношения содержатся с множетсве сущностей примера
     for arc in example.arcs:
