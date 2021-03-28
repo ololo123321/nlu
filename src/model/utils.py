@@ -66,7 +66,7 @@ def get_padded_coords_2d(mask_2d: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
 
 def get_padded_coords_3d(mask_3d: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
     """
-    немного доработаная функция get_padded_coords_2d с учётом на то, что маска - трёхмерная
+    немного доработаная функция get_padded_coords_2d с учётом того, что маска - трёхмерная
     :param mask_3d: tf.Tensor of shape [batch_size, num_tokens, num_tokens] and type tf.bool
     :return:
     """
@@ -119,10 +119,10 @@ def get_entity_embeddings(
     batch_size = coords_shape[0]
     num_entities_max = coords_shape[1]
     one = tf.tile([[[0, 1]]], [batch_size, num_entities_max, 1])
-    x_i = tf.gather_nd(x, start_coords)  # [N * num_entities, D]
-    x_i_minus_one = tf.gather_nd(x, end_coords - one)  # [N * num_entities, D]
-    x_j = tf.gather_nd(x, end_coords)  # [N * num_entities, D]
-    x_j_plus_one = tf.gather_nd(x, end_coords + one)  # [N * num_entities, D]
+    x_i = tf.gather_nd(x, start_coords)  # [N, num_entities, D]
+    x_i_minus_one = tf.gather_nd(x, end_coords - one)  # [N, num_entities, D]
+    x_j = tf.gather_nd(x, end_coords)  # [N, num_entities, D]
+    x_j_plus_one = tf.gather_nd(x, end_coords + one)  # [N, num_entities, D]
 
     d_model_half = d_model // 2
     x_start = x_j - x_i_minus_one
@@ -130,8 +130,23 @@ def get_entity_embeddings(
     x_end = x_i - x_j_plus_one
     x_end = x_end[..., d_model_half:]
 
-    x_span = tf.concat([x_start, x_end], axis=-1)  # [N * num_entities, D]
+    x_span = tf.concat([x_start, x_end], axis=-1)  # [N, num_entities, D]
 
+    return x_span
+
+
+def get_entity_embeddings_concat(
+        x: tf.Tensor,
+        d_model: int,
+        start_coords: tf.Tensor,
+        end_coords: tf.Tensor = None
+):
+    x_i = tf.gather_nd(x, start_coords)  # [N, num_entities, D]
+    x_j = tf.gather_nd(x, end_coords)  # [N, num_entities, D]
+    d_model_half = d_model // 2
+    x_start = x_i[:, :, :d_model_half]
+    x_end = x_j[:, :, d_model_half:]
+    x_span = tf.concat([x_start, x_end], axis=-1)  # [N, num_entities, D]
     return x_span
 
 

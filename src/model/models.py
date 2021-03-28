@@ -17,7 +17,8 @@ from .utils import (
     get_dense_labels_from_indices,
     get_entity_embeddings,
     get_padded_coords_3d,
-    upper_triangular
+    upper_triangular,
+    get_entity_embeddings_concat
 )
 from .layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN
 from ..data.base import Example, Arc
@@ -1247,7 +1248,7 @@ class BertJointModelV2(BertJointModel):
         return x_new, coords_new, num_tokens_new, num_entities_new
 
 
-class BertForNestedNer(BertJointModel):
+class BertJointModelWithNestedNer(BertJointModel):
     """
     https://arxiv.org/abs/2005.07150
 
@@ -1296,16 +1297,20 @@ class BertForNestedNer(BertJointModel):
 
                 self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
 
-                # TODO: аргумент ner_labels должен иметь размерность [batch_size, num_tokens, num_tokens]
+                batch_size = tf.shape(bert_out_train)[0]
+                num_tokens = tf.reduce_max(self.num_tokens_ph)
+                ner_labels_dense_shape = tf.constant([batch_size, num_tokens, num_tokens], dtype=tf.int32)
+                ner_labels_dense = get_dense_labels_from_indices(
+                    indices=self.ner_labels_ph, shape=ner_labels_dense_shape, no_label_id=0
+                )
+
                 self.re_logits_train, self.num_entities = self._build_re_head(
-                    bert_out=bert_out_train, ner_labels=self.ner_labels_ph
+                    bert_out=bert_out_train, ner_labels=ner_labels_dense
                 )
-                # TODO: аргумент ner_labels должен иметь размерность [batch_size, num_tokens, num_tokens]
+
                 re_logits_true_entities, _ = self._build_re_head(
-                    bert_out=bert_out_pred, ner_labels=self.ner_labels_ph
+                    bert_out=bert_out_pred, ner_labels=ner_labels_dense
                 )
-                # TODO: аргумент ner_labels должен иметь размерность [batch_size, num_tokens, num_tokens]
-                # TODO: self.ner_preds_inference не определён
                 re_logits_pred_entities, self.num_entities_pred = self._build_re_head(
                     bert_out=bert_out_pred, ner_labels=self.ner_preds_inference
                 )
@@ -1369,10 +1374,6 @@ class BertForNestedNer(BertJointModel):
 
         return performance_info
 
-    def _set_loss(self):
-        self.loss_ner = self._get_ner_loss()
-        self.loss = self.loss_ner
-
     def _set_placeholders(self):
         # bert inputs
         self.input_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_ids")
@@ -1388,6 +1389,11 @@ class BertForNestedNer(BertJointModel):
         self.ner_labels_ph = tf.placeholder(
             dtype=tf.int32, shape=[None, 4], name="ner_labels"
         )  # [id_example, start, end, label]
+
+        # re
+        self.re_labels_ph = tf.placeholder(
+            dtype=tf.int32, shape=[None, 4], name="re_labels"
+        )  # [id_example, head, dep, rel]
 
         # common inputs
         self.training_ph = tf.placeholder(dtype=tf.bool, shape=None, name="training_ph")
@@ -1437,12 +1443,17 @@ class BertForNestedNer(BertJointModel):
         ner_labels *= mask[None, :, :]
 
         # векторизация сущностей
-        span_mask = tf.not_equal(ner_labels, 0)  # [batch_size, num_tokens, num_tokens]
+        no_entity_id = self.config["model"]["ner"]["no_entity_id"]
+        span_mask = tf.not_equal(ner_labels, no_entity_id)  # [batch_size, num_tokens, num_tokens]
         start_coords, end_coords, num_entities = get_padded_coords_3d(mask_3d=span_mask)
-        # TODO: учесть тот факт, что токенов [CLS] и [SEP] нет
-        x_entity = get_entity_embeddings(
-            x=x, d_model=d_model, start_coords=start_coords, end_coords=end_coords
-        )
+        if self.config["model"]["re"]["entity_emb_type"] == 0:
+            # требуется специальный токен начала и окончания последовательности
+            entity_emb_fn = get_entity_embeddings
+        elif self.config["model"]["re"]["entity_emb_type"] == 1:
+            entity_emb_fn = get_entity_embeddings_concat
+        else:
+            raise
+        x_entity = entity_emb_fn(x=x, d_model=d_model, start_coords=start_coords, end_coords=end_coords)
 
         # добавление эмбеддингов лейблов сущностей
         entity_coords = tf.concat([start_coords, end_coords[:, :, -1:]], axis=-1)
@@ -1479,6 +1490,8 @@ class BertForNestedNer(BertJointModel):
         total_loss = tf.reduce_sum(masked_per_example_loss)
         num_valid_spans = tf.cast(tf.reduce_sum(mask), tf.float32)
         loss = total_loss / num_valid_spans
+
+        loss *= self.config["model"]["ner"]["loss_coef"]
         return loss
 
     # TODO: много копипасты!
@@ -1493,6 +1506,9 @@ class BertForNestedNer(BertJointModel):
         num_pieces = []
         num_tokens = []
         ner_labels = []
+
+        # re
+        re_labels = []
 
         # filling
         for i, x in enumerate(examples):
@@ -1530,6 +1546,13 @@ class BertForNestedNer(BertJointModel):
                 assert isinstance(label, int)
                 ner_labels.append((i, start, end, label))
 
+            # re
+            for arc in x.arcs:
+                assert arc.head_index is not None
+                assert arc.dep_index is not None
+                assert arc.rel_id is not None
+                re_labels.append((i, arc.head_index, arc.dep_index, arc.rel_id))
+
             # write
             num_pieces.append(len(input_ids_i))
             num_tokens.append(len(x.tokens))
@@ -1551,6 +1574,9 @@ class BertForNestedNer(BertJointModel):
         if len(ner_labels) == 0:
             ner_labels.append((0, 0, 0, 0))
 
+        if len(re_labels) == 0:
+            re_labels.append((0, 0, 0, 0))
+
         d = {
             self.input_ids_ph: input_ids,
             self.input_mask_ph: input_mask,
@@ -1559,6 +1585,7 @@ class BertForNestedNer(BertJointModel):
             self.num_pieces_ph: num_pieces,
             self.num_tokens_ph: num_tokens,
             self.ner_labels_ph: ner_labels,
+            self.re_labels_ph: re_labels,
             self.training_ph: training
         }
         return d
