@@ -153,6 +153,11 @@ def get_dense_labels_from_indices(indices: tf.Tensor, shape: tf.Tensor, no_label
     return labels
 
 
+def upper_triangular(n: int, dtype):
+    x = tf.linalg.band_part(tf.ones((n, n)), 0, -1)
+    x = tf.cast(x, dtype)
+    return x
+
 # def add_ones(x: tf.Tensor) -> tf.Tensor:
 #     ones = tf.ones_like(x[..., :1])
 #     x = tf.concat([x, ones], axis=-1)

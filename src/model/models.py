@@ -16,7 +16,8 @@ from .utils import (
     get_labels_mask,
     get_dense_labels_from_indices,
     get_entity_embeddings,
-    get_padded_coords_3d
+    get_padded_coords_3d,
+    upper_triangular
 )
 from .layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN
 from ..data.base import Example, Arc
@@ -1283,7 +1284,7 @@ class BertForNestedNer(BertJointModel):
             # re
             with tf.variable_scope(self.re_scope):
                 if self.config["model"]["re"]["use_entity_emb"]:
-                    num_entities = self.config["model"]["ner"]["biaffine"]["num_labels"] - 1  # сущность не может иметь лейбл "O"
+                    num_entities = self.config["model"]["ner"]["biaffine"]["num_labels"]
                     bert_dim = self.config["model"]["bert"]["dim"]
                     self.ner_emb = tf.keras.layers.Embedding(num_entities, bert_dim)
                     if self.config["model"]["re"]["use_entity_emb_layer_norm"]:
@@ -1295,12 +1296,16 @@ class BertForNestedNer(BertJointModel):
 
                 self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
 
+                # TODO: аргумент ner_labels должен иметь размерность [batch_size, num_tokens, num_tokens]
                 self.re_logits_train, self.num_entities = self._build_re_head(
                     bert_out=bert_out_train, ner_labels=self.ner_labels_ph
                 )
+                # TODO: аргумент ner_labels должен иметь размерность [batch_size, num_tokens, num_tokens]
                 re_logits_true_entities, _ = self._build_re_head(
                     bert_out=bert_out_pred, ner_labels=self.ner_labels_ph
                 )
+                # TODO: аргумент ner_labels должен иметь размерность [batch_size, num_tokens, num_tokens]
+                # TODO: self.ner_preds_inference не определён
                 re_logits_pred_entities, self.num_entities_pred = self._build_re_head(
                     bert_out=bert_out_pred, ner_labels=self.ner_preds_inference
                 )
@@ -1418,6 +1423,7 @@ class BertForNestedNer(BertJointModel):
         # pieces -> tokens
         x = tf.gather_nd(bert_out, self.first_pieces_coords_ph)  # [batch_size, num_tokens, bert_dim]
 
+        # birnn
         if self.birnn_re is not None:
             sequence_mask = tf.sequence_mask(self.num_tokens_ph)
             x = self.birnn_re(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
@@ -1425,14 +1431,26 @@ class BertForNestedNer(BertJointModel):
         else:
             d_model = self.config["model"]["bert"]["dim"]
 
-        # TODO: должно гарантироваться, что все слайсы по измерению 0 в ner_labels - верхнетреугольные матрицы
-        span_mask = tf.not_equal(ner_labels, 0)  # [batch_size, num_tokens, num_tokens]
+        # маскирование
+        num_tokens = tf.shape(ner_labels)[1]
+        mask = upper_triangular(num_tokens, dtype=tf.float32)
+        ner_labels *= mask[None, :, :]
 
+        # векторизация сущностей
+        span_mask = tf.not_equal(ner_labels, 0)  # [batch_size, num_tokens, num_tokens]
         start_coords, end_coords, num_entities = get_padded_coords_3d(mask_3d=span_mask)
         # TODO: учесть тот факт, что токенов [CLS] и [SEP] нет
         x_entity = get_entity_embeddings(
             x=x, d_model=d_model, start_coords=start_coords, end_coords=end_coords
         )
+
+        # добавление эмбеддингов лейблов сущностей
+        entity_coords = tf.concat([start_coords, end_coords[:, :, -1:]], axis=-1)
+        ner_labels_2d = tf.gather_nd(ner_labels, entity_coords)
+        ner_labels_2d *= tf.sequence_mask(num_entities, dtype=tf.int32)
+
+        x_emb = self.ner_emb(ner_labels_2d)
+        x_entity += x_emb
         return x_entity, num_entities
 
     def _get_ner_loss(self):
@@ -1453,8 +1471,7 @@ class BertForNestedNer(BertJointModel):
 
         # mask
         maxlen = logits_shape[1]
-        span_mask = tf.linalg.band_part(tf.ones((maxlen, maxlen)), 0, -1)  # [num_tokens, num_tokens]; upper-triangular
-        span_mask = tf.cast(span_mask, tf.float32)
+        span_mask = upper_triangular(maxlen, dtype=tf.float32)
         sequence_mask = tf.sequence_mask(self.num_tokens_ph, dtype=tf.float32)  # [batch_size, num_tokens]
         mask = span_mask[None, :, :] * sequence_mask[:, None, :] * sequence_mask[:, :, None]  # [batch_size, num_tokens, num_tokens]
 
