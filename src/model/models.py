@@ -15,6 +15,8 @@ from .utils import (
     get_batched_coords_from_labels,
     get_labels_mask,
     get_dense_labels_from_indices,
+    get_entity_embeddings,
+    get_padded_coords_3d
 )
 from .layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN
 from ..data.base import Example, Arc
@@ -1254,6 +1256,8 @@ class BertForNestedNer(BertJointModel):
         super().__init__(sess=sess, config=config)
         self.ner_logits_inference = None
 
+        self.tokens_pair_enc = None
+
     def build(self):
         self._set_placeholders()
 
@@ -1271,10 +1275,38 @@ class BertForNestedNer(BertJointModel):
                 if self.config["model"]["ner"]["use_birnn"]:
                     self.birnn_ner = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
 
-                self.entity_pairs_enc = GraphEncoder(**self.config["model"]["ner"]["biaffine"])
+                self.tokens_pair_enc = GraphEncoder(**self.config["model"]["ner"]["biaffine"])
 
-                self.ner_logits_train = self._build_re_head(bert_out=bert_out_train, ner_labels=None)
-                self.ner_logits_inference = self._build_re_head(bert_out=bert_out_pred, ner_labels=None)
+                self.ner_logits_train = self._build_ner_head(bert_out=bert_out_train)
+                self.ner_logits_inference = self._build_ner_head(bert_out=bert_out_pred)
+
+            # re
+            with tf.variable_scope(self.re_scope):
+                if self.config["model"]["re"]["use_entity_emb"]:
+                    num_entities = self.config["model"]["ner"]["biaffine"]["num_labels"] - 1  # сущность не может иметь лейбл "O"
+                    bert_dim = self.config["model"]["bert"]["dim"]
+                    self.ner_emb = tf.keras.layers.Embedding(num_entities, bert_dim)
+                    if self.config["model"]["re"]["use_entity_emb_layer_norm"]:
+                        self.ner_emb_layer_norm = tf.keras.layers.LayerNormalization()
+                    self.ner_emb_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["entity_emb_dropout"])
+
+                if self.config["model"]["re"]["use_birnn"]:
+                    self.birnn_re = StackedBiRNN(**self.config["model"]["re"]["rnn"])
+
+                self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
+
+                self.re_logits_train, self.num_entities = self._build_re_head(
+                    bert_out=bert_out_train, ner_labels=self.ner_labels_ph
+                )
+                re_logits_true_entities, _ = self._build_re_head(
+                    bert_out=bert_out_pred, ner_labels=self.ner_labels_ph
+                )
+                re_logits_pred_entities, self.num_entities_pred = self._build_re_head(
+                    bert_out=bert_out_pred, ner_labels=self.ner_preds_inference
+                )
+
+                self.re_labels_true_entities = tf.argmax(re_logits_true_entities, axis=-1)
+                self.re_labels_pred_entities = tf.argmax(re_logits_pred_entities, axis=-1)
 
             self._set_loss()
             self._set_train_op()
@@ -1303,7 +1335,7 @@ class BertForNestedNer(BertJointModel):
                 for entity in x.entities:
                     start = entity.tokens[0].index_rel
                     end = entity.tokens[-1].index_rel
-                    spans_true[start, end] = entity.label
+                    spans_true[start, end] = entity.label_id
 
                 spans_pred = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
                 ner_logits_i = ner_logits[i, :num_tokens, :num_tokens, :]
@@ -1320,7 +1352,8 @@ class BertForNestedNer(BertJointModel):
         # TODO: учитывать, что последний батч может быть меньше. тогда среднее не совсем корректно так считать
         loss /= num_batches
 
-        ner_metrics = classification_report(y_true=y_true, y_pred=y_pred, trivial_label=no_entity_id)
+        trivial_label = id_to_ner_label[no_entity_id]
+        ner_metrics = classification_report(y_true=y_true, y_pred=y_pred, trivial_label=trivial_label)
 
         # total
         performance_info = {
@@ -1354,8 +1387,7 @@ class BertForNestedNer(BertJointModel):
         # common inputs
         self.training_ph = tf.placeholder(dtype=tf.bool, shape=None, name="training_ph")
 
-    def _get_entities_representation(self, bert_out, ner_labels):
-        # dropout
+    def _build_ner_head(self,  bert_out):
         bert_out = self.bert_dropout(bert_out, training=self.training_ph)
 
         # pieces -> tokens
@@ -1365,7 +1397,43 @@ class BertForNestedNer(BertJointModel):
             sequence_mask = tf.sequence_mask(self.num_tokens_ph)
             x = self.birnn_ner(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
 
-        return x, self.num_tokens_ph
+        # encoding of pairs
+        inputs = GraphEncoderInputs(head=x, dep=x)
+        logits = self.tokens_pair_enc(inputs=inputs, training=self.training_ph)  # [N, num_ent, num_ent, num_relation]
+        return logits
+
+    def _get_entities_representation(self, bert_out, ner_labels):
+        """
+
+
+        bert_out - [batch_size, num_pieces, bert_dim]
+        ner_labels - [batch_size, num_tokens, num_tokens]
+
+        logits - [batch_size, num_entities_max, bert_bim or cell_dim * 2]
+        num_entities - [batch_size]
+        """
+        # dropout
+        bert_out = self.bert_dropout(bert_out, training=self.training_ph)
+
+        # pieces -> tokens
+        x = tf.gather_nd(bert_out, self.first_pieces_coords_ph)  # [batch_size, num_tokens, bert_dim]
+
+        if self.birnn_re is not None:
+            sequence_mask = tf.sequence_mask(self.num_tokens_ph)
+            x = self.birnn_re(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
+            d_model = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
+        else:
+            d_model = self.config["model"]["bert"]["dim"]
+
+        # TODO: должно гарантироваться, что все слайсы по измерению 0 в ner_labels - верхнетреугольные матрицы
+        span_mask = tf.not_equal(ner_labels, 0)  # [batch_size, num_tokens, num_tokens]
+
+        start_coords, end_coords, num_entities = get_padded_coords_3d(mask_3d=span_mask)
+        # TODO: учесть тот факт, что токенов [CLS] и [SEP] нет
+        x_entity = get_entity_embeddings(
+            x=x, d_model=d_model, start_coords=start_coords, end_coords=end_coords
+        )
+        return x_entity, num_entities
 
     def _get_ner_loss(self):
         """"
@@ -1441,7 +1509,7 @@ class BertForNestedNer(BertJointModel):
             for entity in x.entities:
                 start = entity.tokens[0].index_rel
                 end = entity.tokens[-1].index_rel
-                label = entity.label
+                label = entity.label_id
                 assert isinstance(label, int)
                 ner_labels.append((i, start, end, label))
 

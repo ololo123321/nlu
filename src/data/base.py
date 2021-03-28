@@ -140,6 +140,7 @@ class Entity(ReprMixin):
         self.comment = comment
 
         self.index = None
+        self.label_id = None
 
 
 class Event(ReprMixin):

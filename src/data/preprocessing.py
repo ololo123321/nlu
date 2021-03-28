@@ -322,15 +322,20 @@ def fit_encodings(
         examples: List[Example],
         min_label_freq: int = 3,
         label_other: str = "O",
+        ner_enc_token_level: bool = True
 ) -> Tuple[Dict[str, int], Dict[str, int]]:
     ner_labels = defaultdict(int)
     re_labels = defaultdict(int)
 
     for x in examples:
-        for t in x.tokens:
-            for label in t.labels_pieces:
-                if label != label_other:
-                    ner_labels[label] += 1
+        if ner_enc_token_level:
+            for t in x.tokens:
+                for label in t.labels_pieces:
+                    if label != label_other:
+                        ner_labels[label] += 1
+        else:
+            for entity in x.entities:
+                ner_labels[entity.label] += 1
         for arc in x.arcs:
             re_labels[arc.rel] += 1
 
@@ -348,19 +353,32 @@ def fit_encodings(
     return ner_enc, re_enc
 
 
-def apply_encodings(examples: List[Example], ner_enc: Dict[str, int], re_enc: Dict[str, int]):
+def apply_encodings(
+        examples: List[Example],
+        ner_enc: Dict[str, int],
+        re_enc: Dict[str, int],
+        ner_enc_token_level: bool = True
+):
     unk_ner_labels = defaultdict(int)
     unk_re_labels = defaultdict(int)
 
     for x in examples:
-        for t in x.tokens:
-            t.label_ids = []
-            for label in t.labels_pieces:
-                if label in ner_enc.keys():
-                    t.label_ids.append(ner_enc[label])
+        if ner_enc_token_level:
+            for t in x.tokens:
+                t.label_ids = []
+                for label in t.labels_pieces:
+                    if label in ner_enc.keys():
+                        t.label_ids.append(ner_enc[label])
+                    else:
+                        t.label_ids.append(0)
+                        unk_ner_labels[label] += 1
+        else:
+            for entity in x.entities:
+                if entity.label in ner_enc.keys():
+                    entity.label_id = ner_enc[entity.label]
                 else:
-                    t.label_ids.append(0)
-                    unk_ner_labels[label] += 1
+                    entity.label_id = 0
+                    unk_ner_labels[entity.label] += 1
         for arc in x.arcs:
             if arc.rel in re_enc.keys():
                 arc.rel_id = re_enc[arc.rel]

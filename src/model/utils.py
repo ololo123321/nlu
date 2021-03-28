@@ -17,7 +17,7 @@ def get_labels_mask(labels_2d: tf.Tensor, values: tf.Tensor, sequence_len: tf.Te
     return mask_2d
 
 
-def get_padded_coords(mask_2d: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+def get_padded_coords_2d(mask_2d: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
     """
     Получение кординат элементов True с паддингом (0, 0).
     Для mask_2d
@@ -64,55 +64,73 @@ def get_padded_coords(mask_2d: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
     return coords, num_elements
 
 
+def get_padded_coords_3d(mask_3d: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+    """
+    немного доработаная функция get_padded_coords_2d с учётом на то, что маска - трёхмерная
+    :param mask_3d: tf.Tensor of shape [batch_size, num_tokens, num_tokens] and type tf.bool
+    :return:
+    """
+    num_entities = tf.reduce_sum(tf.cast(mask_3d, tf.int32), axis=[1, 2])
+    sequence_mask = tf.sequence_mask(num_entities)
+    sequence_mask_shape = tf.shape(sequence_mask)
+    coords = tf.cast(tf.where(mask_3d), tf.int32)
+    indices = tf.cast(tf.where(sequence_mask), tf.int32)
+    updates_start = coords[:, 1]
+    updates_end = coords[:, 2]
+    y_coord_start = tf.scatter_nd(indices, updates_start, shape=sequence_mask_shape)
+    y_coord_end = tf.scatter_nd(indices, updates_end, shape=sequence_mask_shape)
+
+    batch_size = sequence_mask_shape[0]
+    num_elements_max = sequence_mask_shape[1]
+    x_coord = tf.range(batch_size, dtype=tf.int32)
+    x_coord = tf.tile(x_coord[:, None], [1, num_elements_max])
+
+    start_coords = tf.concat([x_coord[:, :, None], y_coord_start[:, :, None]], axis=-1)
+    end_coords = tf.concat([x_coord[:, :, None], y_coord_end[:, :, None]], axis=-1)
+    return start_coords, end_coords, num_entities
+
+
 def get_batched_coords_from_labels(
         labels_2d: tf.Tensor,
         values: tf.Tensor,
         sequence_len: tf.Tensor,
 ) -> Tuple[tf.Tensor, tf.Tensor]:
     mask_2d = get_labels_mask(labels_2d=labels_2d, values=values, sequence_len=sequence_len)
-    return get_padded_coords(mask_2d=mask_2d)
+    return get_padded_coords_2d(mask_2d=mask_2d)
 
 
 def get_entity_embeddings(
         x: tf.Tensor,
         d_model: int,
-        emb_type: int,
-        entity_start_ids: tf.Tensor,
-        entity_end_ids: tf.Tensor = None
+        start_coords: tf.Tensor,
+        end_coords: tf.Tensor = None
 ) -> tf.Tensor:
     """
     Векторизация сущностей. Предполагается, что границы сущностей известны.
 
     :param x:
     :param d_model:
-    :param emb_type:
-    :param entity_start_ids:
-    :param entity_end_ids:
+    :param start_coords: [batch_size, num_entities, 2]
+    :param end_coords: [batch_size, num_entities, 2]
     :return:
     """
-    batch_size = tf.shape(x)[0]
 
-    if emb_type == 0:
-        x_span = tf.gather_nd(x, entity_start_ids)  # [N * num_entities, D]
-    elif emb_type == 1:
-        assert entity_end_ids is not None
-        one = tf.tile([[0, 1]], [tf.shape(entity_start_ids)[0], 1])
-        x_i = tf.gather_nd(x, entity_start_ids)  # [N * num_entities, D]
-        x_i_minus_one = tf.gather_nd(x, entity_start_ids - one)  # [N * num_entities, D]
-        x_j = tf.gather_nd(x, entity_end_ids)  # [N * num_entities, D]
-        x_j_plus_one = tf.gather_nd(x, entity_end_ids + one)  # [N * num_entities, D]
+    coords_shape = tf.shape(start_coords)
+    batch_size = coords_shape[0]
+    num_entities_max = coords_shape[1]
+    one = tf.tile([[[0, 1]]], [batch_size, num_entities_max, 1])
+    x_i = tf.gather_nd(x, start_coords)  # [N * num_entities, D]
+    x_i_minus_one = tf.gather_nd(x, end_coords - one)  # [N * num_entities, D]
+    x_j = tf.gather_nd(x, end_coords)  # [N * num_entities, D]
+    x_j_plus_one = tf.gather_nd(x, end_coords + one)  # [N * num_entities, D]
 
-        d_model_half = d_model // 2
-        x_start = x_j - x_i_minus_one
-        x_start = x_start[..., :d_model_half]
-        x_end = x_i - x_j_plus_one
-        x_end = x_end[..., d_model_half:]
+    d_model_half = d_model // 2
+    x_start = x_j - x_i_minus_one
+    x_start = x_start[..., :d_model_half]
+    x_end = x_i - x_j_plus_one
+    x_end = x_end[..., d_model_half:]
 
-        x_span = tf.concat([x_start, x_end], axis=-1)  # [N * num_entities, D]
-    else:
-        raise ValueError(f"expected span_emb type in {{0, 1}}, got {emb_type}")
-
-    x_span = tf.reshape(x_span, [batch_size, -1, d_model])  # [N, num_entities, D]
+    x_span = tf.concat([x_start, x_end], axis=-1)  # [N * num_entities, D]
 
     return x_span
 
