@@ -50,7 +50,7 @@ def classification_report_to_string(d: Dict, digits: int = 4) -> str:
     # таким образом длина числа равна 1 ("0" или "1") + 1 (".") + digits (точность округления)
     max_float_length = digits + 2  # 0.1234
 
-    indices = d.keys()
+    indices = sorted(d.keys())
     index_length = max(map(len, indices))
     index_length += col_dist
 

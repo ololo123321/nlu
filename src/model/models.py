@@ -1,6 +1,6 @@
 import random
 import os
-from typing import Dict, List, Callable
+from typing import Dict, List, Callable, Tuple
 from itertools import chain
 from abc import ABC, abstractmethod
 
@@ -175,6 +175,9 @@ class BaseModel(ABC):
         saver.restore(self.sess, checkpoint_path)
 
     def initialize(self):
+        self._init_uninitialized()
+
+    def _init_uninitialized(self):
         global_vars = tf.global_variables()
         is_not_initialized = self.sess.run([tf.is_variable_initialized(var) for var in global_vars])
         not_initialized_vars = [v for v, flag in zip(global_vars, is_not_initialized) if not flag]
@@ -597,7 +600,7 @@ class BertJointModel(BaseModel):
         checkpoint_path = os.path.join(bert_dir, "bert_model.ckpt")
         saver.restore(self.sess, checkpoint_path)
 
-        super().initialize()
+        self._init_uninitialized()
 
     def set_train_op_head(self):
         """
@@ -773,7 +776,9 @@ class BertJointModel(BaseModel):
             x = self.birnn_ner(x, training=self.training_ph, mask=sequence_mask)
 
         # pieces -> tokens
-        x = tf.gather_nd(x, self.first_pieces_coords_ph)  # [N, num_tokens_tokens, bert_dim or cell_dim * 2]
+        # сделано так для того, чтобы в ElmoJointModel не нужно было переопределять данный метод
+        if self.first_pieces_coords_ph is not None:
+            x = tf.gather_nd(x, self.first_pieces_coords_ph)  # [N, num_tokens_tokens, bert_dim or cell_dim * 2]
 
         # label logits
         logits = self.dense_ner_labels(x)
@@ -789,7 +794,7 @@ class BertJointModel(BaseModel):
 
         return logits, pred_ids, transition_params
 
-    def _build_re_head(self, bert_out, ner_labels):
+    def _build_re_head(self, bert_out: tf.Tensor, ner_labels: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         x, num_entities = self._get_entities_representation(bert_out=bert_out, ner_labels=ner_labels)
 
         # encoding of pairs
@@ -797,7 +802,7 @@ class BertJointModel(BaseModel):
         logits = self.entity_pairs_enc(inputs=inputs, training=self.training_ph)  # [N, num_ent, num_ent, num_relation]
         return logits, num_entities
 
-    def _get_entities_representation(self, bert_out, ner_labels):
+    def _get_entities_representation(self, bert_out: tf.Tensor, ner_labels: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         """
         bert_out ->
         ner_labels -> x_ner
@@ -906,6 +911,9 @@ class BertForRelationExtraction(BertJointModel):
     def __init__(self, sess, config):
         super().__init__(sess=sess, config=config)
 
+        # так как решается только relation extraction, вывод числа сущностей выводится однозначно.
+        # поэтому их можно прокидывать через плейсхолдер
+        self.num_entities_ph = None
         self.entity_coords_ph = None
 
     def build(self):
@@ -927,15 +935,16 @@ class BertForRelationExtraction(BertJointModel):
 
                 self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
 
-                self.re_logits_train = self._build_re_head(
+                self.re_logits_train, _ = self._build_re_head(
                     bert_out=bert_out_train, ner_labels=self.ner_labels_ph
                 )
-                re_logits_true_entities = self._build_re_head(
+                re_logits_true_entities, _ = self._build_re_head(
                     bert_out=bert_out_pred, ner_labels=self.ner_labels_ph
                 )
 
                 self.re_labels_true_entities = tf.argmax(re_logits_true_entities, axis=-1)
 
+            self.num_entities = self.num_entities_ph
             self._set_loss()
             self._set_train_op()
 
@@ -965,17 +974,17 @@ class BertForRelationExtraction(BertJointModel):
 
             for i, x in enumerate(examples_batch):
                 # re TODO: рассмотреть случаи num_events == 0
-                num_entities = len(x.entities)
-                arcs_true = np.full((num_entities, num_entities), no_rel_id, dtype=np.int32)
+                num_entities_i = len(x.entities)
+                arcs_true = np.full((num_entities_i, num_entities_i), no_rel_id, dtype=np.int32)
 
                 for arc in x.arcs:
                     assert arc.head_index is not None
                     assert arc.dep_index is not None
                     arcs_true[arc.head_index, arc.dep_index] = arc.rel_id
 
-                arcs_pred = rel_labels_pred[i, :num_entities, :num_entities]
-                assert arcs_pred.shape[0] == num_entities, f"{arcs_pred.shape[0]} != {num_entities}"
-                assert arcs_pred.shape[1] == num_entities, f"{arcs_pred.shape[1]} != {num_entities}"
+                arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
+                assert arcs_pred.shape[0] == num_entities_i, f"{arcs_pred.shape[0]} != {num_entities_i}"
+                assert arcs_pred.shape[1] == num_entities_i, f"{arcs_pred.shape[1]} != {num_entities_i}"
                 y_true_re += [id_to_re_label[j] for j in arcs_true.flatten()]
                 y_pred_re += [id_to_re_label[j] for j in arcs_pred.flatten()]
 
@@ -985,6 +994,7 @@ class BertForRelationExtraction(BertJointModel):
         # TODO: учитывать, что последний батч может быть меньше. тогда среднее не совсем корректно так считать
         loss /= num_batches
 
+        # TODO: хардкод "O"
         re_metrics = classification_report(y_true=y_true_re, y_pred=y_pred_re, trivial_label="O")
 
         # total
@@ -1107,6 +1117,7 @@ class BertForRelationExtraction(BertJointModel):
             self.segment_ids_ph: segment_ids,
 
             self.num_pieces_ph: num_pieces,
+            self.num_entities_ph: num_entities,
             self.entity_coords_ph: entity_coords,
             self.re_labels_ph: re_labels,
             self.training_ph: training
@@ -1123,6 +1134,7 @@ class BertForRelationExtraction(BertJointModel):
             dtype=tf.int32, shape=[None, None, 2], name="first_pieces_coords"
         )  # [id_example, id_piece]
         self.num_pieces_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_pieces")
+        self.num_entities_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_entities")
         self.entity_coords_ph = tf.placeholder(dtype=tf.int32, shape=[None, None, 2], name="entity_coords")
         self.re_labels_ph = tf.placeholder(
             dtype=tf.int32, shape=[None, 4], name="re_labels"
@@ -1135,7 +1147,7 @@ class BertForRelationExtraction(BertJointModel):
         self.loss_re = self._get_re_loss()
         self.loss = self.loss_re
 
-    def _get_entities_representation(self, bert_out, ner_labels) -> tf.Tensor:
+    def _get_entities_representation(self, bert_out: tf.Tensor, ner_labels: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         if self.birnn_re is not None:
             sequence_mask = tf.sequence_mask(self.num_pieces_ph)
             x = self.birnn_re(bert_out, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
@@ -1143,7 +1155,7 @@ class BertForRelationExtraction(BertJointModel):
             x = bert_out
 
         x = tf.gather_nd(x, self.entity_coords_ph)   # [batch_size, num_entities_max, bert_bim or cell_dim * 2]
-        return x
+        return x, self.num_entities_ph
 
 
 class BertJointModelV2(BertJointModel):
@@ -1155,7 +1167,7 @@ class BertJointModelV2(BertJointModel):
         """
         super().__init__(sess=sess, config=config)
 
-    def _get_entities_representation(self, bert_out, ner_labels) -> tf.Tensor:
+    def _get_entities_representation(self, bert_out: tf.Tensor, ner_labels: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         assert self.ner_emb is not None
         assert self.ner_emb_dropout is not None
         assert self.birnn_re is not None
@@ -1177,7 +1189,7 @@ class BertJointModelV2(BertJointModel):
 
         # tokens -> entities
         x = tf.gather_nd(x, coords)
-        return x
+        return x, num_entities
 
     def _vectorize_whole_entities(self, x_tokens, ner_labels):
         """
@@ -1466,7 +1478,7 @@ class BertJointModelWithNestedNer(BertJointModel):
         logits = self.tokens_pair_enc(inputs=inputs, training=self.training_ph)  # [N, num_ent, num_ent, num_relation]
         return logits
 
-    def _get_entities_representation(self, bert_out, ner_labels):
+    def _get_entities_representation(self, bert_out: tf.Tensor, ner_labels: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         """
 
 
@@ -1644,7 +1656,7 @@ class BertJointModelWithNestedNer(BertJointModel):
         return d
 
 
-# TODO: избавиться от кучи копипасты!
+# TODO: проверить работоспособность
 class ElmoJointModel(BertJointModel):
     def __init__(self, sess, config):
         super().__init__(sess=sess, config=config)
@@ -1652,6 +1664,7 @@ class ElmoJointModel(BertJointModel):
         self.tokens_ph = None
         self.ner_logits = None
 
+    # TODO: мб эту часть можно было бы отрефакторить так, чтобы копипасты было меньше
     def build(self):
         self._set_placeholders()
 
@@ -1668,7 +1681,7 @@ class ElmoJointModel(BertJointModel):
                 num_labels = self.config["model"]["ner"]["num_labels"]
                 self.dense_ner_labels = tf.keras.layers.Dense(num_labels)
 
-                self.ner_logits_train, self.ner_preds_inference, self.transition_params = self._build_ner_head(elmo_out=elmo_out)
+                self.ner_logits_train, self.ner_preds_inference, self.transition_params = self._build_ner_head(bert_out=elmo_out)
 
             # re
             with tf.variable_scope(self.re_scope):
@@ -1684,11 +1697,11 @@ class ElmoJointModel(BertJointModel):
 
                 self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
 
-                self.re_logits_train = self._build_re_head(
-                    elmo_out=elmo_out, ner_labels=self.ner_labels_ph
+                self.re_logits_train, self.num_entities = self._build_re_head(
+                    bert_out=elmo_out, ner_labels=self.ner_labels_ph
                 )
-                re_logits_pred_entities = self._build_re_head(
-                    elmo_out=elmo_out, ner_labels=self.ner_preds_inference
+                re_logits_pred_entities, _ = self._build_re_head(
+                    bert_out=elmo_out, ner_labels=self.ner_preds_inference
                 )
 
                 self.re_labels_true_entities = tf.argmax(self.re_logits_train, axis=-1)
@@ -1697,49 +1710,7 @@ class ElmoJointModel(BertJointModel):
             self._set_loss()
             self._set_train_op()
 
-    def _build_ner_head(self,  elmo_out):
-        """
-        bert_out -> dropout -> stacked birnn (optional) -> dense(num_labels) -> crf (optional)
-        :param elmo_out:
-        :return:
-        """
-        use_crf = self.config["model"]["ner"]["use_crf"]
-        num_labels = self.config["model"]["ner"]["num_labels"]
-
-        # dropout
-        if (self.birnn_ner is None) or (self.config["model"]["ner"]["rnn"]["dropout"] == 0.0):
-            x = self.bert_dropout(elmo_out, training=self.training_ph)
-        else:
-            x = elmo_out
-
-        # birnn
-        if self.birnn_ner is not None:
-            sequence_mask = tf.sequence_mask(self.num_tokens_ph)
-            x = self.birnn_ner(x, training=self.training_ph, mask=sequence_mask)
-
-        # label logits
-        logits = self.dense_ner_labels(x)
-
-        # label ids
-        if use_crf:
-            with tf.variable_scope("crf", reuse=tf.AUTO_REUSE):
-                transition_params = tf.get_variable("transition_params", [num_labels, num_labels], dtype=tf.float32)
-            pred_ids, _ = tf.contrib.crf.crf_decode(logits, transition_params, self.num_tokens_ph)
-        else:
-            pred_ids = tf.argmax(logits, axis=-1)
-            transition_params = None
-
-        return logits, pred_ids, transition_params
-
-    def _build_re_head(self, elmo_out, ner_labels):
-        x = self._get_entities_representation(bert_out=elmo_out, ner_labels=ner_labels)
-
-        # encoding of pairs
-        inputs = GraphEncoderInputs(head=x, dep=x)
-        logits = self.entity_pairs_enc(inputs=inputs, training=self.training_ph)  # [N, num_ent, num_ent, num_relation]
-        return logits
-
-    def _get_entities_representation(self, bert_out, ner_labels) -> tf.Tensor:
+    def _get_entities_representation(self, bert_out: tf.Tensor, ner_labels: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         """
         bert_out ->
         ner_labels -> x_ner
@@ -1775,13 +1746,13 @@ class ElmoJointModel(BertJointModel):
 
         # вывод координат первых токенов сущностей
         start_ids = tf.constant(self.config["model"]["ner"]["start_ids"], dtype=tf.int32)
-        coords, _ = get_batched_coords_from_labels(
+        coords, num_entities = get_batched_coords_from_labels(
             labels_2d=ner_labels, values=start_ids, sequence_len=self.num_tokens_ph
         )
 
         # tokens -> entities
         x = tf.gather_nd(x, coords)   # [batch_size, num_entities_max, bert_bim or cell_dim * 2]
-        return x
+        return x, num_entities
 
     def _get_feed_dict(self, examples: List[Example], training: bool):
         # elmo
@@ -1869,11 +1840,5 @@ class ElmoJointModel(BertJointModel):
         self.set_train_op_head()
         self.train_op = self.train_op_head
 
-    # TODO: копипаста из BaseModel!
     def initialize(self):
-        global_vars = tf.global_variables()
-        is_not_initialized = self.sess.run([tf.is_variable_initialized(var) for var in global_vars])
-        not_initialized_vars = [v for v, flag in zip(global_vars, is_not_initialized) if not flag]
-        if not_initialized_vars:
-            self.sess.run(tf.variables_initializer(not_initialized_vars))
-        self.sess.run(tf.tables_initializer())
+        self._init_uninitialized()
