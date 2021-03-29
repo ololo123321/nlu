@@ -1286,8 +1286,11 @@ class BertJointModelWithNestedNer(BertJointModel):
             with tf.variable_scope(self.re_scope):
                 if self.config["model"]["re"]["use_entity_emb"]:
                     num_entities = self.config["model"]["ner"]["biaffine"]["num_labels"]
-                    bert_dim = self.config["model"]["bert"]["dim"]
-                    self.ner_emb = tf.keras.layers.Embedding(num_entities, bert_dim)
+                    if self.config["model"]["re"]["use_birnn"]:
+                        emb_dim = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
+                    else:
+                        emb_dim = self.config["model"]["bert"]["dim"]
+                    self.ner_emb = tf.keras.layers.Embedding(num_entities, emb_dim)
                     if self.config["model"]["re"]["use_entity_emb_layer_norm"]:
                         self.ner_emb_layer_norm = tf.keras.layers.LayerNormalization()
                     self.ner_emb_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["entity_emb_dropout"])
@@ -1323,25 +1326,41 @@ class BertJointModelWithNestedNer(BertJointModel):
             self._set_loss()
             self._set_train_op()
 
-    # TODO: добавить отношения
     def evaluate(self, examples: List[Example], batch_size: int = 16, **kwargs) -> Dict:
-        y_true = []
-        y_pred = []
+        y_true_ner = []
+        y_pred_ner = []
+
+        y_true_re = []
+        y_pred_re = []
 
         no_entity_id = self.config["model"]["ner"]["no_entity_id"]
+        no_rel_id = self.config["model"]["re"]["no_relation_id"]
         id_to_ner_label = kwargs["id_to_ner_label"]
+        id_to_re_label = kwargs["id_to_re_label"]
 
         loss = 0.0
+        loss_ner = 0.0
+        loss_re = 0.0
         num_batches = 0
 
         for start in range(0, len(examples), batch_size):
             end = start + batch_size
             examples_batch = examples[start:end]
             feed_dict = self._get_feed_dict(examples_batch, training=False)
-            loss_i, ner_logits = self.sess.run([self.loss, self.ner_logits_inference], feed_dict=feed_dict)
+            loss_i, loss_ner_i, loss_re_i, ner_logits, num_entities, re_labels_pred = self.sess.run([
+                self.loss,
+                self.loss_ner,
+                self.loss_re,
+                self.ner_logits_inference,
+                self.num_entities,
+                self.re_labels_true_entities
+            ], feed_dict=feed_dict)
             loss += loss_i
+            loss_ner += loss_ner_i
+            loss_re += loss_re_i
 
             for i, x in enumerate(examples_batch):
+                # ner
                 num_tokens = len(x.tokens)
                 spans_true = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
 
@@ -1356,23 +1375,55 @@ class BertJointModelWithNestedNer(BertJointModel):
                 for span in spans_filtered:
                     spans_pred[span.start, span.end] = span.label
 
-                y_true += [id_to_ner_label[j] for j in spans_true.flatten()]
-                y_pred += [id_to_ner_label[j] for j in spans_pred.flatten()]
+                y_true_ner += [id_to_ner_label[j] for j in spans_true.flatten()]
+                y_pred_ner += [id_to_ner_label[j] for j in spans_pred.flatten()]
+
+                # re
+                num_entities_i = num_entities[i]
+                assert num_entities_i == len(x.entities)
+                arcs_true = np.full((num_entities_i, num_entities_i), no_rel_id, dtype=np.int32)
+
+                for arc in x.arcs:
+                    assert arc.head_index is not None
+                    assert arc.dep_index is not None
+                    arcs_true[arc.head_index, arc.dep_index] = arc.rel_id
+
+                # TODO: проверить, что в re_labels_pred сущности отсортированы по спанам
+                arcs_pred = re_labels_pred[i, :num_entities_i, :num_entities_i]
+                assert arcs_pred.shape[0] == num_entities_i, f"{arcs_pred.shape[0]} != {num_entities_i}"
+                assert arcs_pred.shape[1] == num_entities_i, f"{arcs_pred.shape[1]} != {num_entities_i}"
+                y_true_re += [id_to_re_label[j] for j in arcs_true.flatten()]
+                y_pred_re += [id_to_re_label[j] for j in arcs_pred.flatten()]
 
             num_batches += 1
 
         # loss
         # TODO: учитывать, что последний батч может быть меньше. тогда среднее не совсем корректно так считать
         loss /= num_batches
+        loss_ner /= num_batches
+        loss_re /= num_batches
 
+        # ner
         trivial_label = id_to_ner_label[no_entity_id]
-        ner_metrics = classification_report(y_true=y_true, y_pred=y_pred, trivial_label=trivial_label)
+        ner_metrics = classification_report(y_true=y_true_ner, y_pred=y_pred_ner, trivial_label=trivial_label)
+
+        # re
+        re_metrics = classification_report(y_true=y_true_re, y_pred=y_pred_re, trivial_label="O")
 
         # total
+        score = ner_metrics["micro"]["f1"] * 0.5 + re_metrics["micro"]["f1"] * 0.5
+
         performance_info = {
+            "ner": {
+                "loss": loss_ner,
+                "metrics": ner_metrics
+            },
+            "re": {
+                "loss": loss_re,
+                "metrics": re_metrics,
+            },
             "loss": loss,
-            "metrics": ner_metrics,
-            "score": ner_metrics["micro"]["f1"]
+            "score": score
         }
 
         return performance_info
@@ -1449,6 +1500,7 @@ class BertJointModelWithNestedNer(BertJointModel):
         no_entity_id = self.config["model"]["ner"]["no_entity_id"]
         span_mask = tf.not_equal(ner_labels, no_entity_id)  # [batch_size, num_tokens, num_tokens]
         start_coords, end_coords, num_entities = get_padded_coords_3d(mask_3d=span_mask)
+        # TODO: не забыть добавить в конфиг этот параметр
         if self.config["model"]["re"]["entity_emb_type"] == 0:
             # требуется специальный токен начала и окончания последовательности
             entity_emb_fn = get_entity_embeddings
