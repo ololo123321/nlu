@@ -1300,14 +1300,13 @@ class BertJointModelWithNestedNer(BertJointModel):
 
                 self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
 
-                batch_size = tf.shape(bert_out_train)[0]
-                num_tokens = tf.reduce_max(self.num_tokens_ph)
-                ner_labels_dense_shape = tf.constant([batch_size, num_tokens, num_tokens], dtype=tf.int32)
+                shape = tf.shape(self.ner_logits_train)[:-1]
+                no_entity_id = self.config["model"]["ner"]["no_entity_id"]
                 ner_labels_dense = get_dense_labels_from_indices(
-                    indices=self.ner_labels_ph, shape=ner_labels_dense_shape, no_label_id=0
+                    indices=self.ner_labels_ph, shape=shape, no_label_id=no_entity_id
                 )
 
-                ner_preds_inference = tf.argmax(self.ner_logits_inference, axis=-1)
+                ner_preds_inference = tf.argmax(self.ner_logits_inference, axis=-1, output_type=tf.int32)
 
                 self.re_logits_train, self.num_entities = self._build_re_head(
                     bert_out=bert_out_train, ner_labels=ner_labels_dense
@@ -1493,14 +1492,13 @@ class BertJointModelWithNestedNer(BertJointModel):
 
         # маскирование
         num_tokens = tf.shape(ner_labels)[1]
-        mask = upper_triangular(num_tokens, dtype=tf.float32)
+        mask = upper_triangular(num_tokens, dtype=tf.int32)
         ner_labels *= mask[None, :, :]
 
         # векторизация сущностей
         no_entity_id = self.config["model"]["ner"]["no_entity_id"]
         span_mask = tf.not_equal(ner_labels, no_entity_id)  # [batch_size, num_tokens, num_tokens]
         start_coords, end_coords, num_entities = get_padded_coords_3d(mask_3d=span_mask)
-        # TODO: не забыть добавить в конфиг этот параметр
         if self.config["model"]["re"]["entity_emb_type"] == 0:
             # требуется специальный токен начала и окончания последовательности
             entity_emb_fn = get_entity_embeddings
