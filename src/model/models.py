@@ -1304,6 +1304,8 @@ class BertJointModelWithNestedNer(BertJointModel):
                     indices=self.ner_labels_ph, shape=ner_labels_dense_shape, no_label_id=0
                 )
 
+                ner_preds_inference = tf.argmax(self.ner_logits_inference, axis=-1)
+
                 self.re_logits_train, self.num_entities = self._build_re_head(
                     bert_out=bert_out_train, ner_labels=ner_labels_dense
                 )
@@ -1312,7 +1314,7 @@ class BertJointModelWithNestedNer(BertJointModel):
                     bert_out=bert_out_pred, ner_labels=ner_labels_dense
                 )
                 re_logits_pred_entities, self.num_entities_pred = self._build_re_head(
-                    bert_out=bert_out_pred, ner_labels=self.ner_preds_inference
+                    bert_out=bert_out_pred, ner_labels=ner_preds_inference
                 )
 
                 self.re_labels_true_entities = tf.argmax(re_logits_true_entities, axis=-1)
@@ -1321,6 +1323,7 @@ class BertJointModelWithNestedNer(BertJointModel):
             self._set_loss()
             self._set_train_op()
 
+    # TODO: добавить отношения
     def evaluate(self, examples: List[Example], batch_size: int = 16, **kwargs) -> Dict:
         y_true = []
         y_pred = []

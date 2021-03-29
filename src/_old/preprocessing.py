@@ -335,3 +335,177 @@ class Vocab:
 #         enc.vocabs_events = {k: Vocab(values=v) for k, v in d.items()}
 #
 #         return enc
+
+# def change_tokens_and_entities(x: Example) -> Example:
+#     """
+#     tokens = [иван иванов живёт в деревне жопа]
+#     labels = [B_PER I_PER O O O B_LOC]
+#     entities = [
+#         Entity(tokens=[иван иванов], labels=[B_PER, I_PER], start_token_id=0, end_token_id=2),
+#         Entity(tokens=[жопа], labels=[B_LOC], start_token_id=5, end_token_id=5),
+#     ]
+#
+#
+#     tokens = [PER живёт в деревне LOC]
+#     labels = [B_PER I_PER O O O B_LOC]
+#     entities = [
+#         Entity(tokens=[иван иванов], labels=[B_PER, I_PER], start_token_id=0, end_token_id=0),
+#         Entity(tokens=[жопа], labels=[B_LOC], start_token_id=4, end_token_id=4),
+#     ]
+#     """
+#     x_new = deepcopy(x)
+#     if x_new.entities:
+#         entities_sorted = sorted(x_new.entities, key=lambda e: e.start_token_id)
+#         pointers = [0]
+#         tokens_new = []
+#         for i, entity in enumerate(entities_sorted, 1):
+#             end_prev = pointers[i - 1]
+#             start_curr = entity.start_token_id
+#             tokens_new += x.tokens[end_prev:start_curr]
+#             label = '[{}]'.format(entity.labels[0].split('-')[1])
+#             tokens_new.append(label)
+#             start_new = end_new = len(tokens_new) - 1
+#             end_curr = entity.end_token_id
+#             pointers.append(end_curr + 1)
+#             if i == len(entities_sorted):
+#                 start = entity.end_token_id + 1
+#                 end = len(x.tokens)
+#                 tokens_new += x.tokens[start:end]
+#             entity.start_token_id = start_new
+#             entity.end_token_id = end_new
+#         x_new.tokens = tokens_new
+#     return x_new
+#
+#
+# def convert_example_for_bert(x: Example, tokenizer, tag2token: dict, mode: str, no_rel_id: int = 0) -> List[Example]:
+#     """
+#     https://github.com/facebookresearch/SpanBERT/blob/10641ea3795771dd96e9e3e9ef0ead4f4f6a29d2/code/run_tacred.py#L116
+#
+#     tokens = [иван иванов живёт в деревне жопа]
+#     labels = [B_PER I_PER O O O B_LOC]
+#     entities = [
+#         Entity(id=T1, tokens=[иван иванов], labels=[B_PER, I_PER], start_token_id=0, end_token_id=2),
+#         Entity(id=T2, tokens=[жопа], labels=[B_LOC], start_token_id=5, end_token_id=5),
+#     ]
+#     arc = [ARC(id=R1, head=T1, dep=T2, rel=3)]
+#
+#     # [CLS] <контекст> [START_{HEAD или DEP}] <токены HEAD или DEP> [END_{HEAD или DEP}]
+#     # <контекст> [START_{DEP или HEAD}] <токены DEP или HEAD> [END_{DEP или HEAD}] <контекст>
+#     # [SEP] [таг левого операнда отношения (head)] [SEP] [таг правого операнда отношения (dep)] [SEP]
+#     [
+#         Example(
+#             tokens = [
+#                 [CLS] [START_HEAD] иван иванов [END_HEAD] живёт в деревне
+#                 [START_DEP] жопа [END_DEP] [SEP] [HEAD-PER] [SEP] [DEP-LOC] [SEP]
+#             ],
+#             label = 3
+#         ),
+#         Example(
+#             tokens = [
+#                 [CLS] [START_DEP] иван иванов [END_DEP] живёт в деревне
+#                 [START_HEAD] жопа [END_HEAD] [SEP] [HEAD-LOC] [SEP] [DEP-PER] [SEP]
+#             ],
+#             label = 0
+#         )
+#     ]
+#
+#     в tag2token должны быть токены берта для следующих спец. токенов:
+#     1) '[START_HEAD]', '[END_HEAD]', '[START_DEP]', '[END_DEP]'
+#     2) таги именных сущностей
+#     """
+#     assert mode in {BertEncodings.TEXT, BertEncodings.NER, BertEncodings.TEXT_NER, BertEncodings.NER_TEXT}
+#
+#     arc2rel = {}
+#     for arc in x.arcs:
+#         arc2rel[(arc.head, arc.dep)] = arc.rel
+#
+#     examples_new = []
+#
+#     START_HEAD_TOKEN = tag2token[SpecialSymbols.START_HEAD]
+#     END_HEAD_TOKEN = tag2token[SpecialSymbols.END_HEAD]
+#     START_DEP_TOKEN = tag2token[SpecialSymbols.START_DEP]
+#     END_DEP_TOKEN = tag2token[SpecialSymbols.END_DEP]
+#
+#     token2pieces = {}
+#
+#     def get_pieces(token):
+#         if token not in token2pieces:
+#             token2pieces[token] = tokenizer.tokenize(token)
+#         return token2pieces[token]
+#
+#     id_new = 0
+#     num_entities = len(x.entities)
+#     for id_head in range(num_entities):
+#         for id_dep in range(num_entities):
+#             if id_head == id_dep:
+#                 continue
+#             head = x.entities[id_head]
+#             dep = x.entities[id_dep]
+#
+#             tag_head = "HEAD_" + head.labels[0].split('-')[1]
+#             tag_dep = "DEP_" + dep.labels[0].split('-')[1]
+#
+#             TAG_HEAD_TOKEN = tag2token[tag_head]
+#             TAG_DEP_TOKEN = tag2token[tag_dep]
+#
+#             tokens_new = [SpecialSymbols.CLS]
+#
+#             if mode in {BertEncodings.TEXT, BertEncodings.TEXT_NER}:
+#                 # [HEAD_START] иван иванов [HEAD_END] живёт в деревне [DEP_START] жопа [DEP_END] [SEP]
+#
+#                 for i, pieces in enumerate(map(get_pieces, x.tokens)):
+#
+#                     if i == head.start_token_id:
+#                         tokens_new.append(START_HEAD_TOKEN)
+#                     if i == dep.start_token_id:
+#                         tokens_new.append(START_DEP_TOKEN)
+#
+#                     tokens_new += pieces
+#
+#                     if i == head.end_token_id:
+#                         tokens_new.append(END_HEAD_TOKEN)
+#                     if i == dep.end_token_id:
+#                         tokens_new.append(END_DEP_TOKEN)
+#
+#                 tokens_new.append(SpecialSymbols.SEP)
+#
+#                 if mode == BertEncodings.TEXT_NER:
+#                     # + [HEAD_PER] [SEP] [DEP_LOC] [SEP]
+#                     tokens_new += [TAG_HEAD_TOKEN, SpecialSymbols.SEP, TAG_DEP_TOKEN, SpecialSymbols.SEP]
+#
+#             else:
+#                 # [HEAD_PER] живёт в деревне [DEP_LOC] [SEP]
+#                 head_pieces = []
+#                 dep_pieces = []
+#
+#                 for i, pieces in enumerate(map(get_pieces, x.tokens)):
+#
+#                     if i == head.start_token_id:
+#                         tokens_new.append(TAG_HEAD_TOKEN)
+#                     if i == dep.start_token_id:
+#                         tokens_new.append(TAG_DEP_TOKEN)
+#
+#                     if head.start_token_id <= i <= head.end_token_id:
+#                         head_pieces += pieces
+#                     elif dep.start_token_id <= i <= dep.end_token_id:
+#                         dep_pieces += pieces
+#                     else:
+#                         tokens_new += pieces
+#
+#                 tokens_new.append(SpecialSymbols.SEP)
+#
+#                 if mode == BertEncodings.NER_TEXT:
+#                     # + [иван иванов [SEP] жопа [SEP]]
+#                     tokens_new += head_pieces
+#                     tokens_new.append(SpecialSymbols.SEP)
+#                     tokens_new += dep_pieces
+#                     tokens_new.append(SpecialSymbols.SEP)
+#
+#             token_ids = tokenizer.convert_tokens_to_ids(tokens_new)
+#             rel = arc2rel.get((head.id, dep.id), no_rel_id)
+#             # x.id = <название файла>_<порядковый номер предложения>
+#             # id_new = <x.id>_<порядковый номер отношения>
+#             x_new = Example(id=f'{x.id}_{id_new}', tokens=token_ids, label=rel)
+#             examples_new.append(x_new)
+#             id_new += 1
+#     return examples_new
