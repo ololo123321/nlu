@@ -970,8 +970,10 @@ class BertForRelationExtraction(BertJointModel):
     ner уже решён.
     сущности заменены на соответствующие лейблы: Иван Иванов работает в ООО "Ромашка". -> [PER] работает в [ORG].
     """
-    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
-        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
+    def __init__(self, sess, config=None, re_enc=None, entity_label_to_token_id=None):
+        super().__init__(sess=sess, config=config, ner_enc=None, re_enc=re_enc)
+
+        self.entity_label_to_token_id = entity_label_to_token_id
 
         # так как решается только relation extraction, вывод числа сущностей выводится однозначно.
         # поэтому их можно прокидывать через плейсхолдер
@@ -1067,9 +1069,44 @@ class BertForRelationExtraction(BertJointModel):
 
         return performance_info
 
-    # TODO: implement
     def predict(self, examples: List[Example], batch_size: int = 16):
-        pass
+        for start in range(0, len(examples), batch_size):
+            end = start + batch_size
+            examples_batch = examples[start:end]
+            feed_dict = self._get_feed_dict(examples_batch, training=False)
+            rel_labels_pred = self.sess.run(self.re_labels_true_entities, feed_dict=feed_dict)
+
+            for i, x in enumerate(examples_batch):
+                # re TODO: рассмотреть случаи num_events == 0
+                num_entities_i = len(x.entities)
+                arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
+                assert arcs_pred.shape[0] == num_entities_i, f"{arcs_pred.shape[0]} != {num_entities_i}"
+                assert arcs_pred.shape[1] == num_entities_i, f"{arcs_pred.shape[1]} != {num_entities_i}"
+
+                index2id = {entity.index: entity.id for entity in x.entities}
+                for j, k in zip(*np.where(arcs_pred != 0)):
+                    arc = Arc(
+                        id=f"R{len(x.arcs)}",
+                        head=index2id[j],
+                        dep=index2id[k],
+                        rel=self.inv_re_enc[arcs_pred[j, k]]
+                    )
+                    x.arcs.append(arc)
+
+    def save(self, model_dir: str, force: bool = True):
+        assert self.entity_label_to_token_id is not None
+        super().save(model_dir=model_dir, force=force)
+        with open(os.path.join(model_dir, "entity_label_to_token_id.json"), "w") as f:
+            json.dump(self.entity_label_to_token_id, f, indent=4)
+
+    @classmethod
+    def load(cls, sess, model_dir: str):
+        model = super().load(sess=sess, model_dir=model_dir)
+
+        with open(os.path.join(model_dir, "entity_label_to_token_id.json")) as f:
+            model.entity_label_to_token_id = json.load(f)
+
+        return model
 
     def _get_feed_dict(self, examples: List[Example], training: bool):
         # bert
@@ -1081,8 +1118,6 @@ class BertForRelationExtraction(BertJointModel):
         num_pieces = []
         num_entities = []
         re_labels = []
-
-        label2id = self.config["model"]["bert"]["entity_label_to_token_id"]  # TODO
 
         # filling
         for i, x in enumerate(examples):
@@ -1120,7 +1155,7 @@ class BertForRelationExtraction(BertJointModel):
 
                     # кусочек сущности
                     entity_coords_i.append((i, ptr))
-                    input_ids_i.append(label2id[entity.label])
+                    input_ids_i.append(self.entity_label_to_token_id[entity.label])
                     input_mask_i.append(1)
                     segment_ids_i.append(0)
                     ptr += 1
