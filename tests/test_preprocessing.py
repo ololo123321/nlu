@@ -1,485 +1,151 @@
 import pytest
-from bert.tokenization import FullTokenizer
-from src.preprocessing import Example, Entity, Arc, convert_example_for_bert, BertEncodings, SpecialSymbols
+from src.data.base import Languages, Example, Token, Span
+from src.data.preprocessing import get_sentences_spans, split_example_v1, split_example_v2, apply_bpe
 
 
-@pytest.fixture(scope="module")
-def tokenizer():
-    vocab_file = "/home/datascientist/rubert_cased_L-12_H-768_A-12_v2/vocab.txt"
-    return FullTokenizer(vocab_file=vocab_file, do_lower_case=False)
+# get spans
+
+# TODO: лучше покрыть тестами случаи (w=2, s=1); (w=2, s=2)
+@pytest.mark.parametrize("entity_spans, pointers, window, stride, expected", [
+    # w=1, s=1
+    pytest.param([], [], 1, 1, [], id="no pointers"),
+    pytest.param([], [0, 1], 1, 1, [(0, 1)], id="no entities"),
+    pytest.param([(0, 1)], [0, 2], 1, 1, [(0, 1)], id="one entity"),
+    pytest.param([(0, 1), (2, 3)], [0, 2, 4], 1, 1, [(0, 1), (1, 2)], id="two sentences, one entity in each one"),
+    pytest.param([(0, 1), (1, 2)], [0, 2, 4], 1, 1, [(0, 2)], id="two sentences, bad split"),
+    pytest.param([(0, 1), (1, 2), (4, 5)], [0, 2, 4, 6], 1, 1, [(0, 2), (2, 3)],
+                 id="three sentences, 1st split is bad"),
+    pytest.param([(2, 3), (3, 4), (5, 6)], [0, 2, 4, 6], 1, 1, [(0, 1), (1, 3)],
+                 id="three sentences, 2nd split is bad"),
+    pytest.param([(1, 2), (3, 4)], [0, 2, 4, 6], 1, 1, [(0, 3)],
+                 id="three sentences, all splits are bad"),
+    # w=2, s=1
+    pytest.param([(0, 1), (2, 3)], [0, 2, 4], 2, 1, [(0, 2)]),
+    pytest.param([(0, 1), (2, 3), (4, 5)], [0, 2, 4, 6], 2, 1, [(0, 2), (1, 3)]),
+    pytest.param([(0, 1), (2, 5)], [0, 2, 4, 6], 2, 1, [(0, 3)]),
+    # w=2, s=2
+    pytest.param([(0, 1), (2, 3), (4, 5)], [0, 2, 4, 6], 2, 2, [(0, 2), (2, 3)]),
+])
+def test_get_sentences_spans(entity_spans, pointers, window, stride, expected):
+    actual = get_sentences_spans(
+        entity_spans=entity_spans,
+        pointers=pointers,
+        window=window,
+        stride=stride
+    )
+    # print(actual)
+    assert actual == expected
 
 
-@pytest.mark.parametrize("example, expected", [
+def test_get_sentences_spans_raise():
+    # pointers состоит из одного элемента
+    with pytest.raises(AssertionError):
+        get_sentences_spans(entity_spans=[], pointers=[1])
+
+    # первый элемент pointers не ноль
+    with pytest.raises(AssertionError):
+        get_sentences_spans(entity_spans=[], pointers=[1, 2])
+
+    # stride > window
+    with pytest.raises(AssertionError):
+        get_sentences_spans(entity_spans=[], pointers=[], stride=2, window=1)
+
+
+# split example
+
+
+def _test_split_example(split_fn, example, window, stride, expected_num_chunks):
+    chunks = split_fn(example=example, window=window, stride=stride, lang=Languages.RU)
+    assert len(chunks) == expected_num_chunks
+    for chunk in chunks:
+        for t in chunk.tokens:
+            expected = t.text
+            actual = chunk.text[t.span_rel[0]:t.span_rel[1]]
+            assert actual == expected, f"{actual} != {expected}"
+            actual = example.text[t.span_abs[0]:t.span_abs[1]]
+            assert actual == expected, f"{actual} != {expected}"
+        for entity in chunk.entities:
+            for t_link in entity.tokens:
+                t_original = chunk.tokens[t_link.index_rel]
+                assert id(t_link) == id(t_original)
+
+
+# TODO: рассмотреть случай, при котором в исходном примере есть сущности, отношения
+@pytest.mark.parametrize("example, window, stride, expected_num_chunks", [
+    # no entities
     pytest.param(
         Example(
             id="0",
-            text="",
-            tokens=[],
-            labels=[],
-            entities=[],
-            arcs=[]
-        ),
-        [
-            Example(text="", tokens=[], labels=[], entities=[], arcs=[])
-        ],
-        id="0"
+            text="Мама мыла раму.",
+            tokens=[
+                Token(text="Мама", span_abs=Span(0, 4)),
+                Token(text="мыла", span_abs=Span(5, 9)),
+                Token(text="раму", span_abs=Span(10, 14)),
+                Token(text=".", span_abs=Span(14, 15)),
+            ]
+        ), 1, 1, 1,
+        id="one chunk, no entities"
     ),
     pytest.param(
         Example(
             id="0",
-            text="foo",
-            tokens=["foo"],
-            labels=["O"],
-            entities=[
-                Entity(id=0, start_token_id=0, end_token_id=0)
-            ],
-            arcs=[]
-        ),
-        [
-            Example(
-                id="0",
-                text="foo",
-                tokens=["foo"],
-                labels=["O"],
-                entities=[
-                    Entity(id=0, start_token_id=0, end_token_id=0)
-                ],
-                arcs=[]
-            )
-        ],
-        id="00"
-    ),
-    pytest.param(
-        Example(
-            id="0",
-            text="Foo. Bar.",
-            tokens=["Foo", ".", "Bar", "."],
-            labels=["U_ORG", "O", "U_LOC", "O"],
-            entities=[],
-            arcs=[]
-        ),
-        [
-            Example(
-                id="0",
-                text="Foo.",
-                tokens=["Foo", "."],
-                labels=["U_ORG", "O"],
-                entities=[],
-                arcs=[]
-            ),
-            Example(
-                id="0",
-                text="Bar.",
-                tokens=["Bar", "."],
-                labels=["U_LOC", "O"],
-                entities=[],
-                arcs=[]
-            ),
-        ],
-        id="1"
-    ),
-    pytest.param(
-        Example(
-            id="0",
-            text="Foo. Bar.",
-            tokens=["Foo", ".", "Bar", "."],
-            labels=["B_ORG", "I_ORG", "I_ORG", "L_ORG"],
-            entities=[
-                Entity(id=0, start_token_id=0, end_token_id=3)
-            ],
-            arcs=[]
-        ),
-        [
-            Example(
-                id="0",
-                text="Foo. Bar.",
-                tokens=["Foo", ".", "Bar", "."],
-                labels=["B_ORG", "I_ORG", "I_ORG", "L_ORG"],
-                entities=[
-                    Entity(id=0, start_token_id=0, end_token_id=3)
-                ],
-                arcs=[]
-            ),
-        ],
-        id="2"
-    ),
-    pytest.param(
-        Example(
-            id="0",
-            text="Foo. Bar. Baz.",
-            tokens=["Foo", '.', 'Bar', '.', 'Baz', '.'],
-            labels=["B_ORG", "I_ORG", "I_ORG", "I_ORG", "O", "O"],
-            entities=[
-                Entity(id=0, start_token_id=0, end_token_id=3)
-            ],
-            arcs=[]
-        ),
-        [
-            Example(
-                id="0",
-                text="Foo. Bar.",
-                tokens=["Foo", '.', 'Bar', '.'],
-                labels=["B_ORG", "I_ORG", "I_ORG", "I_ORG"],
-                entities=[
-                    Entity(id=0, start_token_id=0, end_token_id=3)
-                ],
-                arcs=[]
-            ),
-            Example(
-                id="0",
-                text="Baz.",
-                tokens=['Baz', '.'],
-                labels=["O", "O"],
-                entities=[],
-                arcs=[]
-            )
-        ],
-        id="3"
-    ),
-    pytest.param(
-        Example(
-            id="0",
-            text="Foo. Bar. Baz.",
-            tokens=["Foo", '.', 'Bar', '.', 'Baz', '.'],
-            labels=["B_ORG", "I_ORG", "I_ORG", "I_ORG", "O", "O"],
-            entities=[
-                Entity(id=0, start_token_id=0, end_token_id=4)
-            ],
-            arcs=[]
-        ),
-        [
-            Example(
-                id="0",
-                text="Foo. Bar. Baz.",
-                tokens=["Foo", '.', 'Bar', '.', 'Baz', '.'],
-                labels=["B_ORG", "I_ORG", "I_ORG", "I_ORG", "O", "O"],
-                entities=[
-                    Entity(id=0, start_token_id=0, end_token_id=4)
-                ],
-                arcs=[]
-            )
-        ],
-        id="4"
-    ),
-    pytest.param(
-        Example(
-            id="0",
-            text="Foo. Bar. Baz.",
-            tokens=["Foo", '.', 'Bar', '.', 'Baz', '.'],
-            labels=["B_ORG", "I_ORG", "I_ORG", "I_ORG", "I_ORG", "L_ORG"],
-            entities=[
-                Entity(id=0, start_token_id=0, end_token_id=5)
-            ],
-            arcs=[]
-        ),
-        [
-            Example(
-                id="0",
-                text="Foo. Bar. Baz.",
-                tokens=["Foo", '.', 'Bar', '.', 'Baz', '.'],
-                labels=["B_ORG", "I_ORG", "I_ORG", "I_ORG", "I_ORG", "L_ORG"],
-                entities=[
-                    Entity(id=0, start_token_id=0, end_token_id=5)
-                ],
-                arcs=[]
-            )
-        ],
-        id="5"
-    ),
-    pytest.param(
-        Example(
-            id="0",
-            text="Foo. Bar. Baz.",
-            tokens=["Foo", '.', 'Bar', '.', 'Baz', '.'],
-            labels=["O", "O", "B_ORG", "I_ORG", "I_ORG", "L_ORG"],
-            entities=[
-                Entity(id=0, start_token_id=2, end_token_id=5)
-            ],
-            arcs=[]
-        ),
-        [
-            Example(
-                id="0",
-                text="Foo.",
-                tokens=["Foo", '.'],
-                labels=["O", "O"],
-                entities=[],
-                arcs=[]
-            ),
-            Example(
-                id="0",
-                text="Bar. Baz.",
-                tokens=['Bar', '.', 'Baz', '.'],
-                labels=["B_ORG", "I_ORG", "I_ORG", "L_ORG"],
-                entities=[
-                    Entity(id=0, start_token_id=2, end_token_id=5)
-                ],
-                arcs=[]
-            ),
-        ],
-        id="6"
-    ),
-    pytest.param(
-        Example(
-            id="0",
-            text="Foo. Bar. Baz.",
-            tokens=["Foo", '.', 'Bar', '.', 'Baz', '.'],
-            labels=["O", "O", "B_ORG", "L_ORG", "B_ORG", "L_ORG"],
-            entities=[
-                Entity(id=0, start_token_id=2, end_token_id=3),
-                Entity(id=1, start_token_id=4, end_token_id=5)
-            ],
-            arcs=[]
-        ),
-        [
-            Example(
-                id="0",
-                text="Foo.",
-                tokens=["Foo", '.'],
-                labels=["O", "O"],
-                entities=[],
-                arcs=[]
-            ),
-            Example(
-                id="0",
-                text="Bar.",
-                tokens=["Bar", '.'],
-                labels=["B_ORG", "L_ORG"],
-                entities=[
-                    Entity(id=0, start_token_id=2, end_token_id=3)
-                ],
-                arcs=[]
-            ),
-            Example(
-                id="0",
-                text="Baz.",
-                tokens=["Baz", '.'],
-                labels=["B_ORG", "L_ORG"],
-                entities=[
-                    Entity(id=1, start_token_id=4, end_token_id=5)
-                ],
-                arcs=[]
-            ),
-        ],
-        id="7"
-    ),
-    pytest.param(
-        Example(
-            id="0",
-            text="Foo. Bar. Baz.",
-            tokens=["Foo", '.', 'Bar', '.', 'Baz', '.'],
-            labels=["B_ORG", "L_ORG", "B_ORG", "I_ORG", "L_ORG", "O"],
-            entities=[
-                Entity(id=0, start_token_id=0, end_token_id=1),
-                Entity(id=1, start_token_id=2, end_token_id=4)
-            ],
-            arcs=[]
-        ),
-        [
-            Example(
-                id="0",
-                text="Foo.",
-                tokens=["Foo", '.'],
-                labels=["B_ORG", "L_ORG"],
-                entities=[
-                    Entity(id=0, start_token_id=0, end_token_id=1)
-                ],
-                arcs=[]
-            ),
-            Example(
-                id="0",
-                text="Bar. Baz.",
-                tokens=['Bar', '.', 'Baz', '.'],
-                labels=["B_ORG", "I_ORG", "L_ORG", "O"],
-                entities=[
-                    Entity(id=1, start_token_id=4, end_token_id=3)
-                ],
-                arcs=[]
-            )
-        ],
-        id="8"
-    ),
-    pytest.param(
-        Example(
-            id="0",
-            text="Foo. Bar. Baz.",
-            tokens=["Foo", '.', 'Bar', '.', 'Baz', '.'],
-            labels=["B_ORG", "L_ORG", "B_ORG", "I_ORG", "L_ORG", "O"],
-            entities=[
-                Entity(id=0, start_token_id=0, end_token_id=1),
-                Entity(id=1, start_token_id=2, end_token_id=4)
-            ],
-            arcs=[Arc(id=0, head=0, dep=1, rel=0)]
-        ),
-        [
-            Example(
-                id="0",
-                text="Foo.",
-                tokens=["Foo", '.'],
-                labels=["B_ORG", "L_ORG"],
-                entities=[
-                    Entity(id=0, start_token_id=0, end_token_id=1)
-                ],
-                arcs=[]
-            ),
-            Example(
-                id="0",
-                text="Bar. Baz.",
-                tokens=['Bar', '.', 'Baz', '.'],
-                labels=["B_ORG", "I_ORG", "L_ORG", "O"],
-                entities=[
-                    Entity(id=1, start_token_id=4, end_token_id=3)
-                ],
-                arcs=[]
-            )
-        ],
-        id="9; relation between entities in different sentences"
-    ),
-    pytest.param(
-        Example(
-            id="0",
-            text="Foo Bar",
-            tokens=["Foo", 'Bar'],
-            labels=["U_ORG", "U_PER"],
-            entities=[
-                Entity(id=0, start_token_id=0, end_token_id=0),
-                Entity(id=1, start_token_id=1, end_token_id=1)
-            ],
-            arcs=[Arc(id=0, head=0, dep=1, rel=0)]
-        ),
-        [
-            Example(
-                id="0",
-                text="Foo Bar",
-                tokens=["Foo", 'Bar'],
-                labels=["U_ORG", "U_PER"],
-                entities=[
-                    Entity(id=0, start_token_id=0, end_token_id=0),
-                    Entity(id=1, start_token_id=1, end_token_id=1)
-                ],
-                arcs=[Arc(id=0, head=0, dep=1, rel=0)]
-            ),
-        ],
-        id="10; relation between entities in one sentence"
+            text="Мама мыла раму. Мама - молодец.",
+            tokens=[
+                Token(text="Мама", span_abs=Span(0, 4)),
+                Token(text="мыла", span_abs=Span(5, 9)),
+                Token(text="раму", span_abs=Span(10, 14)),
+                Token(text=".", span_abs=Span(14, 15)),
+                Token(text="Мама", span_abs=Span(16, 20)),
+                Token(text="-", span_abs=Span(21, 22)),
+                Token(text="молодец", span_abs=Span(23, 30)),
+                Token(text=".", span_abs=Span(30, 31))
+            ]
+        ), 1, 1, 2,
+        id="two chunks, no entities"
     )
 ])
-def test_example_chunks_sentences(example, expected):
-    chunks = example.chunks
-    # print(chunks)
-
-    assert len(chunks) == len(expected)
-
-    for x_actual, x_expected in zip(chunks, expected):
-        assert x_actual.text == x_expected.text
-        assert x_actual.tokens == x_expected.tokens
-        assert x_actual.labels == x_expected.labels
-        assert {x.id for x in x_actual.entities} == {x.id for x in x_expected.entities}
-        assert {x.id for x in x_actual.arcs} == {x.id for x in x_expected.arcs}
+def test_split_example(example, window, stride, expected_num_chunks):
+    _test_split_example(split_example_v1, example, window, stride, expected_num_chunks)
+    _test_split_example(split_example_v2, example, window, stride, expected_num_chunks)
 
 
-TAG2TOKEN = {
-    "HEAD_PER": "[unused1]",
-    "DEP_PER": "[unused2]",
-    "HEAD_LOC": "[unused3]",
-    "DEP_LOC": "[unused4]",
-    SpecialSymbols.START_HEAD: "[unused5]",
-    SpecialSymbols.START_DEP: "[unused6]",
-    SpecialSymbols.END_HEAD: "[unused7]",
-    SpecialSymbols.END_DEP: "[unused8]",
-}
+# apply bpe
 
 
-# TODO: тесты других модов
+class Tokenizer:
+    vocab = {
+        "мама": ["мама"],
+        "мыла": ["мы", "#ла"],
+        "раму": ["ра", "#м", "#у"]
+    }
+    @classmethod
+    def tokenize(cls, text: str):
+        return cls.vocab[text]
 
-@pytest.mark.parametrize("example, mode, expected", [
+    @staticmethod
+    def convert_tokens_to_ids(tokens):
+        return [0] * len(tokens)
+
+
+@pytest.mark.parametrize("example, expected_pieces, expected_labels", [
     pytest.param(
         Example(
-            id="0",
-            tokens=["Мама", "мыла", "раму"],
-            entities=[],
-            arcs=[]
-        ),
-        BertEncodings.NER,
-        []
-    ),
-    pytest.param(
-        Example(
-            id="0",
-            tokens=["Иван", "Иванов", "мыл", "раму"],
-            entities=[
-                Entity(id="T1", start_token_id=0, end_token_id=1, labels=["B-PER", "L-PER"]),
-            ],
-            arcs=[]
-        ),
-        BertEncodings.NER,
-        []
-    ),
-    pytest.param(
-        Example(
-            id="0",
-            tokens=["Иван", "Иванов", "живёт", "в", "деревне", "Жопа"],
-            entities=[
-                Entity(id="T1", start_token_id=0, end_token_id=1, labels=["B-PER", "L-PER"]),
-                Entity(id="T2", start_token_id=5, end_token_id=5, labels=["B-LOC", "L-LOC"]),
-            ],
-            arcs=[]
-        ),
-        BertEncodings.NER,
-        [
-            Example(
-                id="0_0",
-                tokens=["[CLS]", "[unused1]", "живёт", "в", "деревне", "[unused4]", "[SEP]"],
-                label=0
-            ),
-            Example(
-                id="0_1",
-                tokens=["[CLS]", "[unused2]", "живёт", "в", "деревне", "[unused3]", "[SEP]"],
-                label=0
-            )
-        ]
-    ),
-    pytest.param(
-        Example(
-            id="0",
-            tokens=["Иван", "Иванов", "живёт", "в", "деревне", "Жопа"],
-            entities=[
-                Entity(id="T1", start_token_id=0, end_token_id=1, labels=["B-PER", "L-PER"]),
-                Entity(id="T2", start_token_id=5, end_token_id=5, labels=["B-LOC", "L-LOC"]),
-            ],
-            arcs=[
-                Arc(id="R1", head="T1", dep="T2", rel=1)
+            tokens=[
+                Token(text="мама", labels=["B-PER"]),
+                Token(text="мыла", labels=["I-PER"]),
+                Token(text="раму", labels=["O"])
             ]
         ),
-        BertEncodings.NER,
-        [
-            Example(
-                id="0_0",
-                tokens=["[CLS]", "[unused1]", "живёт", "в", "деревне", "[unused4]", "[SEP]"],
-                label=1
-            ),
-            Example(
-                id="0_1",
-                tokens=["[CLS]", "[unused2]", "живёт", "в", "деревне", "[unused3]", "[SEP]"],
-                label=0
-            )
-        ]
+        ["мама", "мы", "#ла", "ра", "#м", "#у"],
+        ["B-PER", "I-PER", "I-PER", "O", "O", "O"]
     )
 ])
-def test_convert_example_for_bert(tokenizer, example, mode, expected):
-    actual = convert_example_for_bert(
-        example,
-        tokenizer=tokenizer,
-        tag2token=TAG2TOKEN,
-        mode=mode,
-        no_rel_id=0
-    )
-    for x in actual:
-        x.tokens = tokenizer.convert_ids_to_tokens(x.tokens)
-
-    # print(actual)
-
-    assert len(actual) == len(expected)
-    for x_actual, x_expected in zip(actual, expected):
-        assert x_actual.id == x_expected.id
-        assert x_actual.tokens == x_expected.tokens
-        assert x_actual.label == x_expected.label
+def test_apply_bpe(example, expected_pieces, expected_labels):
+    apply_bpe(example=example, tokenizer=Tokenizer, ner_prefix_joiner="-", ner_encoding="bio")
+    actual_pieces = []
+    actual_labels = []
+    for t in example.tokens:
+        actual_pieces += t.pieces
+        actual_labels += t.labels_pieces
+    assert actual_pieces == expected_pieces
+    assert actual_labels == expected_labels

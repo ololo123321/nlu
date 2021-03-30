@@ -4,3 +4,4 @@ bert-tensorflow==1.0.1
 numpy
 pytest==5.3.2
 rusenttokenize==0.0.5
+nltk
