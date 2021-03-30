@@ -1,5 +1,7 @@
 import random
 import os
+import json
+import shutil
 from typing import Dict, List, Callable, Tuple
 from itertools import chain
 from abc import ABC, abstractmethod
@@ -35,9 +37,21 @@ class BaseModel(ABC):
     ner_scope = "ner"
     re_scope = "re"
 
-    def __init__(self, sess, config):
+    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         self.sess = sess
         self.config = config
+        self.ner_enc = ner_enc
+        self.re_enc = re_enc
+
+        if self.ner_enc is not None:
+            self.inv_ner_enc = {v: k for k, v in self.ner_enc.items()}
+        else:
+            self.inv_ner_enc = None
+
+        if self.re_enc is not None:
+            self.inv_re_enc = {v: k for k, v in self.re_enc.items()}
+        else:
+            self.re_enc = None
 
         self.loss = None
         self.train_op = None
@@ -63,11 +77,11 @@ class BaseModel(ABC):
         pass
 
     @abstractmethod
-    def predict(self, examples: List[Example], batch_size: int = 16, **kwargs):
+    def predict(self, examples: List[Example], batch_size: int = 16):
         pass
 
     @abstractmethod
-    def evaluate(self, examples: List[Example], batch_size: int = 16, **kwargs) -> Dict:
+    def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
         """
         Возвращаемый словарь должен обязательно содержать ключи "score" и "loss"
         """
@@ -81,7 +95,6 @@ class BaseModel(ABC):
             train_op_name: str = "train_op",
             checkpoint_path: str = None,
             scope_to_save: str = None,
-            **kwargs
     ):
         train_loss = []
 
@@ -124,7 +137,7 @@ class BaseModel(ABC):
             if step != 0 and step % epoch_steps == 0:
 
                 print(f"epoch {epoch} finished. evaluation starts.")
-                performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size, **kwargs)
+                performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size)
                 score = performance_info["score"]
 
                 if score > best_score:
@@ -168,16 +181,71 @@ class BaseModel(ABC):
 
                 epoch += 1
 
-    def restore(self, model_dir: str):
+    def save(self, model_dir: str, force: bool = True):
+        assert self.config is not None
+        assert self.sess is not None
+
+        if force:
+            try:
+                shutil.rmtree(model_dir)
+            except:
+                pass
+        else:
+            assert not os.path.exists(model_dir), \
+                f'dir {model_dir} already exists. exception raised due to flag "force" was set to "True"'
+
         var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.model_scope)
         saver = tf.train.Saver(var_list)
         checkpoint_path = os.path.join(model_dir, "model.ckpt")
-        saver.restore(self.sess, checkpoint_path)
+        saver.save(self.sess, checkpoint_path)
+
+        with open(os.path.join(model_dir, "config.json"), "w") as f:
+            json.dump(self.config, f, indent=4)
+
+        if self.ner_enc is not None:
+            with open(os.path.join(model_dir, "ner_enc.json"), "w") as f:
+                json.dump(self.ner_enc, f, indent=4)
+
+        if self.re_enc is not None:
+            with open(os.path.join(model_dir, "re_enc.json"), "w") as f:
+                json.dump(self.re_enc, f, indent=4)
+
+    @classmethod
+    def load(cls, sess, model_dir: str):
+
+        with open(os.path.join(model_dir, "config.json")) as f:
+            config = json.load(f)
+
+        ner_enc_path = os.path.join(model_dir, "ner_enc.json")
+        if os.path.exists(ner_enc_path):
+            with open(ner_enc_path) as f:
+                ner_enc = json.load(f)
+        else:
+            ner_enc = None
+
+        re_enc_path = os.path.join(model_dir, "ner_enc.json")
+        if os.path.exists(re_enc_path):
+            with open(re_enc_path) as f:
+                re_enc = json.load(f)
+        else:
+            re_enc = None
+
+        model = cls(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
+
+        model.build()
+
+        var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=model.model_scope)
+        saver = tf.train.Saver(var_list)
+        checkpoint_path = os.path.join(model_dir, "model.ckpt")
+        saver.restore(sess, checkpoint_path)
+        model.init_uninitialized()
+
+        return model
 
     def initialize(self):
-        self._init_uninitialized()
+        self.init_uninitialized()
 
-    def _init_uninitialized(self):
+    def init_uninitialized(self):
         global_vars = tf.global_variables()
         is_not_initialized = self.sess.run([tf.is_variable_initialized(var) for var in global_vars])
         not_initialized_vars = [v for v, flag in zip(global_vars, is_not_initialized) if not flag]
@@ -197,7 +265,7 @@ class BertJointModel(BaseModel):
     https://arxiv.org/abs/1812.11275
     """
 
-    def __init__(self, sess, config):
+    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         """
         config = {
             "model": {
@@ -262,7 +330,7 @@ class BertJointModel(BaseModel):
             }
         }
         """
-        super().__init__(sess=sess, config=config)
+        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
 
         # PLACEHOLDERS
         # bert
@@ -371,7 +439,6 @@ class BertJointModel(BaseModel):
             scope_to_save: str = None,
             verbose: bool = True,
             verbose_fn: Callable = None,
-            **kwargs
     ):
         """
 
@@ -384,7 +451,6 @@ class BertJointModel(BaseModel):
         :param verbose:
         :param verbose_fn: вход - словарь с метриками (выход self.evaluate); выход - None. функция должна вывести
                            релевантные метрики в stdout
-        :param kwargs:
         :return:
         """
         epoch = 1
@@ -414,7 +480,7 @@ class BertJointModel(BaseModel):
             if step != 0 and step % epoch_steps == 0:
 
                 print(f"epoch {epoch} finished. evaluation starts.")
-                performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size, **kwargs)
+                performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size)
                 if verbose is not None:
                     verbose_fn(performance_info)
                 score = performance_info["score"]
@@ -445,7 +511,7 @@ class BertJointModel(BaseModel):
             print(f"restoring model from {checkpoint_path}")
             saver.restore(self.sess, checkpoint_path)
 
-    def evaluate(self, examples: List[Example], batch_size: int = 16, **kwargs) -> Dict:
+    def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
         """
         metrics = {
             "ner": {},
@@ -460,8 +526,6 @@ class BertJointModel(BaseModel):
         y_pred_re = []
 
         no_rel_id = self.config["model"]["re"]["no_relation_id"]
-        id_to_ner_label = kwargs["id_to_ner_label"]
-        id_to_re_label = kwargs["id_to_re_label"]
 
         loss = 0.0
         loss_ner = 0.0
@@ -493,7 +557,7 @@ class BertJointModel(BaseModel):
                 y_pred_ner_i = []
                 for j, t in enumerate(x.tokens):
                     y_true_ner_i.append(t.labels[0])
-                    y_pred_ner_i.append(id_to_ner_label[ner_labels_pred[i, j]])
+                    y_pred_ner_i.append(self.inv_ner_enc[ner_labels_pred[i, j]])
                 y_true_ner.append(y_true_ner_i)
                 y_pred_ner.append(y_pred_ner_i)
 
@@ -510,8 +574,8 @@ class BertJointModel(BaseModel):
                 arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
                 assert arcs_pred.shape[0] == num_entities_i, f"{arcs_pred.shape[0]} != {num_entities_i}"
                 assert arcs_pred.shape[1] == num_entities_i, f"{arcs_pred.shape[1]} != {num_entities_i}"
-                y_true_re += [id_to_re_label[j] for j in arcs_true.flatten()]
-                y_pred_re += [id_to_re_label[j] for j in arcs_pred.flatten()]
+                y_true_re += [self.inv_re_enc[j] for j in arcs_true.flatten()]
+                y_pred_re += [self.inv_re_enc[j] for j in arcs_pred.flatten()]
 
             num_batches += 1
 
@@ -554,15 +618,13 @@ class BertJointModel(BaseModel):
 
         return performance_info
 
-    def predict(self, examples: List[Example], batch_size: int = 16, **kwargs):
+    def predict(self, examples: List[Example], batch_size: int = 16):
         """
         ner - запись лейблов в Token.labels_pred
         re - создание новых инстансов Arc и запись их в Example.arcs_pred
         TODO: реализовать группировку токенов в сущности
         """
         no_rel_id = self.config["model"]["re"]["no_relation_id"]
-        id_to_ner_label = kwargs["id_to_ner_label"]
-        id_to_re_label = kwargs["id_to_re_label"]
 
         for start in range(0, len(examples), batch_size):
             end = start + batch_size
@@ -579,14 +641,14 @@ class BertJointModel(BaseModel):
                 # ner
                 for j, t in enumerate(x.tokens):
                     id_label = ner_labels_pred[i, j]
-                    t.labels_pred.append(id_to_ner_label[id_label])
+                    t.labels_pred.append(self.inv_ner_enc[id_label])
 
                 # re
                 num_entities_i = num_entities[i]
                 arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
                 for j, k in zip(*np.where(arcs_pred != no_rel_id)):
                     id_label = arcs_pred[j, k]
-                    arc = Arc(id=f"{j}_{k}", head=j, dep=k, rel=id_to_re_label[id_label])
+                    arc = Arc(id=f"{j}_{k}", head=j, dep=k, rel=self.inv_re_enc[id_label])
                     x.arcs_pred.append(arc)
 
     def initialize(self):
@@ -600,7 +662,7 @@ class BertJointModel(BaseModel):
         checkpoint_path = os.path.join(bert_dir, "bert_model.ckpt")
         saver.restore(self.sess, checkpoint_path)
 
-        self._init_uninitialized()
+        self.init_uninitialized()
 
     def set_train_op_head(self):
         """
@@ -908,8 +970,8 @@ class BertForRelationExtraction(BertJointModel):
     ner уже решён.
     сущности заменены на соответствующие лейблы: Иван Иванов работает в ООО "Ромашка". -> [PER] работает в [ORG].
     """
-    def __init__(self, sess, config):
-        super().__init__(sess=sess, config=config)
+    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
+        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
 
         # так как решается только relation extraction, вывод числа сущностей выводится однозначно.
         # поэтому их можно прокидывать через плейсхолдер
@@ -948,7 +1010,7 @@ class BertForRelationExtraction(BertJointModel):
             self._set_loss()
             self._set_train_op()
 
-    def evaluate(self, examples: List[Example], batch_size: int = 16, **kwargs) -> Dict:
+    def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
         """
         metrics = {
             "ner": {},
@@ -960,7 +1022,6 @@ class BertForRelationExtraction(BertJointModel):
         y_pred_re = []
 
         no_rel_id = self.config["model"]["re"]["no_relation_id"]
-        id_to_re_label = kwargs["id_to_re_label"]
 
         loss = 0.0
         num_batches = 0
@@ -985,8 +1046,8 @@ class BertForRelationExtraction(BertJointModel):
                 arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
                 assert arcs_pred.shape[0] == num_entities_i, f"{arcs_pred.shape[0]} != {num_entities_i}"
                 assert arcs_pred.shape[1] == num_entities_i, f"{arcs_pred.shape[1]} != {num_entities_i}"
-                y_true_re += [id_to_re_label[j] for j in arcs_true.flatten()]
-                y_pred_re += [id_to_re_label[j] for j in arcs_pred.flatten()]
+                y_true_re += [self.inv_re_enc[j] for j in arcs_true.flatten()]
+                y_pred_re += [self.inv_re_enc[j] for j in arcs_pred.flatten()]
 
             num_batches += 1
 
@@ -1007,7 +1068,7 @@ class BertForRelationExtraction(BertJointModel):
         return performance_info
 
     # TODO: implement
-    def predict(self, examples: List[Example], batch_size: int = 16, **kwargs):
+    def predict(self, examples: List[Example], batch_size: int = 16):
         pass
 
     def _get_feed_dict(self, examples: List[Example], training: bool):
@@ -1159,13 +1220,13 @@ class BertForRelationExtraction(BertJointModel):
 
 
 class BertJointModelV2(BertJointModel):
-    def __init__(self, sess, config):
+    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         """
         Изменения в config:
         - model.ner.start_ids
         + model.ner.{token_start_ids, entity_start_ids, event_start_ids}
         """
-        super().__init__(sess=sess, config=config)
+        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
 
     def _get_entities_representation(self, bert_out: tf.Tensor, ner_labels: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         assert self.ner_emb is not None
@@ -1266,10 +1327,10 @@ class BertJointModelWithNestedNer(BertJointModel):
 
     решается только NER
     """
-    def __init__(self, sess, config):
-        super().__init__(sess=sess, config=config)
-        self.ner_logits_inference = None
+    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
+        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
 
+        self.ner_logits_inference = None
         self.tokens_pair_enc = None
 
     def build(self):
@@ -1337,7 +1398,7 @@ class BertJointModelWithNestedNer(BertJointModel):
             self._set_loss()
             self._set_train_op()
 
-    def evaluate(self, examples: List[Example], batch_size: int = 16, **kwargs) -> Dict:
+    def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
         y_true_ner = []
         y_pred_ner = []
 
@@ -1346,8 +1407,6 @@ class BertJointModelWithNestedNer(BertJointModel):
 
         no_entity_id = self.config["model"]["ner"]["no_entity_id"]
         no_rel_id = self.config["model"]["re"]["no_relation_id"]
-        id_to_ner_label = kwargs["id_to_ner_label"]
-        id_to_re_label = kwargs["id_to_re_label"]
 
         loss = 0.0
         loss_ner = 0.0
@@ -1386,8 +1445,8 @@ class BertJointModelWithNestedNer(BertJointModel):
                 for span in spans_filtered:
                     spans_pred[span.start, span.end] = span.label
 
-                y_true_ner += [id_to_ner_label[j] for j in spans_true.flatten()]
-                y_pred_ner += [id_to_ner_label[j] for j in spans_pred.flatten()]
+                y_true_ner += [self.inv_ner_enc[j] for j in spans_true.flatten()]
+                y_pred_ner += [self.inv_ner_enc[j] for j in spans_pred.flatten()]
 
                 # re
                 num_entities_i = num_entities[i]
@@ -1403,8 +1462,8 @@ class BertJointModelWithNestedNer(BertJointModel):
                 arcs_pred = re_labels_pred[i, :num_entities_i, :num_entities_i]
                 assert arcs_pred.shape[0] == num_entities_i, f"{arcs_pred.shape[0]} != {num_entities_i}"
                 assert arcs_pred.shape[1] == num_entities_i, f"{arcs_pred.shape[1]} != {num_entities_i}"
-                y_true_re += [id_to_re_label[j] for j in arcs_true.flatten()]
-                y_pred_re += [id_to_re_label[j] for j in arcs_pred.flatten()]
+                y_true_re += [self.inv_re_enc[j] for j in arcs_true.flatten()]
+                y_pred_re += [self.inv_re_enc[j] for j in arcs_pred.flatten()]
 
             num_batches += 1
 
@@ -1415,7 +1474,7 @@ class BertJointModelWithNestedNer(BertJointModel):
         loss_re /= num_batches
 
         # ner
-        trivial_label = id_to_ner_label[no_entity_id]
+        trivial_label = self.inv_ner_enc[no_entity_id]
         ner_metrics = classification_report(y_true=y_true_ner, y_pred=y_pred_ner, trivial_label=trivial_label)
 
         # re
@@ -1658,8 +1717,8 @@ class BertJointModelWithNestedNer(BertJointModel):
 
 # TODO: проверить работоспособность
 class ElmoJointModel(BertJointModel):
-    def __init__(self, sess, config):
-        super().__init__(sess=sess, config=config)
+    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
+        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
 
         self.tokens_ph = None
         self.ner_logits = None
@@ -1841,4 +1900,4 @@ class ElmoJointModel(BertJointModel):
         self.train_op = self.train_op_head
 
     def initialize(self):
-        self._init_uninitialized()
+        self.init_uninitialized()
