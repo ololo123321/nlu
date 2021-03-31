@@ -181,7 +181,7 @@ class BaseModel(ABC):
 
                 epoch += 1
 
-    def save(self, model_dir: str, force: bool = True):
+    def save(self, model_dir: str, force: bool = True, scope_to_save: str = None):
         assert self.config is not None
         assert self.sess is not None
 
@@ -194,7 +194,14 @@ class BaseModel(ABC):
             assert not os.path.exists(model_dir), \
                 f'dir {model_dir} already exists. exception raised due to flag "force" was set to "True"'
 
-        var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.model_scope)
+        os.makedirs(model_dir, exist_ok=True)
+
+        if scope_to_save is not None:
+            scope = scope_to_save
+        else:
+            scope = self.model_scope
+
+        var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope)
         saver = tf.train.Saver(var_list)
         checkpoint_path = os.path.join(model_dir, "model.ckpt")
         saver.save(self.sess, checkpoint_path)
@@ -211,7 +218,7 @@ class BaseModel(ABC):
                 json.dump(self.re_enc, f, indent=4)
 
     @classmethod
-    def load(cls, sess, model_dir: str):
+    def load(cls, sess, model_dir: str, scope_to_load: str = None):
 
         with open(os.path.join(model_dir, "config.json")) as f:
             config = json.load(f)
@@ -223,7 +230,7 @@ class BaseModel(ABC):
         else:
             ner_enc = None
 
-        re_enc_path = os.path.join(model_dir, "ner_enc.json")
+        re_enc_path = os.path.join(model_dir, "re_enc.json")
         if os.path.exists(re_enc_path):
             with open(re_enc_path) as f:
                 re_enc = json.load(f)
@@ -234,10 +241,16 @@ class BaseModel(ABC):
 
         model.build()
 
-        var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=model.model_scope)
+        if scope_to_load is not None:
+            scope = scope_to_load
+        else:
+            scope = model.model_scope
+
+        var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope)
         saver = tf.train.Saver(var_list)
         checkpoint_path = os.path.join(model_dir, "model.ckpt")
         saver.restore(sess, checkpoint_path)
+
         model.init_uninitialized()
 
         return model
@@ -429,13 +442,13 @@ class BertJointModel(BaseModel):
             self._set_loss()
             self._set_train_op()
 
+    # TODO: сделать так, чтобы этот метод не переопределялся
     def train(
             self,
             examples_train: List[Example],
             examples_eval: List[Example],
-            batch_size: int = None,
             train_op_name: str = "train_op",
-            checkpoint_path: str = None,
+            model_dir: str = None,
             scope_to_save: str = None,
             verbose: bool = True,
             verbose_fn: Callable = None,
@@ -444,23 +457,35 @@ class BertJointModel(BaseModel):
 
         :param examples_train:
         :param examples_eval:
-        :param batch_size:
         :param train_op_name:
-        :param checkpoint_path:
+        :param model_dir:
         :param scope_to_save:
         :param verbose:
         :param verbose_fn: вход - словарь с метриками (выход self.evaluate); выход - None. функция должна вывести
                            релевантные метрики в stdout
         :return:
+
+        нет возможности переопределять batch_size, потому что есть следующая зависимость:
+        batch_size -> num_train_steps -> lr schedule for adamw
+        поэтому если хочется изменить batch_size, то нужно переопределить train_op. иными словами, проще сделать так:
+        tf.reset_default_graph()
+        sess = tf.Session()
+        model = ...
+        model.build()
+        model.initialize()
         """
-        epoch = 1
+        batch_size = self.config["training"]["batch_size"]
+        num_epoch_steps = int(len(examples_train) / batch_size)
         best_score = -1
         num_steps_wo_improvement = 0
-
-        batch_size = batch_size if batch_size is not None else self.config["training"]["batch_size"]
-        epoch_steps = len(examples_train) // batch_size
-
         verbose_fn = verbose_fn if verbose_fn is not None else print
+        train_loss = []
+
+        if model_dir is not None:
+            os.makedirs(model_dir, exist_ok=True)
+            checkpoint_path = os.path.join(model_dir, "model.ckpt")
+        else:
+            checkpoint_path = None
 
         saver = None
         if checkpoint_path is not None:
@@ -472,40 +497,39 @@ class BertJointModel(BaseModel):
 
         train_op = getattr(self, train_op_name)
 
-        for step in range(self.config["training"]["num_train_steps"]):
-            examples_batch = random.sample(examples_train, batch_size)
-            feed_dict = self._get_feed_dict(examples_batch, training=True)
-            _, loss = self.sess.run([train_op, self.loss], feed_dict=feed_dict)
+        for epoch in range(self.config["training"]["num_epochs"]):
+            for _ in range(num_epoch_steps):
+                examples_batch = random.sample(examples_train, batch_size)
+                feed_dict = self._get_feed_dict(examples_batch, training=True)
+                _, loss = self.sess.run([train_op, self.loss], feed_dict=feed_dict)
+                train_loss.append(loss)
 
-            if step != 0 and step % epoch_steps == 0:
+            print(f"epoch {epoch} finished. mean train loss: {np.mean(train_loss)}. evaluation starts.")
+            performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size)
+            if verbose is not None:
+                verbose_fn(performance_info)
+            score = performance_info["score"]
 
-                print(f"epoch {epoch} finished. evaluation starts.")
-                performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size)
-                if verbose is not None:
-                    verbose_fn(performance_info)
-                score = performance_info["score"]
+            print("current score:", score)
 
-                print("current score:", score)
+            if score > best_score:
+                print("!!! new best score:", score)
+                best_score = score
+                num_steps_wo_improvement = 0
 
-                if score > best_score:
-                    print("!!! new best score:", score)
-                    best_score = score
-                    num_steps_wo_improvement = 0
+                if saver is not None:
+                    saver.save(self.sess, checkpoint_path)
+                    print(f"saved new head to {checkpoint_path}")
+            else:
+                num_steps_wo_improvement += 1
+                print("best score:", best_score)
+                print("steps wo improvement:", num_steps_wo_improvement)
 
-                    if saver is not None:
-                        saver.save(self.sess, checkpoint_path)
-                        print(f"saved new head to {checkpoint_path}")
-                else:
-                    num_steps_wo_improvement += 1
-                    print("best score:", best_score)
-                    print("steps wo improvement:", num_steps_wo_improvement)
+                if num_steps_wo_improvement == self.config["training"]["max_epochs_wo_improvement"]:
+                    print("training finished due to max number of steps wo improvement encountered.")
+                    break
 
-                    if num_steps_wo_improvement == self.config["training"]["max_epochs_wo_improvement"]:
-                        print("training finished due to max number of steps wo improvement encountered.")
-                        break
-
-                print("=" * 50)
-                epoch += 1
+            print("=" * 50)
 
         if saver is not None:
             print(f"restoring model from {checkpoint_path}")
@@ -667,11 +691,14 @@ class BertJointModel(BaseModel):
     def set_train_op_head(self):
         """
         [опционально] операция для предобучения только новых слоёв
-        TODO: хардкоды скопов
         TODO: по-хорошему нужно global_step обновлять до нуля, если хочется продолжать обучение с помощью train_op.
          иначе learning rate будет считаться не совсем ожидаемо
         """
-        tvars = [x for x in tf.trainable_variables() if x.name.startswith("model/ner") or x.name.startswith("model/re")]
+        tvars = [
+            x for x in tf.trainable_variables()
+            if x.name.startswith(f"{self.model_scope}/{self.ner_scope}")
+            or x.name.startswith(f"{self.model_scope}/{self.re_scope}")
+        ]
         opt = tf.train.AdamOptimizer()
         grads = tf.gradients(self.loss, tvars)
         self.train_op_head = opt.apply_gradients(zip(grads, tvars))
@@ -797,7 +824,20 @@ class BertJointModel(BaseModel):
         self.loss = self.loss_ner + self.loss_re
 
     def _set_train_op(self):
-        self.train_op = create_optimizer(loss=self.loss, use_tpu=False, **self.config["optimizer"])
+        num_samples = self.config["training"]["num_train_samples"]
+        batch_size = self.config["training"]["batch_size"]
+        num_epochs = self.config["training"]["num_epochs"]
+        num_train_steps = int(num_samples / batch_size) * num_epochs
+        warmup_proportion = self.config["optimizer"]["warmup_proportion"]
+        num_warmup_steps = int(num_train_steps * warmup_proportion)
+        init_lr = self.config["optimizer"]["init_lr"]
+        self.train_op = create_optimizer(
+            loss=self.loss,
+            init_lr=init_lr,
+            num_train_steps=num_train_steps,
+            num_warmup_steps=num_warmup_steps,
+            use_tpu=False
+        )
 
     def _build_bert(self, training):
         bert_dir = self.config["model"]["bert"]["dir"]
@@ -970,8 +1010,9 @@ class BertForRelationExtraction(BertJointModel):
     ner уже решён.
     сущности заменены на соответствующие лейблы: Иван Иванов работает в ООО "Ромашка". -> [PER] работает в [ORG].
     """
-    def __init__(self, sess, config=None, re_enc=None, entity_label_to_token_id=None):
-        super().__init__(sess=sess, config=config, ner_enc=None, re_enc=re_enc)
+    def __init__(self, sess, config=None, ner_enc=None, re_enc=None, entity_label_to_token_id=None):
+        # ner_enc - для сохранения интерфейса
+        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
 
         self.entity_label_to_token_id = entity_label_to_token_id
 
@@ -1080,9 +1121,6 @@ class BertForRelationExtraction(BertJointModel):
                 # re TODO: рассмотреть случаи num_events == 0
                 num_entities_i = len(x.entities)
                 arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
-                assert arcs_pred.shape[0] == num_entities_i, f"{arcs_pred.shape[0]} != {num_entities_i}"
-                assert arcs_pred.shape[1] == num_entities_i, f"{arcs_pred.shape[1]} != {num_entities_i}"
-
                 index2id = {entity.index: entity.id for entity in x.entities}
                 for j, k in zip(*np.where(arcs_pred != 0)):
                     arc = Arc(
@@ -1093,15 +1131,15 @@ class BertForRelationExtraction(BertJointModel):
                     )
                     x.arcs.append(arc)
 
-    def save(self, model_dir: str, force: bool = True):
+    def save(self, model_dir: str, force: bool = True, scope_to_save: str = None):
         assert self.entity_label_to_token_id is not None
-        super().save(model_dir=model_dir, force=force)
+        super().save(model_dir=model_dir, force=force, scope_to_save=scope_to_save)
         with open(os.path.join(model_dir, "entity_label_to_token_id.json"), "w") as f:
             json.dump(self.entity_label_to_token_id, f, indent=4)
 
     @classmethod
-    def load(cls, sess, model_dir: str):
-        model = super().load(sess=sess, model_dir=model_dir)
+    def load(cls, sess, model_dir: str, scope_to_load: str = None):
+        model = super().load(sess=sess, model_dir=model_dir, scope_to_load=scope_to_load)
 
         with open(os.path.join(model_dir, "entity_label_to_token_id.json")) as f:
             model.entity_label_to_token_id = json.load(f)
