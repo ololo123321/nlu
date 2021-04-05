@@ -506,7 +506,7 @@ class BertJointModel(BaseModel):
 
             print(f"epoch {epoch} finished. mean train loss: {np.mean(train_loss)}. evaluation starts.")
             performance_info = self.evaluate(examples=examples_eval, batch_size=batch_size)
-            if verbose is not None:
+            if verbose:
                 verbose_fn(performance_info)
             score = performance_info["score"]
 
@@ -585,9 +585,10 @@ class BertJointModel(BaseModel):
                 y_true_ner.append(y_true_ner_i)
                 y_pred_ner.append(y_pred_ner_i)
 
-                # re TODO: рассмотреть случаи num_events == 0
+                # re
                 num_entities_i = num_entities[i]
-                assert num_entities_i == len(x.entities)
+                # этот assert может не выполняться в случае, когда редкие сущности игнорятся
+                # assert num_entities_i == len(x.entities), f"[{x.id}] {num_entities_i} != {len(x.entities)}"
                 arcs_true = np.full((num_entities_i, num_entities_i), no_rel_id, dtype=np.int32)
 
                 for arc in x.arcs:
@@ -596,8 +597,6 @@ class BertJointModel(BaseModel):
                     arcs_true[arc.head_index, arc.dep_index] = arc.rel_id
 
                 arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
-                assert arcs_pred.shape[0] == num_entities_i, f"{arcs_pred.shape[0]} != {num_entities_i}"
-                assert arcs_pred.shape[1] == num_entities_i, f"{arcs_pred.shape[1]} != {num_entities_i}"
                 y_true_re += [self.inv_re_enc[j] for j in arcs_true.flatten()]
                 y_pred_re += [self.inv_re_enc[j] for j in arcs_pred.flatten()]
 
