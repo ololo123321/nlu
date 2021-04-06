@@ -501,7 +501,11 @@ class BertJointModel(BaseModel):
             for _ in range(num_epoch_steps):
                 examples_batch = random.sample(examples_train, batch_size)
                 feed_dict = self._get_feed_dict(examples_batch, training=True)
-                _, loss = self.sess.run([train_op, self.loss], feed_dict=feed_dict)
+                try:
+                    _, loss = self.sess.run([train_op, self.loss], feed_dict=feed_dict)
+                except Exception as e:
+                    print([x.id for x in examples_batch])
+                    raise e
                 train_loss.append(loss)
 
             print(f"epoch {epoch} finished. mean train loss: {np.mean(train_loss)}. evaluation starts.")
@@ -1656,12 +1660,14 @@ class BertJointModelWithNestedNer(BertJointModel):
         x_entity = entity_emb_fn(x=x, d_model=d_model, start_coords=start_coords, end_coords=end_coords)
 
         # добавление эмбеддингов лейблов сущностей
-        entity_coords = tf.concat([start_coords, end_coords[:, :, -1:]], axis=-1)
-        ner_labels_2d = tf.gather_nd(ner_labels, entity_coords)
-        ner_labels_2d *= tf.sequence_mask(num_entities, dtype=tf.int32)
+        if self.config["model"]["re"]["use_entity_emb"]:
+            entity_coords = tf.concat([start_coords, end_coords[:, :, -1:]], axis=-1)
+            ner_labels_2d = tf.gather_nd(ner_labels, entity_coords)
+            ner_labels_2d *= tf.sequence_mask(num_entities, dtype=tf.int32)
 
-        x_emb = self.ner_emb(ner_labels_2d)
-        x_entity += x_emb
+            x_emb = self.ner_emb(ner_labels_2d)
+            x_entity += x_emb
+
         return x_entity, num_entities
 
     def _get_ner_loss(self):
