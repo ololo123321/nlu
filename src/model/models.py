@@ -43,6 +43,10 @@ class BaseModel(ABC):
         self.ner_enc = ner_enc
         self.re_enc = re_enc
 
+        if config is not None:
+            if "ner" in config["model"] and "re" in config["model"]:
+                assert config["model"]["ner"]["loss_coef"] + config["model"]["re"]["loss_coef"] > 0.0
+
         if self.ner_enc is not None:
             self.inv_ner_enc = {v: k for k, v in self.ner_enc.items()}
         else:
@@ -625,7 +629,14 @@ class BertJointModel(BaseModel):
         re_metrics = classification_report(y_true=y_true_re, y_pred=y_pred_re, trivial_label="O")
 
         # total
-        score = ner_metrics_entity_level["micro"]["f1"] * 0.5 + re_metrics["micro"]["f1"] * 0.5
+        # сделано так, чтобы случайный скор на таске с нулевым loss_coef не вносил подгрешность в score.
+        # невозможность равенства нулю коэффициентов при лоссах на обоих тасках рассмотрена в BaseModel.__init__
+        if self.config["model"]["ner"]["loss_coef"] == 0.0:
+            score = re_metrics["micro"]["f1"]
+        elif self.config["model"]["re"]["loss_coef"] == 0.0:
+            score = ner_metrics_entity_level["micro"]["f1"]
+        else:
+            score = ner_metrics_entity_level["micro"]["f1"] * 0.5 + re_metrics["micro"]["f1"] * 0.5
 
         performance_info = {
             "ner": {
