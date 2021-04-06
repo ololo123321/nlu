@@ -653,8 +653,9 @@ def simplify(example: Example):
         unique_labels = {x.label for x in entities}
         assert len(unique_labels) == 1, f"expected one unique label per span, but got {unique_labels} for span {span}"
         entity = entities.pop()
+        _id = f"T{id_span}"
         entity_new = Entity(
-            id=f"T{id_span}",
+            id=_id,
             label=entity.label,
             text=entity.text,
             tokens=entity.tokens,
@@ -663,7 +664,7 @@ def simplify(example: Example):
             comment=entity.comment
         )
         entities_new.append(entity_new)
-        span_to_id[span] = entity_new.id
+        span_to_id[span] = _id
         id_span += 1
 
     arcs_new = []

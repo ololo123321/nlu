@@ -1294,6 +1294,10 @@ class BertForRelationExtraction(BertJointModel):
 class BertJointModelV2(BertJointModel):
     def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         """
+        Изменена логика векторизации сущностей:
+        v1: token embeddings + ner label embeddings -> rnn -> first token emdeeing
+        v2: см. описание ф-ии _vectorize_whole_entities
+
         Изменения в config:
         - model.ner.start_ids
         + model.ner.{token_start_ids, entity_start_ids, event_start_ids}

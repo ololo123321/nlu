@@ -1,4 +1,4 @@
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Set, Tuple
 from collections import defaultdict
 
 
@@ -27,6 +27,7 @@ def classification_report(
         else:
             if y_true[i] == trivial_label:
                 if y_pred[i] == trivial_label:
+                    # y_true_i = 0, y_pred_i = 0
                     pass
                 else:
                     # y_true_i = 0, y_pred_i = 2
@@ -187,3 +188,18 @@ def _f1_score_micro_v2(y_true: List, y_pred: List, trivial_label: Union[int, str
     d = {"f1": f1, "precision": precision, "recall": recall, "support": num_gold}
 
     return d
+
+
+def classification_report_ner_re(edges_true: Set[Tuple], edges_pred: Set[Tuple]) -> Dict:
+    """
+    ребро - (head_label, start_head, end_head, dep_label, start_dep, end_dep, relation_label)
+    :param edges_true:
+    :param edges_pred:
+    :return:
+    TODO: учесть то, что если head или dep являются триггером события,
+     то не критично неверное определение индексов start и end
+    """
+    tp = len(edges_true & edges_pred)
+    fp = len(edges_pred) - tp
+    fn = len(edges_true) - tp
+    return f1_precision_recall_support(tp=tp, fp=fp, fn=fn)
