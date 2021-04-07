@@ -158,7 +158,7 @@ def split_example_v2(
     # print("spans_tokens:", spans_tokens)
 
     res = []
-    for i, span in enumerate(sent_spans):
+    for span in sent_spans:
         text = ' '.join(sent_candidates[span.start:span.end])
         start = pointers[span.start]
         end = pointers[span.end]
@@ -206,9 +206,10 @@ def split_example_v2(
         # arcs  TODO: сделать без deepcopy
         arcs = [deepcopy(arc) for arc in example.arcs if (arc.head in entity_ids) and (arc.dep in entity_ids)]
 
+        id_child = f"{example.id}_{span.start}-{span.end}"
         example_copy = Example(
             filename=example.filename,
-            id=f"{example.id}_{i}",
+            id=id_child,
             text=text,
             tokens=tokens,
             entities=entities,
@@ -281,6 +282,15 @@ def get_sentences_spans(entity_spans: List[Span], pointers: List[int], window: i
         is_good_split = True
 
     return res
+
+
+def assign_sent_ids_to_tokens(example: Example, pointers: List[int]):
+    num_sentences = len(pointers) - 1
+    for i in range(num_sentences):
+        start = pointers[i]
+        end = pointers[i + 1]
+        for t in example.tokens[start:end]:
+            t.id_sent = i
 
 
 def apply_bpe(

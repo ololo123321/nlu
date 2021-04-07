@@ -182,3 +182,21 @@ def upper_triangular(n: int, dtype):
 def noam_scheme(init_lr: int, global_step: int, warmup_steps: int = 4000):
     step = tf.cast(global_step + 1, dtype=tf.float32)
     return init_lr * warmup_steps ** 0.5 * tf.minimum(step * warmup_steps ** -1.5, step ** -0.5)
+
+
+def get_chunk_to_use_ner(id_sent: int, window: int, stride: int) -> Tuple[int, int]:
+    """
+    отображение "номер предложения" -> "спан, предикты которого юзать"
+    :param id_sent:
+    :param window:
+    :param stride:
+    :return:
+    """
+    if window == 1:
+        return id_sent, id_sent
+    else:
+        pass
+
+
+def get_chunk_to_use_re(id_sent_head: int, id_sent_dep: int, window: int, stride: int) -> Tuple[int, int]:
+    pass

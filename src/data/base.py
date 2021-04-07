@@ -77,7 +77,8 @@ class Token(ReprMixin):
             index_abs: int = None,
             index_rel: int = None,
             labels: List[Union[str, int]] = None,
-            pieces: List[Union[str, int]] = None  # TODO: нужно ли?
+            pieces: List[Union[str, int]] = None,  # TODO: нужно ли?
+            id_sent: int = None
     ):
         """
 
@@ -99,6 +100,7 @@ class Token(ReprMixin):
         self.index_rel = index_rel  # пока не нужно
         self.labels = labels if labels is not None else []
         self.pieces = pieces if pieces is not None else []
+        self.id_sent = id_sent
 
         self.labels_pieces = []
         self.token_ids = []

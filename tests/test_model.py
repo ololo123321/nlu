@@ -5,6 +5,8 @@ import tensorflow as tf
 from src.model.utils import infer_entities_bounds
 
 
+# TODO: актуализировать
+
 sess = tf.Session()
 BOUND_IDS = tf.constant([1, 2, 5])
 
