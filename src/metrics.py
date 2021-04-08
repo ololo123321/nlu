@@ -190,16 +190,16 @@ def _f1_score_micro_v2(y_true: List, y_pred: List, trivial_label: Union[int, str
     return d
 
 
-def classification_report_ner_re(edges_true: Set[Tuple], edges_pred: Set[Tuple]) -> Dict:
+def classification_report_set(y_true: Set[Tuple], y_pred: Set[Tuple]) -> Dict:
     """
     ребро - (head_label, start_head, end_head, dep_label, start_dep, end_dep, relation_label)
-    :param edges_true:
-    :param edges_pred:
+    :param y_true:
+    :param y_pred:
     :return:
     TODO: учесть то, что если head или dep являются триггером события,
      то не критично неверное определение индексов start и end
     """
-    tp = len(edges_true & edges_pred)
-    fp = len(edges_pred) - tp
-    fn = len(edges_true) - tp
+    tp = len(y_true & y_pred)
+    fp = len(y_pred) - tp
+    fn = len(y_true) - tp
     return f1_precision_recall_support(tp=tp, fp=fp, fn=fn)

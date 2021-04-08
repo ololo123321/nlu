@@ -184,18 +184,39 @@ def noam_scheme(init_lr: int, global_step: int, warmup_steps: int = 4000):
     return init_lr * warmup_steps ** 0.5 * tf.minimum(step * warmup_steps ** -1.5, step ** -0.5)
 
 
-def get_chunk_to_use_ner(id_sent: int, window: int, stride: int) -> Tuple[int, int]:
+def get_chunk_to_use_ner(id_sent: int, window: int, stride: int, num_sentences: int) -> Tuple[int, int]:
     """
-    отображение "номер предложения" -> "спан, предикты которого юзать"
+    отображение "номер предложения" -> "спан, ner-предикты которого юзать"
     :param id_sent:
     :param window:
     :param stride:
+    :param num_sentences:
     :return:
     """
-    if window == 1:
+    assert 0 <= id_sent <= num_sentences - 1
+    if window == 1:  # [x]
         return id_sent, id_sent
+    elif window == 2:  # [x o]
+        if id_sent == num_sentences - 1:
+            start = id_sent - 1
+            end = id_sent
+        else:
+            start = id_sent
+            end = id_sent + 1
+        return start, end
+    elif window == 3:  # [o x o]
+        if id_sent == 0:
+            start = id_sent
+            end = id_sent + 2
+        elif id_sent == num_sentences - 1:
+            start = id_sent - 2
+            end = id_sent
+        else:
+            start = id_sent - 1
+            end = id_sent + 1
+        return start, end
     else:
-        pass
+        raise NotImplementedError
 
 
 def get_chunk_to_use_re(id_sent_head: int, id_sent_dep: int, window: int, stride: int) -> Tuple[int, int]:

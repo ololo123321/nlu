@@ -215,7 +215,10 @@ def split_example_v2(
             entities=entities,
             events=events,
             arcs=arcs,
-            label=example.label
+            label=example.label,
+            parent=example.id,
+            id_sent_start=start,
+            id_sent_end=end
         )
 
         res.append(example_copy)
@@ -399,3 +402,17 @@ def apply_encodings(
 
     print("unk_ner_labels:", unk_ner_labels)
     print("unk_re_labels:", unk_re_labels)
+
+
+def show_diff(reference: List[Example], proposed: List[Example]):
+    r = sum(len(x.entities) for x in reference)
+    p = sum(len(x.entities) for x in proposed)
+    print("num entities reference:", r)
+    print("num entities proposed:", p)
+    print("percent change:", round((p / r - 1.0) * 100, 4), "%")
+
+    r = sum(len(x.arcs) for x in reference)
+    p = sum(len(x.arcs) for x in proposed)
+    print("num relations reference:", r)
+    print("num relations proposed:", p)
+    print("percent change:", round((p / r - 1.0) * 100, 4), "%")

@@ -194,6 +194,9 @@ class Example(ReprMixin):
             arcs: List[Arc] = None,
             events: List[Event] = None,  # пока только для дебага
             label: int = None,
+            id_sent_start: int = None,
+            id_sent_end: int = None,
+            parent: str = None
     ):
         self.filename = filename
         self.id = id
@@ -203,5 +206,8 @@ class Example(ReprMixin):
         self.arcs = arcs if arcs is not None else []
         self.events = events if events is not None else []
         self.label = label  # в случае классификации предложений
+        self.id_sent_start = id_sent_start
+        self.id_sent_end = id_sent_end
+        self.parent = parent
 
         self.arcs_pred = []
