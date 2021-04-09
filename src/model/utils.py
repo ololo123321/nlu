@@ -1,5 +1,6 @@
-from typing import Tuple
+from typing import Tuple, List
 import tensorflow as tf
+import numpy as np
 
 
 def get_labels_mask(labels_2d: tf.Tensor, values: tf.Tensor, sequence_len: tf.Tensor) -> tf.Tensor:
@@ -184,40 +185,76 @@ def noam_scheme(init_lr: int, global_step: int, warmup_steps: int = 4000):
     return init_lr * warmup_steps ** 0.5 * tf.minimum(step * warmup_steps ** -1.5, step ** -0.5)
 
 
-def get_chunk_to_use_ner(id_sent: int, window: int, stride: int, num_sentences: int) -> Tuple[int, int]:
+def get_entity_pairs_mask(entity_sent_ids, i, j):
     """
-    отображение "номер предложения" -> "спан, ner-предикты которого юзать"
-    :param id_sent:
-    :param window:
-    :param stride:
-    :param num_sentences:
-    :return:
+    entity_sent_ids: np.ndarray of shape [num_entities]
     """
-    assert 0 <= id_sent <= num_sentences - 1
-    if window == 1:  # [x]
-        return id_sent, id_sent
-    elif window == 2:  # [x o]
-        if id_sent == num_sentences - 1:
-            start = id_sent - 1
-            end = id_sent
+    num_entities = entity_sent_ids.shape[0]
+    mask = np.zeros((num_entities, num_entities), dtype=np.int32)
+    indices_i = np.where(entity_sent_ids == i)[0]
+    indices_j = np.where(entity_sent_ids == j)[0]
+    for i in indices_i:
+        for j in indices_j:
+            mask[i, j] = 1
+            mask[j, i] = 1
+    return mask
+
+
+grid_2 = np.tri(2).T
+grid_3 = np.tri(3).T
+grid_3_alt = np.array([
+    [2, 1, 1],
+    [0, 1, 3],
+    [0, 0, 3]
+])
+grid_4 = np.tri(4).T
+grid_5 = np.array([
+    [2, 2, 2, 1, 1],
+    [0, 2, 1, 1, 3],
+    [0, 0, 1, 3, 3],
+    [0, 0, 0, 3, 3],
+    [0, 0, 0, 0, 3]
+])
+
+pairs_2 = list(zip(*np.where(grid_2 == 1)))
+pairs_3 = list(zip(*np.where(grid_3 == 1)))
+pairs_3_1 = list(zip(*np.where(grid_3_alt == 1)))
+pairs_3_2 = list(zip(*np.where(grid_3_alt == 2)))
+pairs_3_3 = list(zip(*np.where(grid_3_alt == 3)))
+pairs_4 = list(zip(*np.where(grid_4 == 1)))
+pairs_5_1 = list(zip(*np.where(grid_5 == 1)))
+pairs_5_2 = list(zip(*np.where(grid_5 == 2)))
+pairs_5_3 = list(zip(*np.where(grid_5 == 3)))
+
+
+# TODO: протестировать!
+def get_sent_pairs_to_predict_for(end: int, is_first: bool, is_last: bool, window: int) -> List[Tuple]:
+    assert 0 <= end < window, end
+
+    if window == 1:
+        return [(0, 0)]
+    elif window == 3:
+        res = pairs_3_1.copy()
+        if is_first:
+            res += pairs_3_2
+        if is_last:
+            res += pairs_3_3
+        return res
+    elif window == 5:
+        if end == 0:
+            return [(0, 0)]
+        elif end == 1:
+            return pairs_2.copy()
+        elif end == 2:
+            return pairs_3.copy()
+        elif end == 3:
+            return pairs_4.copy()
         else:
-            start = id_sent
-            end = id_sent + 1
-        return start, end
-    elif window == 3:  # [o x o]
-        if id_sent == 0:
-            start = id_sent
-            end = id_sent + 2
-        elif id_sent == num_sentences - 1:
-            start = id_sent - 2
-            end = id_sent
-        else:
-            start = id_sent - 1
-            end = id_sent + 1
-        return start, end
+            res = pairs_5_1.copy()
+            if is_first:
+                res += pairs_5_2
+            if is_last:
+                res += pairs_5_3
+            return res
     else:
-        raise NotImplementedError
-
-
-def get_chunk_to_use_re(id_sent_head: int, id_sent_dep: int, window: int, stride: int) -> Tuple[int, int]:
-    pass
+        raise NotImplementedError(f"expected window in {{1, 3, 5}}, but got {window}")

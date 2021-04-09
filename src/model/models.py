@@ -20,12 +20,14 @@ from .utils import (
     get_entity_embeddings,
     get_padded_coords_3d,
     upper_triangular,
-    get_entity_embeddings_concat
+    get_entity_embeddings_concat,
+    get_entity_pairs_mask,
+    get_sent_pairs_to_predict_for
 )
 from .layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN
 from ..data.base import Example, Arc
 from ..data.postprocessing import get_valid_spans
-from ..metrics import classification_report, classification_report_ner
+from ..metrics import classification_report, classification_report_ner, f1_precision_recall_support
 
 
 class BaseModel(ABC):
@@ -1571,8 +1573,15 @@ class BertJointModelWithNestedNer(BertJointModel):
         # re
         re_metrics = classification_report(y_true=y_true_re, y_pred=y_pred_re, trivial_label="O")
 
-        # total
-        score = ner_metrics["micro"]["f1"] * 0.5 + re_metrics["micro"]["f1"] * 0.5
+        # total TODO: копипаста из родительского класса
+        # сделано так, чтобы случайный скор на таске с нулевым loss_coef не вносил подгрешность в score.
+        # невозможность равенства нулю коэффициентов при лоссах на обоих тасках рассмотрена в BaseModel.__init__
+        if self.config["model"]["ner"]["loss_coef"] == 0.0:
+            score = re_metrics["micro"]["f1"]
+        elif self.config["model"]["re"]["loss_coef"] == 0.0:
+            score = ner_metrics["micro"]["f1"]
+        else:
+            score = ner_metrics["micro"]["f1"] * 0.5 + re_metrics["micro"]["f1"] * 0.5
 
         performance_info = {
             "ner": {
@@ -1588,6 +1597,71 @@ class BertJointModelWithNestedNer(BertJointModel):
         }
 
         return performance_info
+
+    def evaluate_doc_level(
+            self,
+            examples: List[Example],
+            chunks: List[Example],
+            window: int,
+            batch_size: int = 16
+    ):
+        """
+        Оценка качества на уровне документа.
+        :param examples: документы
+        :param chunks: куски (stride 1)
+        :param window: размер кусков (в предложениях)
+        :param batch_size:
+        :return:
+        """
+        id_to_num_sentences = {x.id: x.tokens[-1].id_sent + 1 for x in examples}
+        id2rel = {v: k for k, v in self.re_enc.items()}
+
+        # (id_example, id_head, id_dep, rel)
+        y_true = set()
+        parents = {chunk.parent for chunk in chunks}
+        for x in examples:
+            if x.id in parents:
+                for arc in x.arcs:
+                    y_true.add((x.id, arc.head, arc.dep, arc.rel))
+
+        y_pred = set()
+
+        for start in range(0, len(chunks), batch_size):
+            end = start + batch_size
+            chunks_batch = chunks[start:end]
+            feed_dict = self._get_feed_dict(chunks_batch, training=False)
+            re_labels_pred = self.sess.run(self.re_labels_true_entities, feed_dict=feed_dict)
+
+            for i in range(len(chunks_batch)):
+                chunk = chunks_batch[i]
+
+                num_entities_chunk = len(chunk.entities)
+                entities_sorted = sorted(chunk.entities, key=lambda e: (e.tokens[0].index_rel, e.tokens[-1].index_rel))
+                entity_sent_ids_abs = np.array([entity.tokens[0].id_sent for entity in entities_sorted])
+                entity_sent_ids_rel = entity_sent_ids_abs - chunk.tokens[0].id_sent
+
+                num_sentences = id_to_num_sentences[chunk.parent]
+                end_rel = chunk.tokens[-1].id_sent - chunk.tokens[0].id_sent
+                is_first = chunk.tokens[0].id_sent == 0
+                is_last = chunk.tokens[-1].id_sent == num_sentences - 1
+                pairs = get_sent_pairs_to_predict_for(end=end_rel, is_first=is_first, is_last=is_last, window=window)
+
+                # предсказанные лейблы, которые можно получить из предиктов для кусочка chunk
+                re_labels_pred_i = re_labels_pred[i, :num_entities_chunk, :num_entities_chunk]
+                for id_sent_rel_a, id_sent_rel_b in pairs:
+                    mask = get_entity_pairs_mask(entity_sent_ids_rel, id_sent_rel_a, id_sent_rel_b)
+                    re_labels_pred_i_masked = re_labels_pred_i * mask
+                    for idx_head, idx_dep in zip(*np.where(re_labels_pred_i_masked != 0)):
+                        id_head = entities_sorted[idx_head].id
+                        id_dep = entities_sorted[idx_dep].id
+                        id_rel = re_labels_pred_i_masked[idx_head, idx_dep]
+                        y_pred.add((chunk.parent, id_head, id_dep, id2rel[id_rel]))
+
+        tp = len(y_true & y_pred)
+        fp = len(y_pred) - tp
+        fn = len(y_true) - tp
+        d = f1_precision_recall_support(tp=tp, fp=fp, fn=fn)
+        return d
 
     def _set_placeholders(self):
         # bert inputs

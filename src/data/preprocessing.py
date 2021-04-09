@@ -147,6 +147,10 @@ def split_example_v2(
     entity_spans = [
         Span(start=entity.tokens[0].index_abs, end=entity.tokens[-1].index_abs) for entity in example.entities
     ]
+
+    # TODO: делать это вне этой функции
+    assign_sent_ids_to_tokens(example=example, pointers=pointers)
+
     sent_spans = get_sentences_spans(
         entity_spans=entity_spans,
         pointers=pointers,
@@ -178,7 +182,8 @@ def split_example_v2(
                 index_abs=t.index_abs,
                 index_rel=j,
                 labels=t.labels.copy(),
-                pieces=t.pieces.copy()
+                pieces=t.pieces.copy(),
+                id_sent=t.id_sent
             )
             tokens.append(t_copy)
             token_assignment_map[t] = t_copy
@@ -217,8 +222,6 @@ def split_example_v2(
             arcs=arcs,
             label=example.label,
             parent=example.id,
-            id_sent_start=start,
-            id_sent_end=end
         )
 
         res.append(example_copy)
