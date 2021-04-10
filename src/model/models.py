@@ -1416,9 +1416,8 @@ class BertJointModelV2(BertJointModel):
 
 class BertJointModelWithNestedNer(BertJointModel):
     """
-    https://arxiv.org/abs/2005.07150
-
-    решается только NER
+    https://arxiv.org/abs/2005.07150 - ner
+    https://arxiv.org/abs/1812.11275 - re
     """
     def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
@@ -1608,7 +1607,7 @@ class BertJointModelWithNestedNer(BertJointModel):
         """
         Оценка качества на уровне документа.
         :param examples: документы
-        :param chunks: куски (stride 1)
+        :param chunks: куски (stride 1). предполагаетя, что для каждого документа из examples должны быть куски в chunks
         :param window: размер кусков (в предложениях)
         :param batch_size:
         :return:
@@ -1618,11 +1617,9 @@ class BertJointModelWithNestedNer(BertJointModel):
 
         # (id_example, id_head, id_dep, rel)
         y_true = set()
-        parents = {chunk.parent for chunk in chunks}
         for x in examples:
-            if x.id in parents:
-                for arc in x.arcs:
-                    y_true.add((x.id, arc.head, arc.dep, arc.rel))
+            for arc in x.arcs:
+                y_true.add((x.id, arc.head, arc.dep, arc.rel))
 
         y_pred = set()
 
@@ -1867,6 +1864,275 @@ class BertJointModelWithNestedNer(BertJointModel):
 
         if len(re_labels) == 0:
             re_labels.append((0, 0, 0, 0))
+
+        d = {
+            self.input_ids_ph: input_ids,
+            self.input_mask_ph: input_mask,
+            self.segment_ids_ph: segment_ids,
+            self.first_pieces_coords_ph: first_pieces_coords,
+            self.num_pieces_ph: num_pieces,
+            self.num_tokens_ph: num_tokens,
+            self.ner_labels_ph: ner_labels,
+            self.re_labels_ph: re_labels,
+            self.training_ph: training
+        }
+        return d
+
+
+class BertForCoreferenceResolution(BertJointModelWithNestedNer):
+    """
+    * между узлами может быть ровно один тип связи (кореференция)
+    * у одного head может быть ровно один dep
+    """
+    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
+        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
+
+        self.ner_logits_inference = None
+        self.tokens_pair_enc = None
+
+    # TODO: копипаста
+    def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
+        """
+        адаптирована только часть с arcs_pred
+        """
+        y_true_ner = []
+        y_pred_ner = []
+
+        y_true_re = []
+        y_pred_re = []
+
+        no_entity_id = self.config["model"]["ner"]["no_entity_id"]
+        no_rel_id = self.config["model"]["re"]["no_relation_id"]
+
+        loss = 0.0
+        loss_ner = 0.0
+        loss_re = 0.0
+        num_batches = 0
+
+        for start in range(0, len(examples), batch_size):
+            end = start + batch_size
+            examples_batch = examples[start:end]
+            feed_dict = self._get_feed_dict(examples_batch, training=False)
+            loss_i, loss_ner_i, loss_re_i, ner_logits, num_entities, re_labels_pred = self.sess.run([
+                self.loss,
+                self.loss_ner,
+                self.loss_re,
+                self.ner_logits_inference,
+                self.num_entities,
+                self.re_labels_true_entities
+            ], feed_dict=feed_dict)
+            loss += loss_i
+            loss_ner += loss_ner_i
+            loss_re += loss_re_i
+
+            for i, x in enumerate(examples_batch):
+                # ner
+                num_tokens = len(x.tokens)
+                spans_true = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
+
+                for entity in x.entities:
+                    start = entity.tokens[0].index_rel
+                    end = entity.tokens[-1].index_rel
+                    spans_true[start, end] = entity.label_id
+
+                spans_pred = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
+                ner_logits_i = ner_logits[i, :num_tokens, :num_tokens, :]
+                spans_filtered = get_valid_spans(logits=ner_logits_i,  is_flat_ner=False)
+                for span in spans_filtered:
+                    spans_pred[span.start, span.end] = span.label
+
+                y_true_ner += [self.inv_ner_enc[j] for j in spans_true.flatten()]
+                y_pred_ner += [self.inv_ner_enc[j] for j in spans_pred.flatten()]
+
+                # re
+                num_entities_i = num_entities[i]
+                assert num_entities_i == len(x.entities)
+                arcs_true = np.full((num_entities_i, num_entities_i), no_rel_id, dtype=np.int32)
+
+                for arc in x.arcs:
+                    assert arc.head_index is not None
+                    assert arc.dep_index is not None
+                    arcs_true[arc.head_index, arc.dep_index] = arc.rel_id
+
+                arcs_pred = np.full((num_entities_i, num_entities_i), no_rel_id, dtype=np.int32)
+                for id_head, id_dep in enumerate(re_labels_pred[i, :num_entities_i]):
+                    if id_head != id_dep:
+                        arcs_pred[id_head, id_dep] = 1
+
+                y_true_re += [self.inv_re_enc[j] for j in arcs_true.flatten()]
+                y_pred_re += [self.inv_re_enc[j] for j in arcs_pred.flatten()]
+
+            num_batches += 1
+
+        # loss
+        # TODO: учитывать, что последний батч может быть меньше. тогда среднее не совсем корректно так считать
+        loss /= num_batches
+        loss_ner /= num_batches
+        loss_re /= num_batches
+
+        # ner
+        trivial_label = self.inv_ner_enc[no_entity_id]
+        ner_metrics = classification_report(y_true=y_true_ner, y_pred=y_pred_ner, trivial_label=trivial_label)
+
+        # re
+        re_metrics = classification_report(y_true=y_true_re, y_pred=y_pred_re, trivial_label="O")
+
+        # total TODO: копипаста из родительского класса
+        # сделано так, чтобы случайный скор на таске с нулевым loss_coef не вносил подгрешность в score.
+        # невозможность равенства нулю коэффициентов при лоссах на обоих тасках рассмотрена в BaseModel.__init__
+        if self.config["model"]["ner"]["loss_coef"] == 0.0:
+            score = re_metrics["micro"]["f1"]
+        elif self.config["model"]["re"]["loss_coef"] == 0.0:
+            score = ner_metrics["micro"]["f1"]
+        else:
+            score = ner_metrics["micro"]["f1"] * 0.5 + re_metrics["micro"]["f1"] * 0.5
+
+        performance_info = {
+            "ner": {
+                "loss": loss_ner,
+                "metrics": ner_metrics
+            },
+            "re": {
+                "loss": loss_re,
+                "metrics": re_metrics,
+            },
+            "loss": loss,
+            "score": score
+        }
+
+        return performance_info
+
+    def _get_re_loss(self):
+        no_rel_id = self.config["model"]["re"]["no_relation_id"]
+        logits = tf.squeeze(self.re_logits_train, axis=[-1])
+        logits_shape = tf.shape(logits)
+        labels_shape = logits_shape[:2]
+        labels = get_dense_labels_from_indices(
+            indices=self.re_labels_ph, shape=labels_shape, no_label_id=no_rel_id
+        )  # [batch_size, num_entities]
+        per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            labels=labels, logits=logits
+        )  # [batch_size, num_entities]
+
+        sequence_mask = tf.sequence_mask(self.num_entities, maxlen=logits_shape[1], dtype=tf.float32)
+        mask = sequence_mask[:, None]
+
+        masked_per_example_loss = per_example_loss * mask
+        total_loss = tf.reduce_sum(masked_per_example_loss)
+        num_pairs = tf.cast(tf.reduce_sum(mask), tf.float32)
+        num_pairs = tf.maximum(num_pairs, 1.0)
+        loss = total_loss / num_pairs
+        loss *= self.config["model"]["re"]["loss_coef"]
+        return loss
+
+    def _set_placeholders(self):
+        # bert inputs
+        self.input_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_ids")
+        self.input_mask_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_mask")
+        self.segment_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="segment_ids")
+
+        # ner inputs
+        self.first_pieces_coords_ph = tf.placeholder(
+            dtype=tf.int32, shape=[None, None, 2], name="first_pieces_coords"
+        )  # [id_example, id_piece]
+        self.num_pieces_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_pieces")
+        self.num_tokens_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_tokens")
+        self.ner_labels_ph = tf.placeholder(
+            dtype=tf.int32, shape=[None, 4], name="ner_labels"
+        )  # [id_example, start, end, label]
+
+        # re
+        self.re_labels_ph = tf.placeholder(
+            dtype=tf.int32, shape=[None, 3], name="re_labels"
+        )  # [id_example, id_head, id_dep]
+
+        # common inputs
+        self.training_ph = tf.placeholder(dtype=tf.bool, shape=None, name="training_ph")
+
+    # TODO: много копипасты!
+    def _get_feed_dict(self, examples: List[Example], training: bool):
+        # bert
+        input_ids = []
+        input_mask = []
+        segment_ids = []
+
+        # ner
+        first_pieces_coords = []
+        num_pieces = []
+        num_tokens = []
+        ner_labels = []
+
+        # re
+        re_labels = []
+
+        # filling
+        for i, x in enumerate(examples):
+            input_ids_i = []
+            input_mask_i = []
+            segment_ids_i = []
+            first_pieces_coords_i = []
+
+            # [CLS]
+            input_ids_i.append(self.config["model"]["bert"]["cls_token_id"])
+            input_mask_i.append(1)
+            segment_ids_i.append(0)
+
+            ptr = 1
+
+            # tokens
+            for t in x.tokens:
+                first_pieces_coords_i.append((i, ptr))
+                num_pieces_ij = len(t.pieces)
+                input_ids_i += t.token_ids
+                input_mask_i += [1] * num_pieces_ij
+                segment_ids_i += [0] * num_pieces_ij
+                ptr += num_pieces_ij
+
+            # [SEP]
+            input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
+            input_mask_i.append(1)
+            segment_ids_i.append(0)
+
+            # ner, re
+            id2entity = {entity.id: entity for entity in x.entities}
+            head2dep = {arc.head: id2entity[arc.dep] for arc in x.arcs}
+
+            for entity in x.entities:
+                start = entity.tokens[0].index_rel
+                end = entity.tokens[-1].index_rel
+                label = entity.label_id
+                assert isinstance(label, int)
+                ner_labels.append((i, start, end, label))
+
+                if entity.id in head2dep.keys():
+                    dep_index = head2dep[entity.id].index
+                else:
+                    dep_index = entity.index
+                re_labels.append((i, entity.index, dep_index))
+
+            # write
+            num_pieces.append(len(input_ids_i))
+            num_tokens.append(len(x.tokens))
+            input_ids.append(input_ids_i)
+            input_mask.append(input_mask_i)
+            segment_ids.append(segment_ids_i)
+            first_pieces_coords.append(first_pieces_coords_i)
+
+        # padding
+        pad_token_id = self.config["model"]["bert"]["pad_token_id"]
+        num_tokens_max = max(num_tokens)
+        num_pieces_max = max(num_pieces)
+        for i in range(len(examples)):
+            input_ids[i] += [pad_token_id] * (num_pieces_max - num_pieces[i])
+            input_mask[i] += [0] * (num_pieces_max - num_pieces[i])
+            segment_ids[i] += [0] * (num_pieces_max - num_pieces[i])
+            first_pieces_coords[i] += [(i, 0)] * (num_tokens_max - num_tokens[i])
+
+        if len(ner_labels) == 0:
+            ner_labels.append((0, 0, 0, 0))
+
+        if len(re_labels) == 0:
+            re_labels.append((0, 0, 0))
 
         d = {
             self.input_ids_ph: input_ids,
