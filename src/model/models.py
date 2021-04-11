@@ -1658,7 +1658,7 @@ class BertJointModelWithNestedNer(BertJointModel):
         fp = len(y_pred) - tp
         fn = len(y_true) - tp
         d = f1_precision_recall_support(tp=tp, fp=fp, fn=fn)
-        return d
+        return d, y_true, y_pred
 
     def _set_placeholders(self):
         # bert inputs
@@ -2351,6 +2351,7 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
         # добавление root
         batch_size = tf.shape(x)[0]
         x_root = tf.tile(self.root_emb, [batch_size, 1])
+        x_root = x_root[:, None, :]
         x_dep = tf.concat([x_root, x], axis=1)  # [batch_size, num_entities + 1, bert_dim]
 
         # encoding of pairs
@@ -2464,6 +2465,205 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
             self.training_ph: training
         }
         return d
+
+    # TODO: копипаста
+    def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
+        """
+        адаптирована только часть с arcs_pred
+        """
+        y_true_ner = []
+        y_pred_ner = []
+
+        y_true_re = []
+        y_pred_re = []
+
+        no_entity_id = self.config["model"]["ner"]["no_entity_id"]
+        no_rel_id = self.config["model"]["re"]["no_relation_id"]
+
+        loss = 0.0
+        loss_ner = 0.0
+        loss_re = 0.0
+        num_batches = 0
+
+        for start in range(0, len(examples), batch_size):
+            end = start + batch_size
+            examples_batch = examples[start:end]
+            feed_dict = self._get_feed_dict(examples_batch, training=False)
+            loss_i, loss_ner_i, loss_re_i, ner_logits, num_entities, re_labels_pred = self.sess.run([
+                self.loss,
+                self.loss_ner,
+                self.loss_re,
+                self.ner_logits_inference,
+                self.num_entities,
+                self.re_labels_true_entities,
+            ], feed_dict=feed_dict)
+            loss += loss_i
+            loss_ner += loss_ner_i
+            loss_re += loss_re_i
+
+            for i, x in enumerate(examples_batch):
+                # ner
+                num_tokens = len(x.tokens)
+                spans_true = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
+
+                for entity in x.entities:
+                    start = entity.tokens[0].index_rel
+                    end = entity.tokens[-1].index_rel
+                    spans_true[start, end] = entity.label_id
+
+                spans_pred = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
+                ner_logits_i = ner_logits[i, :num_tokens, :num_tokens, :]
+                spans_filtered = get_valid_spans(logits=ner_logits_i,  is_flat_ner=False)
+                for span in spans_filtered:
+                    spans_pred[span.start, span.end] = span.label
+
+                y_true_ner += [self.inv_ner_enc[j] for j in spans_true.flatten()]
+                y_pred_ner += [self.inv_ner_enc[j] for j in spans_pred.flatten()]
+
+                # re
+                num_entities_i = num_entities[i]
+                assert num_entities_i == len(x.entities)
+                arcs_true = np.full((num_entities_i, num_entities_i), no_rel_id, dtype=np.int32)
+
+                for arc in x.arcs:
+                    assert arc.head_index is not None
+                    assert arc.dep_index is not None
+                    arcs_true[arc.head_index, arc.dep_index] = arc.rel_id
+
+                arcs_pred = np.full((num_entities_i, num_entities_i), no_rel_id, dtype=np.int32)
+                for id_head, id_dep in enumerate(re_labels_pred[i, :num_entities_i]):
+                    if id_dep != 0:
+                        try:
+                            arcs_pred[id_head, id_dep - 1] = 1
+                        except IndexError as e:
+                            print("i:", i)
+                            print("id head:", id_head)
+                            print("id dep:", id_dep)
+                            print("num entities i:", num_entities_i)
+                            print("re labels:")
+                            print(re_labels_pred)
+                            print("re labels i:")
+                            print(re_labels_pred[i])
+                            # print("re logits:")
+                            # print(re_logits)
+                            # print("re logits i:")
+                            # print(re_logits[i])
+                            print("num entities batch:")
+                            print(num_entities)
+                            print([len(x.entities) for x in examples_batch])
+                            print("examples batch:")
+                            print([x.id for x in examples_batch])
+                            raise e
+
+                y_true_re += [self.inv_re_enc[j] for j in arcs_true.flatten()]
+                y_pred_re += [self.inv_re_enc[j] for j in arcs_pred.flatten()]
+
+            num_batches += 1
+
+        # loss
+        # TODO: учитывать, что последний батч может быть меньше. тогда среднее не совсем корректно так считать
+        loss /= num_batches
+        loss_ner /= num_batches
+        loss_re /= num_batches
+
+        # ner
+        trivial_label = self.inv_ner_enc[no_entity_id]
+        ner_metrics = classification_report(y_true=y_true_ner, y_pred=y_pred_ner, trivial_label=trivial_label)
+
+        # re
+        re_metrics = classification_report(y_true=y_true_re, y_pred=y_pred_re, trivial_label="O")
+
+        # total TODO: копипаста из родительского класса
+        # сделано так, чтобы случайный скор на таске с нулевым loss_coef не вносил подгрешность в score.
+        # невозможность равенства нулю коэффициентов при лоссах на обоих тасках рассмотрена в BaseModel.__init__
+        if self.config["model"]["ner"]["loss_coef"] == 0.0:
+            score = re_metrics["micro"]["f1"]
+        elif self.config["model"]["re"]["loss_coef"] == 0.0:
+            score = ner_metrics["micro"]["f1"]
+        else:
+            score = ner_metrics["micro"]["f1"] * 0.5 + re_metrics["micro"]["f1"] * 0.5
+
+        performance_info = {
+            "ner": {
+                "loss": loss_ner,
+                "metrics": ner_metrics
+            },
+            "re": {
+                "loss": loss_re,
+                "metrics": re_metrics,
+            },
+            "loss": loss,
+            "score": score
+        }
+
+        return performance_info
+
+    # TODO: копипаста
+    def evaluate_doc_level(
+            self,
+            examples: List[Example],
+            chunks: List[Example],
+            window: int,
+            batch_size: int = 16
+    ):
+        """
+        Оценка качества на уровне документа.
+        :param examples: документы
+        :param chunks: куски (stride 1). предполагаетя, что для каждого документа из examples должны быть куски в chunks
+        :param window: размер кусков (в предложениях)
+        :param batch_size:
+        :return:
+        """
+        id_to_num_sentences = {x.id: x.tokens[-1].id_sent + 1 for x in examples}
+        id2rel = {v: k for k, v in self.re_enc.items()}
+        id_coref = 1
+
+        # (id_example, id_head, id_dep, rel)
+        y_true = set()
+        for x in examples:
+            for arc in x.arcs:
+                y_true.add((x.id, arc.head, arc.dep, arc.rel))
+
+        y_pred = set()
+
+        for start in range(0, len(chunks), batch_size):
+            end = start + batch_size
+            chunks_batch = chunks[start:end]
+            feed_dict = self._get_feed_dict(chunks_batch, training=False)
+            re_labels_pred = self.sess.run(self.re_labels_true_entities, feed_dict=feed_dict)
+
+            for i in range(len(chunks_batch)):
+                chunk = chunks_batch[i]
+
+                num_entities_chunk = len(chunk.entities)
+                entities_sorted = sorted(chunk.entities, key=lambda e: (e.tokens[0].index_rel, e.tokens[-1].index_rel))
+
+                num_sentences = id_to_num_sentences[chunk.parent]
+                end_rel = chunk.tokens[-1].id_sent - chunk.tokens[0].id_sent
+                is_first = chunk.tokens[0].id_sent == 0
+                is_last = chunk.tokens[-1].id_sent == num_sentences - 1
+                pairs = get_sent_pairs_to_predict_for(end=end_rel, is_first=is_first, is_last=is_last, window=window)
+
+                # предсказанные лейблы, которые можно получить из предиктов для кусочка chunk
+                re_labels_pred_i = re_labels_pred[i, :num_entities_chunk]
+                for id_sent_rel_a, id_sent_rel_b in pairs:
+                    id_sent_abs_a = id_sent_rel_a + chunk.tokens[0].id_sent
+                    id_sent_abs_b = id_sent_rel_b + chunk.tokens[0].id_sent
+                    for idx_head, idx_dep in enumerate(re_labels_pred_i):
+                        if idx_dep != 0:
+                            head = entities_sorted[idx_head]
+                            dep = entities_sorted[idx_dep - 1]
+                            id_sent_head = head.tokens[0].id_sent
+                            id_sent_dep = dep.tokens[0].id_sent
+                            if (id_sent_head == id_sent_abs_a and id_sent_dep == id_sent_abs_b) or \
+                                    (id_sent_head == id_sent_abs_b and id_sent_dep == id_sent_abs_a):
+                                y_pred.add((chunk.parent, head.id, dep.id, id2rel[id_coref]))
+
+        tp = len(y_true & y_pred)
+        fp = len(y_pred) - tp
+        fn = len(y_true) - tp
+        d = f1_precision_recall_support(tp=tp, fp=fp, fn=fn)
+        return d, y_true, y_pred
 
 
 # TODO: проверить работоспособность
