@@ -1639,6 +1639,7 @@ class BertJointModelWithNestedNer(BertJointModel):
 
                 num_sentences = id_to_num_sentences[chunk.parent]
                 end_rel = chunk.tokens[-1].id_sent - chunk.tokens[0].id_sent
+                assert end_rel < window, f"[{chunk.id}] relative end {end_rel} >= window size {window}"
                 is_first = chunk.tokens[0].id_sent == 0
                 is_last = chunk.tokens[-1].id_sent == num_sentences - 1
                 pairs = get_sent_pairs_to_predict_for(end=end_rel, is_first=is_first, is_last=is_last, window=window)
@@ -2640,6 +2641,7 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
 
                 num_sentences = id_to_num_sentences[chunk.parent]
                 end_rel = chunk.tokens[-1].id_sent - chunk.tokens[0].id_sent
+                assert end_rel < window, f"[{chunk.id}] relative end {end_rel} >= window size {window}"
                 is_first = chunk.tokens[0].id_sent == 0
                 is_last = chunk.tokens[-1].id_sent == num_sentences - 1
                 pairs = get_sent_pairs_to_predict_for(end=end_rel, is_first=is_first, is_last=is_last, window=window)
