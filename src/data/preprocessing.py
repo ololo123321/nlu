@@ -131,7 +131,13 @@ def split_example_v2(
     :param stride: страйд
     :param lang: язык
     :param tokens_expression:
-    :param fix_pointers
+    :param fix_pointers нужно ли фиксить разбиения на предложения с учётом того, что граница не может проходить
+     через именную сущность.
+
+    в таком случае граница куска передвигается, что влечёт кейсы, где размер куска больше window.
+    что не есть хорошо при инференсе на уровне документа.
+    по этой причине было решено сначала фиксить pointers, а потом выводить куски над пофикшенными предложениями:
+    см. fix_pointers_fn и get_sentences_spans_fixed_pointers
     :return:
     """
     if not example.text:
@@ -257,6 +263,8 @@ def fix_pointers_fn(pointers: List[int], entity_spans: List[Span]) -> List[int]:
 
 def get_sentences_spans(entity_spans: List[Span], pointers: List[int], window: int = 1, stride: int = None) -> List[Span]:
     """
+    предполагается, что pointers не пофикшены: то есть граница предложения может проходить через сущность.
+    TODO: дописать описание
 
     :param entity_spans: индексы токенов границ именных сущностей
     :param pointers: индексы токенов, определяющий границы предложений.
