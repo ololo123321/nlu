@@ -118,7 +118,8 @@ def split_example_v2(
         window: int = 1,
         stride: int = 1,
         lang: str = Languages.RU,
-        tokens_expression: Pattern = None
+        tokens_expression: Pattern = None,
+        fix_pointers: bool = True
 ) -> List[Example]:
     """
     Кусок исходного примера размером window предложений.
@@ -130,6 +131,7 @@ def split_example_v2(
     :param stride: страйд
     :param lang: язык
     :param tokens_expression:
+    :param fix_pointers
     :return:
     """
     if not example.text:
@@ -148,15 +150,26 @@ def split_example_v2(
         Span(start=entity.tokens[0].index_abs, end=entity.tokens[-1].index_abs) for entity in example.entities
     ]
 
+    if fix_pointers:
+        pointers = fix_pointers_fn(pointers=pointers, entity_spans=entity_spans)
+
     # TODO: делать это вне этой функции
     assign_sent_ids_to_tokens(example=example, pointers=pointers)
 
-    sent_spans = get_sentences_spans(
-        entity_spans=entity_spans,
-        pointers=pointers,
-        window=window,
-        stride=stride
-    )
+    if fix_pointers:
+        sent_spans = get_sentences_spans(
+            entity_spans=entity_spans,
+            pointers=pointers,
+            window=window,
+            stride=stride
+        )
+    else:
+        num_sentences = len(pointers) - 1
+        sent_spans = get_sentences_spans_fixed_pointers(
+            num_sentences=num_sentences,
+            window=window,
+            stride=stride
+        )
 
     # print("spans_sents:", spans_sents)
     # print("spans_tokens:", spans_tokens)
@@ -229,6 +242,19 @@ def split_example_v2(
     return res
 
 
+def fix_pointers_fn(pointers: List[int], entity_spans: List[Span]) -> List[int]:
+    res = []
+    for p in pointers:
+        is_good = True
+        for span in entity_spans:
+            if span.start < p <= span.end:
+                is_good = False
+                break
+        if is_good:
+            res.append(p)
+    return res
+
+
 def get_sentences_spans(entity_spans: List[Span], pointers: List[int], window: int = 1, stride: int = None) -> List[Span]:
     """
 
@@ -287,6 +313,28 @@ def get_sentences_spans(entity_spans: List[Span], pointers: List[int], window: i
         # присвоение флагу is_good_split дефолтного значения
         is_good_split = True
 
+    return res
+
+
+def get_sentences_spans_fixed_pointers(num_sentences: int, window: int = 1, stride: int = None) -> List[Span]:
+    # stride
+    if stride is None:
+        stride = window
+    else:
+        assert stride <= window
+
+    if window >= num_sentences:
+        return [Span(start=0, end=num_sentences)]
+
+    res = []
+    start = 0
+    while True:
+        end = start + window
+        if end <= num_sentences:
+            res.append(Span(start=start, end=end))
+            start += stride
+        else:
+            break
     return res
 
 

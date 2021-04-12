@@ -555,36 +555,6 @@ def remove_role_index(s: str) -> str:
     return s
 
 
-def check_example(example: Example, allow_nested_entities: bool = False):
-    """
-    sanity check
-    """
-    # число токенов сущности больше нуля
-    entity_ids = set()
-    for entity in example.entities:
-        assert len(entity.tokens) > 0, f"[{example.id}] entity {entity.id} has no tokens!"
-        entity_ids.add(entity.id)
-
-    # пример не начинвается в середине сущности
-    assert example.tokens[0].labels[0][0] != "I", f"[{example.id}] contains only part of entity!"
-
-    # число сущностей равно числу лейблов начала сущности
-    expected = len(example.entities)
-    actual = 0
-    for t in example.tokens:
-        for label in t.labels:
-            actual += label[0] == "B"
-            if not allow_nested_entities:
-                break
-    assert actual == expected, \
-        f"[{example.id}] number of entities ({expected}) does not match number of start tokens ({actual})"
-
-    # head и dep отношения содержатся с множетсве сущностей примера
-    for arc in example.arcs:
-        assert arc.head in entity_ids
-        assert arc.dep in entity_ids
-
-
 def simplify(example: Example):
     """
     упрощение графа путём удаления тривиальных сущностей и рёбер
@@ -649,7 +619,7 @@ def simplify(example: Example):
     entities_new = []
     span_to_id = {}
     id_span = 0
-    for i, (span, entities) in enumerate(span_to_entities.items()):
+    for span, entities in span_to_entities.items():
         unique_labels = {x.label for x in entities}
         assert len(unique_labels) == 1, f"expected one unique label per span, but got {unique_labels} for span {span}"
         entity = entities.pop()
