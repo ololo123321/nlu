@@ -2270,6 +2270,8 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
 
         self.root_emb = None
+        self.re_logits_true_entities = None
+        self.re_logits_pred_entities = None
 
     def build(self):
         """
@@ -2332,16 +2334,16 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
                     bert_out=bert_out_train, ner_labels=ner_labels_dense
                 )
 
-                re_logits_true_entities, _ = self._build_re_head(
+                self.re_logits_true_entities, _ = self._build_re_head(
                     bert_out=bert_out_pred, ner_labels=ner_labels_dense
                 )
-                re_logits_pred_entities, self.num_entities_pred = self._build_re_head(
+                self.re_logits_pred_entities, self.num_entities_pred = self._build_re_head(
                     bert_out=bert_out_pred, ner_labels=ner_preds_inference
                 )
 
                 # argmax
-                self.re_labels_true_entities = tf.argmax(re_logits_true_entities, axis=-1)
-                self.re_labels_pred_entities = tf.argmax(re_logits_pred_entities, axis=-1)
+                self.re_labels_true_entities = tf.argmax(self.re_logits_true_entities, axis=-1)
+                self.re_labels_pred_entities = tf.argmax(self.re_logits_pred_entities, axis=-1)
 
             self._set_loss()
             self._set_train_op()
@@ -2632,6 +2634,8 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
             chunks_batch = chunks[start:end]
             feed_dict = self._get_feed_dict(chunks_batch, training=False)
             re_labels_pred = self.sess.run(self.re_labels_true_entities, feed_dict=feed_dict)
+            # re_labels_pred: np.ndarray, shape [batch_size, num_ent], dtype np.int32
+            # values in range [0, num_ent]; 0 means no dep.
 
             for i in range(len(chunks_batch)):
                 chunk = chunks_batch[i]
@@ -2647,19 +2651,21 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
                 pairs = get_sent_pairs_to_predict_for(end=end_rel, is_first=is_first, is_last=is_last, window=window)
 
                 # предсказанные лейблы, которые можно получить из предиктов для кусочка chunk
-                re_labels_pred_i = re_labels_pred[i, :num_entities_chunk]
                 for id_sent_rel_a, id_sent_rel_b in pairs:
                     id_sent_abs_a = id_sent_rel_a + chunk.tokens[0].id_sent
                     id_sent_abs_b = id_sent_rel_b + chunk.tokens[0].id_sent
-                    for idx_head, idx_dep in enumerate(re_labels_pred_i):
-                        if idx_dep != 0:
-                            head = entities_sorted[idx_head]
-                            dep = entities_sorted[idx_dep - 1]
-                            id_sent_head = head.tokens[0].id_sent
-                            id_sent_dep = dep.tokens[0].id_sent
-                            if (id_sent_head == id_sent_abs_a and id_sent_dep == id_sent_abs_b) or \
-                                    (id_sent_head == id_sent_abs_b and id_sent_dep == id_sent_abs_a):
-                                y_pred.add((chunk.parent, head.id, dep.id, id2rel[id_coref]))
+                    # for idx_head, idx_dep in enumerate(re_labels_pred_i):
+                    for idx_head in range(num_entities_chunk):
+                        idx_dep = re_labels_pred[i, idx_head]
+                        if idx_dep == 0:
+                            continue
+                        head = entities_sorted[idx_head]
+                        dep = entities_sorted[idx_dep - 1]
+                        id_sent_head = head.tokens[0].id_sent
+                        id_sent_dep = dep.tokens[0].id_sent
+                        if (id_sent_head == id_sent_abs_a and id_sent_dep == id_sent_abs_b) or \
+                                (id_sent_head == id_sent_abs_b and id_sent_dep == id_sent_abs_a):
+                            y_pred.add((chunk.parent, head.id, dep.id, id2rel[id_coref]))
 
         tp = len(y_true & y_pred)
         fp = len(y_pred) - tp

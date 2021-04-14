@@ -8,7 +8,7 @@ def check_tokens(example: Example):
         assert len(entity.tokens) > 0, f"[{example.id}] entity {entity.id} has no tokens!"
         entity_ids.add(entity.id)
 
-    # пример не начинвается в середине сущности
+    # пример не начинается в середине сущности
     assert all(label[0] != "I" for label in example.tokens[0].labels), f"[{example.id}] contains only part of entity!"
 
 
@@ -52,8 +52,8 @@ def check_arcs(example: Example, one_child: bool = False, one_parent: bool = Fal
                 head = id2entity[arc.head]
                 dep_new = id2entity[arc.dep]
                 dep_old = id2entity[head2dep[head.id]]
-                msg = f'[{example.id}] head {head.id} ({head.text}) has already dep {dep_old.id} ({dep_old.text}), ' \
-                    f'but tried to assign dep {dep_new.id} ({dep_new.text})'
+                msg = f'[{example.id}] head {head.id} <bos>{head.text}<eos> has already dep {dep_old.id} ' \
+                    f'<bos>{dep_old.text}<eos>, but tried to assign dep {dep_new.id} <bos>{dep_new.text}<eos>'
                 raise AssertionError(msg)
             else:
                 head2dep[arc.head] = arc.dep
@@ -62,8 +62,8 @@ def check_arcs(example: Example, one_child: bool = False, one_parent: bool = Fal
                 dep = id2entity[arc.dep]
                 head_new = id2entity[arc.head]
                 head_old = id2entity[dep2head[dep.id]]
-                msg = f'[{example.id}] dep {dep.id} ({dep.text}) has already head {head_old.id} ({head_old.text}), ' \
-                    f'but tried to assign head {head_new.id} ({head_new.text})'
+                msg = f'[{example.id}] dep {dep.id} <bos>{dep.text}<eos> has already head {head_old.id} ' \
+                    f'<bos>{head_old.text}<eos>, but tried to assign head {head_new.id} <bos>{head_new.text}<eos>'
                 raise AssertionError(msg)
             else:
                 dep2head[arc.dep] = arc.head

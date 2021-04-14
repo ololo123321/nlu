@@ -200,6 +200,9 @@ def get_entity_pairs_mask(entity_sent_ids, i, j):
     return mask
 
 
+# 1 - общий случай
+# 2 - первый кусок
+# 3 - последний кусок
 grid_2 = np.tri(2).T
 grid_3 = np.tri(3).T
 grid_3_alt = np.array([
