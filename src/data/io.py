@@ -621,7 +621,8 @@ def simplify(example: Example):
     id_span = 0
     for span, entities in span_to_entities.items():
         unique_labels = {x.label for x in entities}
-        assert len(unique_labels) == 1, f"expected one unique label per span, but got {unique_labels} for span {span}"
+        assert len(unique_labels) == 1, \
+            f"[{example.id}] expected one unique label per span, but got {unique_labels} for span {span}"
         entity = entities.pop()
         _id = f"T{id_span}"
         entity_new = Entity(
