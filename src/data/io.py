@@ -2,7 +2,7 @@ import os
 import shutil
 import re
 import tqdm
-from typing import List, Union, Pattern
+from typing import List, Union, Pattern, Callable, IO
 from collections import defaultdict
 
 from .base import (
@@ -116,7 +116,6 @@ def get_id(id_arg: Union[int, str], prefix: str) -> str:
 def parse_collection(
         data_dir: str,
         n: int = None,
-        fix_new_line_symbol: bool = True,
         ner_encoding: str = NerEncodings.BIO,
         ner_prefix_joiner: str = NerPrefixJoiners.HYPHEN,
         tokens_pattern: Union[str, Pattern] = None,
@@ -124,7 +123,8 @@ def parse_collection(
         allow_nested_entities_one_label: bool = False,
         allow_many_entities_per_span_one_label: bool = False,
         allow_many_entities_per_span_different_labels: bool = False,
-        ignore_bad_examples: bool = False
+        ignore_bad_examples: bool = False,
+        read_fn: Callable = None
 ) -> List[Example]:
     """
     n - сколько примеров распарсить
@@ -155,17 +155,17 @@ def parse_collection(
             example = parse_example(
                 data_dir=data_dir,
                 filename=filename,
-                fix_new_line_symbol=fix_new_line_symbol,
                 ner_encoding=ner_encoding,
                 ner_prefix_joiner=ner_prefix_joiner,
                 tokens_expression=tokens_expression,
                 allow_nested_entities=allow_nested_entities,
                 allow_nested_entities_one_label=allow_nested_entities_one_label,
                 allow_many_entities_per_span_one_label=allow_many_entities_per_span_one_label,
-                allow_many_entities_per_span_different_labels=allow_many_entities_per_span_different_labels
+                allow_many_entities_per_span_different_labels=allow_many_entities_per_span_different_labels,
+                read_fn=read_fn
             )
             examples.append(example)
-        except (BadLineError, EntitySpanError, MultiRelationError, NestedNerError, NestedNerSingleEntityTypeError, RegexError) as e:
+        except (BadLineError, MultiRelationError, NestedNerError, NestedNerSingleEntityTypeError, RegexError) as e:
             err_name = type(e).__name__
             print(f"[{filename}] known error {err_name} occurred:")
             print(e)
@@ -175,6 +175,40 @@ def parse_collection(
                 error_counts[err_name] += 1
             else:
                 raise e
+        except EntitySpanError as e:
+            err_name = type(e).__name__
+            print(f"[{filename}] known error {err_name} occurred:")
+            print(e)
+            print("trying another readers...")
+            flag = False
+            for read_fn_alt in [read_file_v1, read_file_v2, read_file_v3]:
+                print("reader:", read_fn_alt.__name__)
+                if read_fn_alt.__name__ == read_fn.__name__:
+                    print("ignored due to the same as provided in args")
+                    continue
+                try:
+                    example = parse_example(
+                        data_dir=data_dir,
+                        filename=filename,
+                        ner_encoding=ner_encoding,
+                        ner_prefix_joiner=ner_prefix_joiner,
+                        tokens_expression=tokens_expression,
+                        allow_nested_entities=allow_nested_entities,
+                        allow_nested_entities_one_label=allow_nested_entities_one_label,
+                        allow_many_entities_per_span_one_label=allow_many_entities_per_span_one_label,
+                        allow_many_entities_per_span_different_labels=allow_many_entities_per_span_different_labels,
+                        read_fn=read_fn_alt
+                    )
+                    examples.append(example)
+                    flag = True
+                    break
+                except EntitySpanError as e:
+                    print(e)
+            if flag:
+                print("success :)")
+            else:
+                print("fail :(")
+
         except Exception as e:
             print(f"[{filename}] unknown error {type(e).__name__} occurred:")
             raise e
@@ -183,17 +217,39 @@ def parse_collection(
     return examples
 
 
+def read_file_v1(f: IO) -> str:
+    text = f.read()
+    return text
+
+
+def read_file_v2(f: IO) -> str:
+    """
+    collection5
+    """
+    text = " ".join(f)
+    return text
+
+
+def read_file_v3(f: IO) -> str:
+    """
+    rured, rucor, rurebus
+    """
+    text = " ".join(f)
+    text = text.replace('\n ', '\n')
+    return text
+
+
 def parse_example(
         data_dir: str,
         filename: str,
-        fix_new_line_symbol: bool = False,
         ner_encoding: str = NerEncodings.BIO,
         ner_prefix_joiner: str = NerPrefixJoiners.HYPHEN,
         tokens_expression: Pattern = TOKENS_EXPRESSION,
         allow_nested_entities: bool = False,
         allow_nested_entities_one_label: bool = False,
         allow_many_entities_per_span_one_label: bool = False,
-        allow_many_entities_per_span_different_labels: bool = False
+        allow_many_entities_per_span_different_labels: bool = False,
+        read_fn: Callable = None
 ) -> Example:
     """
     строчка файла filename.ann:
@@ -234,10 +290,9 @@ def parse_example(
     allow_many_entities_per_span_different_labels: разрешена ли вложенность такого вида: <ORG><LOC>foo</LOC></ORG>
     """
     # подгрузка текста
+    read_fn = read_fn if read_fn is not None else read_file_v1
     with open(os.path.join(data_dir, f'{filename}.txt')) as f:
-        text = ' '.join(f)
-        if fix_new_line_symbol:
-            text = text.replace('\n ', '\n')
+        text = read_fn(f)
 
     # токенизация
     tokens = []
@@ -297,8 +352,8 @@ def parse_example(
                 actual_entity_pattern = text[start_index:end_index]
                 if actual_entity_pattern != expected_entity_pattern:
                     raise EntitySpanError(f"[{filename}]: something is wrong with markup; "
-                                          f"expected entity is {expected_entity_pattern}, "
-                                          f"but got {actual_entity_pattern}")
+                                          f"expected entity is <bos>{expected_entity_pattern}<eos>, "
+                                          f"but got <bos>{actual_entity_pattern}<eos>")
 
                 # проверка на то, что в файле .ann нет дубликатов по сущностям
                 entity_span = start_index, end_index
