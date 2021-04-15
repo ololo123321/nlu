@@ -642,7 +642,7 @@ def simplify(example: Example):
     id_span_pair = 0
     for (span_head, span_dep), arcs in span_pair_to_arcs.items():
         unique_labels = {x.rel for x in arcs}
-        assert len(unique_labels) == 1, f"expected one unique label per span pair, " \
+        assert len(unique_labels) == 1, f"[{example.id}] expected one unique label per span pair, " \
             f"but got {unique_labels} for span pair ({span_head}, {span_dep})"
         arc = arcs.pop()
         arc_new = Arc(

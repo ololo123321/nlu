@@ -170,13 +170,15 @@ class Arc(ReprMixin):
             head: str,
             dep: str,
             rel: str,
-            comment: str = None
+            comment: str = None,
+            score: float = None  # мб пока не нужно
     ):
         self.id = id
         self.head = head
         self.dep = dep
         self.rel = rel
         self.comment = comment
+        self.score = score
 
         self.rel_id = None
         self.head_index = None

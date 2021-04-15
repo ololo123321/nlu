@@ -2607,7 +2607,8 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
             examples: List[Example],
             chunks: List[Example],
             window: int,
-            batch_size: int = 16
+            batch_size: int = 16,
+            no_or_one_parent_per_node: bool = True
     ):
         """
         Оценка качества на уровне документа.
@@ -2615,6 +2616,7 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
         :param chunks: куски (stride 1). предполагаетя, что для каждого документа из examples должны быть куски в chunks
         :param window: размер кусков (в предложениях)
         :param batch_size:
+        :param no_or_one_parent_per_node
         :return:
         """
         id_to_num_sentences = {x.id: x.tokens[-1].id_sent + 1 for x in examples}
@@ -2627,15 +2629,21 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
             for arc in x.arcs:
                 y_true.add((x.id, arc.head, arc.dep, arc.rel))
 
-        y_pred = set()
+        # y_pred = set()
+        head2dep = {}  # (file, head) -> {dep, score}
+        dep2head = {}
 
         for start in range(0, len(chunks), batch_size):
             end = start + batch_size
             chunks_batch = chunks[start:end]
             feed_dict = self._get_feed_dict(chunks_batch, training=False)
-            re_labels_pred = self.sess.run(self.re_labels_true_entities, feed_dict=feed_dict)
-            # re_labels_pred: np.ndarray, shape [batch_size, num_ent], dtype np.int32
+            re_labels_pred, re_logits_pred = self.sess.run(
+                [self.re_labels_true_entities, self.re_logits_true_entities],
+                feed_dict=feed_dict
+            )
+            # re_labels_pred: np.ndarray, shape [batch_size, num_entities], dtype np.int32
             # values in range [0, num_ent]; 0 means no dep.
+            # re_logits_pred: np.ndarray, shape [batch_size, num_entities, num_entities + 1], dtype np.float32
 
             for i in range(len(chunks_batch)):
                 chunk = chunks_batch[i]
@@ -2657,7 +2665,11 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
                     # for idx_head, idx_dep in enumerate(re_labels_pred_i):
                     for idx_head in range(num_entities_chunk):
                         idx_dep = re_labels_pred[i, idx_head]
+                        # нет ребра
                         if idx_dep == 0:
+                            continue
+                        # петля
+                        if idx_head == idx_dep - 1:
                             continue
                         head = entities_sorted[idx_head]
                         dep = entities_sorted[idx_dep - 1]
@@ -2665,7 +2677,29 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
                         id_sent_dep = dep.tokens[0].id_sent
                         if (id_sent_head == id_sent_abs_a and id_sent_dep == id_sent_abs_b) or \
                                 (id_sent_head == id_sent_abs_b and id_sent_dep == id_sent_abs_a):
-                            y_pred.add((chunk.parent, head.id, dep.id, id2rel[id_coref]))
+                            score = re_logits_pred[i, idx_head, idx_dep]
+                            key_head = chunk.parent, head.id
+                            key_dep = chunk.parent, dep.id
+                            if key_head in head2dep:
+                                if head2dep[key_head]["score"] < score:
+                                    head2dep[key_head] = {"dep": dep.id, "score": score}
+                                else:
+                                    pass
+                            else:
+                                if no_or_one_parent_per_node:
+                                    if key_dep in dep2head:
+                                        if dep2head[key_dep]["score"] < score:
+                                            dep2head[key_dep] = {"head": head.id, "score": score}
+                                            head2dep.pop(key_head, None)
+                                        else:
+                                            pass
+                                    else:
+                                        dep2head[key_dep] = {"head": head.id, "score": score}
+                                        head2dep[key_head] = {"dep": dep.id, "score": score}
+                                else:
+                                    head2dep[key_head] = {"dep": dep.id, "score": score}
+
+        y_pred = {(id_example, id_head, v["dep"], id2rel[id_coref]) for (id_example, id_head), v in head2dep.items()}
 
         tp = len(y_true & y_pred)
         fp = len(y_pred) - tp
