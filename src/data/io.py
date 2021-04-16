@@ -720,3 +720,124 @@ def simplify(example: Example):
     )
 
     return example_copy
+
+
+def to_conll(examples, path):
+    """
+    формат:
+    #begin document <doc_name_1>
+    token_0\tlabel_0\n
+    ...
+    token_k\tlabel_k\n
+    #end document
+
+    #begin document <doc_name_2>
+    ...
+
+    token - токен
+    label - выражение, по которому можно понять, к каким сущностям и компонентам принадлежит токен (см. примеры ниже)
+
+    * в одном файле может быть несколько документов
+    * примеры разметки в случае вложенных сущностей:
+
+    ```
+    Члены   (235
+    Талибана        (206)|235)
+    сейчас  -
+    находится       -
+    в       -
+    бегах   -
+    ```
+    сущность "Талибана" принадлежит к компоненте связности 206
+    и вложена в сущность "Члены Талибана", которая принадлежит компоненете связности 235
+
+    ```
+    первые  -
+    полученные      -
+    деньги  -
+    должны  -
+    быть    -
+    потрачены       -
+    на      -
+    восстановление  -
+    всех    (43
+    разрушенных     -
+    бомбежкой       -
+    школ    -
+    для     -
+    девочек -
+    в       -
+    Свате   43)|(50)
+    .       -
+    ```
+    сущность "Свате" принадлежит к компоненте связности 50
+    и вложена в сущность "всех разрушенных бомбежкой школ для девочек в Свате",
+    которая принадлежит компоненете связности 43
+
+    при закрытии вложенности не обязательно указывать номера компонент в порядке, соответствующем порядку открытия.
+    можно заметить, что в первом примере сначала указана внутренняя сущность (206), а потом закрыта внешняя (235).
+    Во втором примере ситуация обратная. В обоих случаях ошибки не будет.
+
+    После генерации файлов в conll-формате оценка качества производится запуском скрипта scorer.pl
+    из библиотеки https://github.com/conll/reference-coreference-scorers:
+
+    perl scorer.pl <metric> <key> <response> [<document-id>]
+    <metric> - название метрики (all, если интересуют все)
+    <key> - y_true
+    <response> - y_pred
+    <document-id> (optional) - номер документа, на котором хочется померить качество
+    (none, если интересует качество на всём корпусе)
+    подробное описание см. в README библиотеки
+    """
+    # не множество, так как могут быть дубликаты: например, если две сущности
+    # начинаются с разных токенов, но заканчиваются в одном, причём относятся к одной копмоненте
+    token2info = defaultdict(list)
+    for x in examples:
+        for entity in x.entities:
+            assert entity.id_chain is not None
+            index_start = entity.tokens[0].index_abs
+            index_end = entity.tokens[-1].index_abs
+            _is_single = index_start == index_end
+            token2info[(x.id, index_start)].append((entity.id_chain, _is_single, True))
+            token2info[(x.id, index_end)].append((entity.id_chain, _is_single, False))
+
+    def build_label(id_example, token_index):
+        """
+        token.index_abs -> множество компонент которые он {открывает, закрывает}
+        если ничего не открывает и не закрывает, то вернуть "-"
+        """
+        key = id_example, token_index
+        if key in token2info:
+            items = token2info[key]
+            pieces = []
+            singles = set()
+            for id_component, is_single, is_open in items:
+                if is_single:
+                    if id_component in singles:
+                        continue
+                    else:
+                        p = f'({id_component})'
+                        singles.add(id_component)
+                else:
+                    if is_open:
+                        p = f'({id_component}'
+                    else:
+                        p = f'{id_component})'
+                pieces.append(p)
+            res = '|'.join(pieces)
+        else:
+            res = "-"
+        return res
+
+    with open(path, "w") as f:
+        for x in examples:
+            num_open = 0
+            num_close = 0
+            f.write(f"#begin document {x.id}\n")
+            for t in x.tokens:
+                label = build_label(id_example=x.id, token_index=t.index_abs)
+                num_open += label.count('(')
+                num_close += label.count(')')
+                f.write(f"{t.text}\t{label}\n")
+            f.write("#end document\n\n")
+            assert num_open == num_close, f"[{x.id}] {num_open} != {num_close}"

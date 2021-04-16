@@ -2260,7 +2260,6 @@ class BertForCoreferenceResolution(BertJointModelWithNestedNer):
         return d
 
 
-# TODO: запустить
 class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
     """
     * между узлами может быть ровно один тип связи (кореференция)
