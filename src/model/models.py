@@ -13,7 +13,7 @@ import numpy as np
 from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 
-from src.utils import group_tokens_in_entities
+from src.utils import get_entity_spans
 from src.model.utils import (
     get_batched_coords_from_labels,
     get_labels_mask,
@@ -26,7 +26,7 @@ from src.model.utils import (
     get_sent_pairs_to_predict_for,
 )
 from src.model.layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN
-from src.data.base import Example, Arc
+from src.data.base import Example, Arc, Entity
 from src.data.postprocessing import get_valid_spans
 from src.metrics import classification_report, classification_report_ner, f1_precision_recall_support
 
@@ -84,7 +84,14 @@ class BaseModel(ABC):
         pass
 
     @abstractmethod
-    def predict(self, examples: List[Example], batch_size: int = 16):
+    def predict(
+            self,
+            examples: List[Example],
+            chunks: List[Example],
+            window: int = 1,
+            batch_size: int = 16,
+            **kwargs
+    ):
         pass
 
     @abstractmethod
@@ -659,7 +666,8 @@ class BertJointModel(BaseModel):
 
         return performance_info
 
-    def predict(self, examples: List[Example], batch_size: int = 16):
+    # TODO: реалзиовать случай window > 1
+    def predict(self, examples: List[Example], chunks: List[Example], window: int = 1, batch_size: int = 16, **kwargs):
         """
         инференс. примеры не должны содержать разметку токенов и пар сущностей!
         сделано так для того, чтобы не было непредсказуемых результатов.
@@ -673,40 +681,62 @@ class BertJointModel(BaseModel):
             for t in x.tokens:
                 assert len(t.labels) == 0, f"[{x.id}] tokens are already annotated!"
 
+        id2example = {x.id: x for x in examples}
+
         no_rel_id = self.config["model"]["re"]["no_relation_id"]
 
-        for start in range(0, len(examples), batch_size):
+        for start in range(0, len(chunks), batch_size):
             end = start + batch_size
-            examples_batch = examples[start:end]
-            feed_dict = self._get_feed_dict(examples_batch, training=False)
+            chunks_batch = chunks[start:end]
+            feed_dict = self._get_feed_dict(chunks_batch, training=False)
             ner_labels_pred, rel_labels_pred, num_entities = self.sess.run(
                 [self.ner_preds_inference, self.re_labels_pred_entities, self.num_entities_pred],
                 feed_dict=feed_dict
             )
 
-            assert ner_labels_pred.shape[1] == max(len(x.tokens) for x in examples)
+            m = max(len(x.tokens) for x in chunks_batch)
+            assert m == ner_labels_pred.shape[1], f'{m} != {ner_labels_pred.shape[1]}'
 
-            for i, x in enumerate(examples_batch):
+            for i, chunk in enumerate(chunks_batch):
+                example = id2example[chunk.parent]
+                ner_labels_i = []
                 # ner
-                for j, t in enumerate(x.tokens):
+                for j, t in enumerate(chunk.tokens):
                     id_label = ner_labels_pred[i, j]
-                    t.labels.append(self.inv_ner_enc[id_label])
+                    label = self.inv_ner_enc[id_label]
+                    ner_labels_i.append(label)
 
-                group_tokens_in_entities(example=x, joiner=self.config["model"]["ner"]["prefix_joiner"])
-                num_entities_i = num_entities[i]
-                assert len(x.entities) == num_entities_i, f"[{x.id}] {len(x.entities)} != {num_entities_i}"
+                entities_chunk = []
+                tag2spans = get_entity_spans(labels=ner_labels_i, joiner=self.config["model"]["ner"]["prefix_joiner"])
+                for label, spans in tag2spans.items():
+                    for span in spans:
+                        start_abs = chunk.tokens[span.start].index_abs
+                        end_abs = chunk.tokens[span.end].index_abs
+                        tokens = example.tokens[start_abs:end_abs + 1]
+                        t_first = tokens[0]
+                        t_last = tokens[-1]
+                        text = example.text[t_first.span_rel.start:t_last.span_rel.end]
+                        id_entity = 'T' + str(len(example.entities))
+                        entity = Entity(
+                            id=id_entity,
+                            label=label,
+                            text=text,
+                            tokens=tokens,
+                        )
+                        example.entities.append(entity)
+                        entities_chunk.append(entity)
 
                 # re
-                entities_sorted = sorted(x.entities, key=lambda e: (e.tokens[0].index_rel, e.tokens[-1].index_rel))
+                num_entities_i = num_entities[i]
+                entities_sorted = sorted(entities_chunk, key=lambda e: (e.tokens[0].index_rel, e.tokens[-1].index_rel))
                 arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
-                rel_counter = 0
                 for j, k in zip(*np.where(arcs_pred != no_rel_id)):
                     id_label = arcs_pred[j, k]
                     id_head = entities_sorted[j].id
                     id_dep = entities_sorted[k].id
-                    arc = Arc(id=f"R{rel_counter}", head=id_head, dep=id_dep, rel=self.inv_re_enc[id_label])
-                    x.arcs.append(arc)
-                    rel_counter += 1
+                    id_arc = "R" + str(len(example.arcs))
+                    arc = Arc(id=id_arc, head=id_head, dep=id_dep, rel=self.inv_re_enc[id_label])
+                    example.arcs.append(arc)
 
     def initialize(self):
         bert_dir = self.config["model"]["bert"]["dir"]

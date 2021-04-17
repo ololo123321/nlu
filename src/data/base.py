@@ -114,7 +114,6 @@ class Entity(ReprMixin):
             label: Union[int, str] = None,
             text: str = None,
             tokens: List[Token] = None,
-            labels: List[str] = None,  # TODO: зачем??
             is_event_trigger: bool = False,
             attrs: List[Attribute] = None,  # атрибуты сущности
             comment: str = None,
@@ -126,7 +125,6 @@ class Entity(ReprMixin):
         :param label:
         :param text:
         :param tokens:
-        :param labels:
         :param is_event_trigger:
         :param attrs:
         :param comment:
@@ -134,7 +132,6 @@ class Entity(ReprMixin):
         self.id = id
         self.label = label
         self.text = text
-        self.labels = labels
         self.tokens = tokens if tokens is not None else []
         self.is_event_trigger = is_event_trigger
         self.attrs = attrs if attrs is not None else []
