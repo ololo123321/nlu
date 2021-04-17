@@ -106,8 +106,6 @@ class Token(ReprMixin):
         self.token_ids = []
         self.label_ids = []
 
-        self.labels_pred = []
-
 
 class Entity(ReprMixin):
     def __init__(
@@ -116,7 +114,7 @@ class Entity(ReprMixin):
             label: Union[int, str] = None,
             text: str = None,
             tokens: List[Token] = None,
-            labels: List[str] = None,
+            labels: List[str] = None,  # TODO: зачем??
             is_event_trigger: bool = False,
             attrs: List[Attribute] = None,  # атрибуты сущности
             comment: str = None,

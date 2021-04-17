@@ -29,90 +29,6 @@ from .exceptions import (
 )
 
 
-# TODO: адаптировать
-# TODO: иметь возможность сохранть не только новые события, но и новые сущности
-#  (то есть случай, при котором у инстансов класса Entity нет id)
-
-def save_examples(
-        examples: List[Example],
-        output_dir: str,
-        copy_texts: bool = False,
-        collection_dir: str = None,
-        write_mode: str = "a"
-):
-    assert write_mode in {"a", "w"}
-    event_counter = defaultdict(int)
-    filenames = set()
-    for x in examples:
-        filenames.add(x.filename)
-        with open(os.path.join(output_dir, f"{x.filename}.ann"), write_mode) as f:
-            events = {}
-            # сущности
-            for entity in x.entities:
-                start = entity.tokens[0].span_abs.start
-                end = entity.tokens[-1].span_abs.end
-                line = f"{entity.id}\t{entity.label} {start} {end}\t{entity.text}\n"
-                f.write(line)
-                if entity.is_event_trigger:
-                    if entity.id not in events:
-                        id_event = event_counter[x.filename]
-                        events[entity.id] = Event(
-                            id=id_event,
-                            trigger=entity.id,
-                            label=entity.label,
-                        )
-                        event_counter[x.filename] += 1
-
-            # отношения
-            for arc in x.arcs:
-                assert isinstance(arc.rel, str), "forget to transform arc codes to values!"
-                if arc.head in events:
-                    arg = EventArgument(id=arc.dep, role=arc.rel)
-                    events[arc.head].args.append(arg)
-                else:
-                    id_arc = get_id(arc.id, "R")
-                    line = f"{id_arc}\t{arc.rel} Arg1:{arc.head} Arg2:{arc.dep}\n"
-                    f.write(line)
-
-            # события
-            for event in events.values():
-                assert event.id is not None
-                id_event = get_id(event.id, "E")
-                line = f"{id_event}\t{event.label}:{event.trigger}"
-                role2count = defaultdict(int)
-                args_str = ""
-                for arg in event.args:
-                    i = role2count[arg.role]
-                    role = arg.role
-                    if i > 0:
-                        role += str(i + 1)
-                    args_str += f"{role}:{arg.id}" + ' '
-                    role2count[arg.role] += 1
-                args_str = args_str.strip()
-                if args_str:
-                    line += ' ' + args_str
-                line += '\n'
-                f.write(line)
-
-    if copy_texts:
-        assert collection_dir is not None
-        for name in filenames:
-            shutil.copy(os.path.join(collection_dir, f"{name}.txt"), output_dir)
-
-
-def get_id(id_arg: Union[int, str], prefix: str) -> str:
-    assert id_arg is not None
-    if isinstance(id_arg, str):
-        assert len(id_arg) >= 2
-        assert id_arg[0] == prefix
-        assert id_arg[1:].isdigit()
-        return id_arg
-    elif isinstance(id_arg, int):
-        return prefix + str(id_arg)
-    else:
-        raise ValueError(f"expected type of id_arg is string or integer, but got {type(id_arg)}")
-
-
 def parse_collection(
         data_dir: str,
         n: int = None,
@@ -801,7 +717,7 @@ def to_conll(examples, path):
             token2info[(x.id, index_start)].append((entity.id_chain, _is_single, True))
             token2info[(x.id, index_end)].append((entity.id_chain, _is_single, False))
 
-    def build_label(id_example, token_index):
+    def build_label(id_example, token_index) -> str:
         """
         token.index_abs -> множество компонент которые он {открывает, закрывает}
         если ничего не открывает и не закрывает, то вернуть "-"
@@ -811,18 +727,18 @@ def to_conll(examples, path):
             items = token2info[key]
             pieces = []
             singles = set()
-            for id_component, is_single, is_open in items:
+            for id_chain, is_single, is_open in items:
                 if is_single:
-                    if id_component in singles:
+                    if id_chain in singles:
                         continue
                     else:
-                        p = f'({id_component})'
-                        singles.add(id_component)
+                        p = f'({id_chain})'
+                        singles.add(id_chain)
                 else:
                     if is_open:
-                        p = f'({id_component}'
+                        p = f'({id_chain}'
                     else:
-                        p = f'{id_component})'
+                        p = f'{id_chain})'
                 pieces.append(p)
             res = '|'.join(pieces)
         else:
@@ -841,3 +757,87 @@ def to_conll(examples, path):
                 f.write(f"{t.text}\t{label}\n")
             f.write("#end document\n\n")
             assert num_open == num_close, f"[{x.id}] {num_open} != {num_close}"
+
+
+# TODO: проверить, работает ли
+# TODO: создавать инстансы класса Event на уровне model.predict
+def to_brat(
+        examples: List[Example],
+        output_dir: str,
+        copy_texts: bool = False,
+        collection_dir: str = None,
+        write_mode: str = "a"
+):
+    assert write_mode in {"a", "w"}
+    event_counter = defaultdict(int)
+    filenames = set()
+    for x in examples:
+        filenames.add(x.filename)
+        with open(os.path.join(output_dir, f"{x.filename}.ann"), write_mode) as f:
+            events = {}
+            # сущности
+            for entity in x.entities:
+                start = entity.tokens[0].span_abs.start
+                end = entity.tokens[-1].span_abs.end
+                assert isinstance(entity.id, str)
+                assert entity.id[0] == "T"
+                line = f"{entity.id}\t{entity.label} {start} {end}\t{entity.text}\n"
+                f.write(line)
+                if entity.is_event_trigger:
+                    if entity.id not in events:
+                        id_event = event_counter[x.filename]
+                        events[entity.id] = Event(
+                            id=id_event,
+                            trigger=entity.id,
+                            label=entity.label,
+                        )
+                        event_counter[x.filename] += 1
+
+            # отношения
+            for arc in x.arcs:
+                assert isinstance(arc.rel, str), "forget to transform arc codes to values!"
+                if arc.head in events:
+                    arg = EventArgument(id=arc.dep, role=arc.rel)
+                    events[arc.head].args.append(arg)
+                else:
+                    id_arc = get_id(arc.id, "R")
+                    line = f"{id_arc}\t{arc.rel} Arg1:{arc.head} Arg2:{arc.dep}\n"
+                    f.write(line)
+
+            # события
+            for event in events.values():
+                assert event.id is not None
+                id_event = get_id(event.id, "E")
+                line = f"{id_event}\t{event.label}:{event.trigger}"
+                role2count = defaultdict(int)
+                args_str = ""
+                for arg in event.args:
+                    i = role2count[arg.role]
+                    role = arg.role
+                    if i > 0:
+                        role += str(i + 1)
+                    args_str += f"{role}:{arg.id}" + ' '
+                    role2count[arg.role] += 1
+                args_str = args_str.rstrip()
+                if args_str:
+                    line += ' ' + args_str
+                line += '\n'
+                f.write(line)
+
+    if copy_texts:
+        assert collection_dir is not None
+        for name in filenames:
+            shutil.copy(os.path.join(collection_dir, f"{name}.txt"), output_dir)
+
+
+def get_id(id_arg: Union[int, str], prefix: str) -> str:
+    assert id_arg is not None
+    if isinstance(id_arg, str):
+        assert len(id_arg) >= 2
+        assert id_arg[0] == prefix
+        assert id_arg[1:].isdigit()
+        return id_arg
+    elif isinstance(id_arg, int):
+        return prefix + str(id_arg)
+    else:
+        raise ValueError(f"expected type of id_arg is string or integer, but got {type(id_arg)}")

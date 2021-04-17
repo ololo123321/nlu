@@ -1,5 +1,6 @@
 from typing import List, Dict, Union, Set, Tuple
 from collections import defaultdict
+from src.utils import get_entity_spans
 
 
 def classification_report(
@@ -81,54 +82,6 @@ def classification_report_ner(y_true: List[List[str]], y_pred: List[List[str]], 
         v.update(d_tag)
 
     return d
-
-
-def get_entity_spans(labels: List[str], joiner: str = '-') -> Dict:
-    """
-    поддерживает только кодировку BIO
-    :param labels:
-    :param joiner:
-    :return:
-    """
-    tag2spans = defaultdict(set)
-
-    num_labels = len(labels)
-    entity_tag = None
-    start = 0
-    end = 0
-    # поднятие:
-    # 1. B-*
-    # опускание:
-    # 1. O
-    # 2. I-{другой таг}
-
-    flag = False
-
-    for i in range(num_labels):
-        label = labels[i]
-        bio = label[0]
-        tag = label.split(joiner)[-1]
-        if bio == "B":
-            if entity_tag is not None:
-                tag2spans[entity_tag].add((start, end))
-            flag = True
-            start = i
-            end = i
-            entity_tag = tag
-        elif bio == "I":
-            if flag:
-                if tag == entity_tag:
-                    end += 1
-                else:
-                    tag2spans[entity_tag].add((start, end))
-                    flag = False
-        elif bio == "O":
-            if flag:
-                tag2spans[entity_tag].add((start, end))
-                flag = False
-    if flag:
-        tag2spans[entity_tag].add((start, end))
-    return tag2spans
 
 
 def f1_precision_recall_support(tp: int, fp: int, fn: int) -> Dict:

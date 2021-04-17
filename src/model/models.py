@@ -13,7 +13,8 @@ import numpy as np
 from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 
-from .utils import (
+from src.utils import group_tokens_in_entities
+from src.model.utils import (
     get_batched_coords_from_labels,
     get_labels_mask,
     get_dense_labels_from_indices,
@@ -22,12 +23,12 @@ from .utils import (
     upper_triangular,
     get_entity_embeddings_concat,
     get_entity_pairs_mask,
-    get_sent_pairs_to_predict_for
+    get_sent_pairs_to_predict_for,
 )
-from .layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN
-from ..data.base import Example, Arc
-from ..data.postprocessing import get_valid_spans
-from ..metrics import classification_report, classification_report_ner, f1_precision_recall_support
+from src.model.layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN
+from src.data.base import Example, Arc
+from src.data.postprocessing import get_valid_spans
+from src.metrics import classification_report, classification_report_ner, f1_precision_recall_support
 
 
 class BaseModel(ABC):
@@ -660,10 +661,18 @@ class BertJointModel(BaseModel):
 
     def predict(self, examples: List[Example], batch_size: int = 16):
         """
-        ner - запись лейблов в Token.labels_pred
-        re - создание новых инстансов Arc и запись их в Example.arcs_pred
-        TODO: реализовать группировку токенов в сущности
+        инференс. примеры не должны содержать разметку токенов и пар сущностей!
+        сделано так для того, чтобы не было непредсказуемых результатов.
+
+        ner - запись лейблов в Token.labels
+        re - создание новых инстансов Arc и запись их в Example.arcs
         """
+        # проверка примеров
+        for x in examples:
+            assert len(x.arcs) == 0, f"[{x.id}] arcs are already annotated!"
+            for t in x.tokens:
+                assert len(t.labels) == 0, f"[{x.id}] tokens are already annotated!"
+
         no_rel_id = self.config["model"]["re"]["no_relation_id"]
 
         for start in range(0, len(examples), batch_size):
@@ -681,15 +690,23 @@ class BertJointModel(BaseModel):
                 # ner
                 for j, t in enumerate(x.tokens):
                     id_label = ner_labels_pred[i, j]
-                    t.labels_pred.append(self.inv_ner_enc[id_label])
+                    t.labels.append(self.inv_ner_enc[id_label])
+
+                group_tokens_in_entities(example=x, joiner=self.config["model"]["ner"]["prefix_joiner"])
+                num_entities_i = num_entities[i]
+                assert len(x.entities) == num_entities_i, f"[{x.id}] {len(x.entities)} != {num_entities_i}"
 
                 # re
-                num_entities_i = num_entities[i]
+                entities_sorted = sorted(x.entities, key=lambda e: (e.tokens[0].index_rel, e.tokens[-1].index_rel))
                 arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
+                rel_counter = 0
                 for j, k in zip(*np.where(arcs_pred != no_rel_id)):
                     id_label = arcs_pred[j, k]
-                    arc = Arc(id=f"{j}_{k}", head=j, dep=k, rel=self.inv_re_enc[id_label])
-                    x.arcs_pred.append(arc)
+                    id_head = entities_sorted[j].id
+                    id_dep = entities_sorted[k].id
+                    arc = Arc(id=f"R{rel_counter}", head=id_head, dep=id_dep, rel=self.inv_re_enc[id_label])
+                    x.arcs.append(arc)
+                    rel_counter += 1
 
     def initialize(self):
         bert_dir = self.config["model"]["bert"]["dir"]

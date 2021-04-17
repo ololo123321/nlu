@@ -1,5 +1,7 @@
 import random
+from collections import defaultdict
 from typing import List, Dict
+from src.data.base import Entity, Example
 
 
 def train_test_split(
@@ -88,3 +90,76 @@ def classification_report_to_string(d: Dict, digits: int = 4) -> str:
         report = report.rstrip()
 
     return report
+
+
+def get_entity_spans(labels: List[str], joiner: str = '-') -> Dict:
+    """
+    поддерживает только кодировку BIO
+    :param labels:
+    :param joiner:
+    :return:
+    """
+    tag2spans = defaultdict(set)
+
+    num_labels = len(labels)
+    entity_tag = None
+    start = 0
+    end = 0
+    # поднятие:
+    # 1. B-*
+    # опускание:
+    # 1. O
+    # 2. I-{другой таг}
+
+    flag = False
+
+    for i in range(num_labels):
+        label = labels[i]
+        bio = label[0]
+        tag = label.split(joiner)[-1]
+        if bio == "B":
+            if entity_tag is not None:
+                tag2spans[entity_tag].add((start, end))
+            flag = True
+            start = i
+            end = i
+            entity_tag = tag
+        elif bio == "I":
+            if flag:
+                if tag == entity_tag:
+                    end += 1
+                else:
+                    tag2spans[entity_tag].add((start, end))
+                    flag = False
+        elif bio == "O":
+            if flag:
+                tag2spans[entity_tag].add((start, end))
+                flag = False
+    if flag:
+        tag2spans[entity_tag].add((start, end))
+    return tag2spans
+
+
+def group_tokens_in_entities(
+        example: Example,
+        joiner: str = '-'
+):
+    labels = []
+    for t in example.tokens:
+        assert len(t.labels) == 1
+        labels.append(t.labels[0])
+    tag2spans = get_entity_spans(labels=labels, joiner=joiner)
+    entity_counter = 0
+    for label, spans in tag2spans.items():
+        for start, end in spans:
+            _id = f'T{entity_counter}'
+            tokens = example.tokens[start:end]
+            text = example.text[tokens[0].span_rel.start:tokens[-1].span_rel.end]
+            entity = Entity(
+                id=_id,
+                label=label,
+                text=text,
+                tokens=tokens,
+            )
+            example.entities.append(entity)
+            entity_counter += 1

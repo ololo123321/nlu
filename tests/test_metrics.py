@@ -1,5 +1,6 @@
 import pytest
-from src.metrics import get_entity_spans, f1_precision_recall_support, classification_report, classification_report_ner
+from src.utils import get_entity_spans
+from src.metrics import f1_precision_recall_support, classification_report, classification_report_ner
 
 
 @pytest.mark.parametrize("labels, expected", [
