@@ -5,7 +5,7 @@ from rusenttokenize import ru_sent_tokenize
 from collections import defaultdict
 import nltk
 
-from .base import (
+from src.data.base import (
     Entity,
     Example,
     Languages,
@@ -15,6 +15,7 @@ from .base import (
     Token,
     Span,
 )
+from src.utils import get_connected_components
 
 # split
 
@@ -140,6 +141,9 @@ def split_example_v2(
     см. fix_pointers_fn и get_sentences_spans_fixed_pointers
     :return:
     """
+    # чтоб избавиться от warning "Expected type Optional[str], got (o: object)"
+    # при создании итоговых инстансов класса Example
+    assert isinstance(example.id, str)
     if not example.text:
         print(f"[{example.id} WARNING]: empty text")
         return [Example(**example.__dict__)]
@@ -476,3 +480,20 @@ def show_diff(reference: List[Example], proposed: List[Example]):
     print("num relations reference:", r)
     print("num relations proposed:", p)
     print("percent change:", round((p / r - 1.0) * 100, 4), "%")
+
+
+def assign_id_chain(examples: List[Example]):
+    for x in examples:
+        id2entity = {}
+        g = {}
+        for entity in x.entities:
+            g[entity.id] = set()
+            id2entity[entity.id] = entity
+        for arc in x.arcs:
+            g[arc.head].add(arc.dep)
+
+        components = get_connected_components(g)
+
+        for id_chain, comp in enumerate(components):
+            for id_entity in comp:
+                id2entity[id_entity].id_chain = id_chain

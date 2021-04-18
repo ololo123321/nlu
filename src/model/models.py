@@ -2559,7 +2559,7 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
                 for entity in x.entities:
                     start = entity.tokens[0].index_rel
                     end = entity.tokens[-1].index_rel
-                    spans_true[start, end] = entity.label_id
+                    spans_true[start, end] = self.ner_enc[entity.label]
 
                 spans_pred = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
                 ner_logits_i = ner_logits[i, :num_tokens, :num_tokens, :]
@@ -2578,7 +2578,7 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
                 for arc in x.arcs:
                     assert arc.head_index is not None
                     assert arc.dep_index is not None
-                    arcs_true[arc.head_index, arc.dep_index] = arc.rel_id
+                    arcs_true[arc.head_index, arc.dep_index] = self.re_enc[arc.rel]
 
                 arcs_pred = np.full((num_entities_i, num_entities_i), no_rel_id, dtype=np.int32)
                 for id_head, id_dep in enumerate(re_labels_pred[i, :num_entities_i]):

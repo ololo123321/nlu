@@ -1,3 +1,4 @@
+import subprocess
 from typing import List, Dict, Union, Set, Tuple
 from collections import defaultdict
 from src.utils import get_entity_spans
@@ -141,6 +142,19 @@ def _f1_score_micro_v2(y_true: List, y_pred: List, trivial_label: Union[int, str
     d = {"f1": f1, "precision": precision, "recall": recall, "support": num_gold}
 
     return d
+
+
+def get_coreferense_resolution_metrics(path_true, path_pred, scorer_path, metric: str = "all"):
+    valid_metrics = {"all", "muc", "bcub", "ceafm", "ceafe", "blanc"}
+    assert metric in valid_metrics, f"expected metric in {valid_metrics}, but got {metric}"
+    cmd = ["perl", scorer_path, "all", path_true, path_pred, "none"]
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    process.wait()
+    stdout = stdout.decode("utf-8")
+    if stderr is not None:
+        print(stderr)
+    return stdout
 
 
 def classification_report_set(y_true: Set[Tuple], y_pred: Set[Tuple]) -> Dict:

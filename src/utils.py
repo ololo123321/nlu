@@ -1,6 +1,6 @@
 import random
 from collections import defaultdict
-from typing import List, Dict, Set, Iterable, Tuple
+from typing import List, Dict, Set
 from src.data.base import Span
 
 
