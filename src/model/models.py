@@ -13,7 +13,7 @@ import numpy as np
 from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 
-from src.utils import get_entity_spans
+from src.utils import get_entity_spans, get_connected_components
 from src.model.utils import (
     get_batched_coords_from_labels,
     get_labels_mask,
@@ -2309,8 +2309,7 @@ class BertForCoreferenceResolution(BertJointModelWithNestedNer):
 
 class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
     """
-    * между узлами может быть ровно один тип связи (кореференция)
-    * у одного head может быть ровно один dep
+    учится предсказывать родителя для каждого узла
     """
     def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
@@ -2419,6 +2418,9 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
 
     # TODO: много копипасты!
     def _get_feed_dict(self, examples: List[Example], training: bool):
+        assert self.ner_enc is not None
+        assert self.re_enc is not None
+
         # bert
         input_ids = []
         input_mask = []
@@ -2468,9 +2470,8 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
             for entity in x.entities:
                 start = entity.tokens[0].index_rel
                 end = entity.tokens[-1].index_rel
-                label = entity.label_id
-                assert isinstance(label, int)
-                ner_labels.append((i, start, end, label))
+                id_label = self.ner_enc[entity.label]
+                ner_labels.append((i, start, end, id_label))
 
                 if entity.id in head2dep.keys():
                     dep_index = head2dep[entity.id].index + 1
@@ -2648,13 +2649,14 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
         return performance_info
 
     # TODO: копипаста
-    def evaluate_doc_level(
+    def predict(
             self,
             examples: List[Example],
             chunks: List[Example],
-            window: int,
+            window: int = 1,
             batch_size: int = 16,
-            no_or_one_parent_per_node: bool = True
+            no_or_one_parent_per_node: bool = False,
+            **kwargs
     ):
         """
         Оценка качества на уровне документа.
@@ -2666,14 +2668,6 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
         :return:
         """
         id_to_num_sentences = {x.id: x.tokens[-1].id_sent + 1 for x in examples}
-        id2rel = {v: k for k, v in self.re_enc.items()}
-        id_coref = 1
-
-        # (id_example, id_head, id_dep, rel)
-        y_true = set()
-        for x in examples:
-            for arc in x.arcs:
-                y_true.add((x.id, arc.head, arc.dep, arc.rel))
 
         # y_pred = set()
         head2dep = {}  # (file, head) -> {dep, score}
@@ -2745,13 +2739,24 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
                                 else:
                                     head2dep[key_head] = {"dep": dep.id, "score": score}
 
-        y_pred = {(id_example, id_head, v["dep"], id2rel[id_coref]) for (id_example, id_head), v in head2dep.items()}
+        # присвоение id_chain
+        for x in examples:
+            id2entity = {}
+            g = {}
+            for entity in x.entities:
+                g[entity.id] = set()
+                id2entity[entity.id] = entity
+            for entity in x.entities:
+                key = x.id, entity.id
+                if key in head2dep:
+                    dep = head2dep[key]["dep"]
+                    g[entity.id].add(dep)
 
-        tp = len(y_true & y_pred)
-        fp = len(y_pred) - tp
-        fn = len(y_true) - tp
-        d = f1_precision_recall_support(tp=tp, fp=fp, fn=fn)
-        return d, y_true, y_pred
+            components = get_connected_components(g)
+
+            for id_chain, comp in enumerate(components):
+                for id_entity in comp:
+                    id2entity[id_entity].id_chain = id_chain
 
 
 # TODO: проверить работоспособность

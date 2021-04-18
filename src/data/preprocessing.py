@@ -369,6 +369,7 @@ def apply_bpe(
         t.token_ids = tokenizer.convert_tokens_to_ids(t.pieces)
         num_pieces = len(t.pieces)
         for label in t.labels:
+            # (Иван, B-PER) -> ([Ив, #ан], [B-PER, I-PER])
             t.labels_pieces.append(label)
             if num_pieces > 1:
                 if label[0] == "B":

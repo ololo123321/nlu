@@ -1,7 +1,7 @@
 import random
 from collections import defaultdict
-from typing import List, Dict, Set
-from src.data.base import Entity, Example, Span
+from typing import List, Dict, Set, Iterable, Tuple
+from src.data.base import Span
 
 
 def train_test_split(
@@ -138,3 +138,54 @@ def get_entity_spans(labels: List[str], joiner: str = '-') -> Dict[str, Set[Span
     if flag:
         tag2spans[entity_tag].add(Span(start, end))
     return tag2spans
+
+
+def get_connected_components(g):
+    """
+    {1: set(), 2: {1}, 3: set()} -> [[1, 2], [3]]
+    g - граф в виде родитель -> дети
+    если среди детей есть такой, что его нет в множестве ключей g, то вызвать ошибку
+    :param g:
+    :return:
+    """
+    vertices = set()
+    g2 = defaultdict(set)
+    for parent, children in g.items():
+        vertices.add(parent)
+        for child in children:
+            assert child in g, f"unknown node {child}"
+            g2[parent].add(child)
+            g2[child].add(parent)
+    components = []
+    while vertices:
+        root = vertices.pop()
+        comp = dfs(g2, root, warn_on_cycles=False)
+        components.append(comp)
+        for v in comp:
+            if v != root:
+                vertices.remove(v)
+    return components
+
+
+def get_strongly_connected_components(g):
+    """
+    {1: set(), 2: {1}, 3: set()} -> [[1], [2], [3]]
+    пока не надо
+    """
+    pass
+
+
+def dfs(g: Dict[str, Set[str]], v: str, warn_on_cycles: bool = False):
+    visited = set()
+
+    def traverse(i):
+        visited.add(i)
+        for child in g[i]:
+            if child not in visited:
+                traverse(child)
+            else:
+                if warn_on_cycles:
+                    print(f"graph contains cycles: last edge is {i} -> {child}")
+
+    traverse(v)
+    return visited
