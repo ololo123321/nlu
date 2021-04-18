@@ -759,16 +759,17 @@ def to_conll(examples, path):
             assert num_open == num_close, f"[{x.id}] {num_open} != {num_close}"
 
 
-# TODO: проверить, работает ли
 # TODO: создавать инстансы класса Event на уровне model.predict
 def to_brat(
         examples: List[Example],
         output_dir: str,
         copy_texts: bool = False,
         collection_dir: str = None,
+        copy_annotation_config: bool = False,
         write_mode: str = "a"
 ):
     assert write_mode in {"a", "w"}
+    os.makedirs(output_dir, exist_ok=True)
     event_counter = defaultdict(int)
     filenames = set()
     for x in examples:
@@ -828,6 +829,13 @@ def to_brat(
         assert collection_dir is not None
         for name in filenames:
             shutil.copy(os.path.join(collection_dir, f"{name}.txt"), output_dir)
+    if copy_annotation_config:
+        assert collection_dir is not None
+        conf_path = os.path.join(collection_dir, "annotation.conf")
+        if os.path.exists(conf_path):
+            shutil.copy(conf_path, output_dir)
+        else:
+            print(f"there is no file annotation.conf in {collection_dir}")
 
 
 def get_id(id_arg: Union[int, str], prefix: str) -> str:
