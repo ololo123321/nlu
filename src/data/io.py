@@ -292,7 +292,6 @@ def parse_example(
                 if num_entity_tokens == 0:
                     raise RegexError(f"regex fail to tokenize entity pattern {expected_entity_pattern}")
 
-                entity_labels = []
                 entity_tokens = []
                 for i, m in enumerate(entity_matches):
                     # добавление токена сущности
@@ -308,7 +307,6 @@ def parse_example(
 
                     # добавление лейбла
                     label = prefix + ner_prefix_joiner + entity_label
-                    entity_labels.append(label)
 
                     # вывод спана токена в исходном тексте
                     si, ei = m.span()
@@ -355,7 +353,6 @@ def parse_example(
                     label=entity_label,
                     text=actual_entity_pattern,
                     tokens=entity_tokens,
-                    labels=entity_labels,
                     is_event_trigger=False  # заполнится потом
                 )
                 id2entity[entity.id] = entity
