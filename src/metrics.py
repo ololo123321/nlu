@@ -147,12 +147,13 @@ def _f1_score_micro_v2(y_true: List, y_pred: List, trivial_label: Union[int, str
 def get_coreferense_resolution_metrics(path_true, path_pred, scorer_path, metric: str = "all"):
     valid_metrics = {"all", "muc", "bcub", "ceafm", "ceafe", "blanc"}
     assert metric in valid_metrics, f"expected metric in {valid_metrics}, but got {metric}"
-    cmd = ["perl", scorer_path, "all", path_true, path_pred, "none"]
+    cmd = ["perl", scorer_path, metric, path_true, path_pred, "none"]
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     stdout, stderr = process.communicate()
     process.wait()
     stdout = stdout.decode("utf-8")
     if stderr is not None:
+        print("captured stderr:")
         print(stderr)
     return stdout
 
