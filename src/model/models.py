@@ -98,8 +98,23 @@ class BaseModel(ABC):
             window: int = 1,
             batch_size: int = 16,
             **kwargs
-    ):
-        pass
+    ) -> None:
+        """
+        Вся логика инференса должна быть реализована здесь.
+        Предполагается, что модель училась не на целых документах, а на кусках (chunks).
+        Следовательно, предикт модель должна делать тоже на уровне chunks.
+        Но в конечном счёте нас интересуют предсказанные лейблы на исходных документах (examples).
+        Поэтому схема такая:
+        1. получить модельные предикты на уровне chunks
+        2. аггрегировать результат из п.1 и записать на уровне examples
+
+        :param examples: исходные документы
+        :param chunks: куски исходных документов. могут быть с перекрытиями.
+        :param window: размер куска (в предложениях)
+        :param batch_size:
+        :param kwargs:
+        :return:
+        """
 
     @abstractmethod
     def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
@@ -682,6 +697,8 @@ class BertJointModel(BaseModel):
         ner - запись лейблов в Token.labels
         re - создание новых инстансов Arc и запись их в Example.arcs
         """
+        assert window == 1, "logic with window > 1 is not implemented :("
+
         # проверка примеров
         for x in examples:
             assert len(x.arcs) == 0, f"[{x.id}] arcs are already annotated!"
@@ -734,9 +751,8 @@ class BertJointModel(BaseModel):
                         entities_chunk.append(entity)
 
                 # re
-                num_entities_i = num_entities[i]
                 entities_sorted = sorted(entities_chunk, key=lambda e: (e.tokens[0].index_rel, e.tokens[-1].index_rel))
-                arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
+                arcs_pred = rel_labels_pred[i, :num_entities[i], :num_entities[i]]
                 for j, k in zip(*np.where(arcs_pred != no_rel_id)):
                     id_label = arcs_pred[j, k]
                     id_head = entities_sorted[j].id
@@ -1155,7 +1171,7 @@ class BertForRelationExtraction(BertJointModel):
         for start in range(0, len(examples), batch_size):
             end = start + batch_size
             examples_batch = examples[start:end]
-            feed_dict = self._get_feed_dict(examples_batch, training=False)
+            feed_dict = self._get_feed_dict(examples_batch, mode=ModeKeys.VALID)
             loss_i, rel_labels_pred = self.sess.run([self.loss, self.re_labels_true_entities], feed_dict=feed_dict)
             loss += loss_i
 
@@ -1193,26 +1209,27 @@ class BertForRelationExtraction(BertJointModel):
 
         return performance_info
 
-    def predict(self, examples: List[Example], batch_size: int = 16):
-        for start in range(0, len(examples), batch_size):
-            end = start + batch_size
-            examples_batch = examples[start:end]
-            feed_dict = self._get_feed_dict(examples_batch, training=False)
-            rel_labels_pred = self.sess.run(self.re_labels_true_entities, feed_dict=feed_dict)
-
-            for i, x in enumerate(examples_batch):
-                # re TODO: рассмотреть случаи num_events == 0
-                num_entities_i = len(x.entities)
-                arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
-                index2id = {entity.index: entity.id for entity in x.entities}
-                for j, k in zip(*np.where(arcs_pred != 0)):
-                    arc = Arc(
-                        id=f"R{len(x.arcs)}",
-                        head=index2id[j],
-                        dep=index2id[k],
-                        rel=self.inv_re_enc[arcs_pred[j, k]]
-                    )
-                    x.arcs.append(arc)
+    # TODO: адаптировать под новую логику функици predict
+    # def predict(self, examples: List[Example], chunks: List[Example], window: int = 1, batch_size: int = 16, **kwargs):
+    #     for start in range(0, len(examples), batch_size):
+    #         end = start + batch_size
+    #         examples_batch = examples[start:end]
+    #         feed_dict = self._get_feed_dict(examples_batch, mode=ModeKeys.TEST)
+    #         rel_labels_pred = self.sess.run(self.re_labels_true_entities, feed_dict=feed_dict)
+    #
+    #         for i, x in enumerate(examples_batch):
+    #             # re TODO: рассмотреть случаи num_events == 0
+    #             num_entities_i = len(x.entities)
+    #             arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
+    #             index2id = {entity.index: entity.id for entity in x.entities}
+    #             for j, k in zip(*np.where(arcs_pred != 0)):
+    #                 arc = Arc(
+    #                     id=f"R{len(x.arcs)}",
+    #                     head=index2id[j],
+    #                     dep=index2id[k],
+    #                     rel=self.inv_re_enc[arcs_pred[j, k]]
+    #                 )
+    #                 x.arcs.append(arc)
 
     def save(self, model_dir: str, force: bool = True, scope_to_save: str = None):
         assert self.entity_label_to_token_id is not None
