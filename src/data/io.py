@@ -835,6 +835,36 @@ def to_brat(
             print(f"there is no file annotation.conf in {collection_dir}")
 
 
+def to_brat_v2(examples: List[Example], output_dir: str,):
+    """
+    без триггеров событий
+    :param examples:
+    :param output_dir:
+    :return:
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    for x in examples:
+        with open(os.path.join(output_dir, f"{x.filename}.txt"), "w") as f:
+            f.write(x.text)
+
+        with open(os.path.join(output_dir, f"{x.filename}.ann"), "w") as f:
+            # сущности
+            for entity in x.entities:
+                start = entity.tokens[0].span_abs.start
+                end = entity.tokens[-1].span_abs.end
+                assert isinstance(entity.id, str)
+                assert entity.id[0] == "T"
+                line = f"{entity.id}\t{entity.label} {start} {end}\t{entity.text}\n"
+                f.write(line)
+
+            # отношения
+            for arc in x.arcs:
+                assert isinstance(arc.rel, str), "forget to transform arc codes to values!"
+                id_arc = get_id(arc.id, "R")
+                line = f"{id_arc}\t{arc.rel} Arg1:{arc.head} Arg2:{arc.dep}\n"
+                f.write(line)
+
+
 def get_id(id_arg: Union[int, str], prefix: str) -> str:
     assert id_arg is not None
     if isinstance(id_arg, str):

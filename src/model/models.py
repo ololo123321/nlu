@@ -31,6 +31,12 @@ from src.data.postprocessing import get_valid_spans
 from src.metrics import classification_report, classification_report_ner, f1_precision_recall_support
 
 
+class ModeKeys:
+    TRAIN = "train"
+    VALID = "valid"
+    TEST = "test"
+
+
 class BaseModel(ABC):
     """
     Interface for all models
@@ -68,7 +74,8 @@ class BaseModel(ABC):
         pass
 
     @abstractmethod
-    def _get_feed_dict(self, examples: List[Example], training: bool) -> Dict:
+    def _get_feed_dict(self, examples: List[Example], mode: str) -> Dict:
+        """mode: {train, valid, test}"""
         pass
 
     @abstractmethod
@@ -144,7 +151,7 @@ class BaseModel(ABC):
 
         for step in range(num_train_steps):
             examples_batch = random.sample(examples_train, batch_size)
-            feed_dict, _ = self._get_feed_dict(examples_batch, training=True)
+            feed_dict, _ = self._get_feed_dict(examples_batch, mode=ModeKeys.TRAIN)
             _, loss = self.sess.run([train_op, self.loss], feed_dict=feed_dict)
             train_loss.append(loss)
 
@@ -514,7 +521,7 @@ class BertJointModel(BaseModel):
         for epoch in range(self.config["training"]["num_epochs"]):
             for _ in range(num_epoch_steps):
                 examples_batch = random.sample(examples_train, batch_size)
-                feed_dict = self._get_feed_dict(examples_batch, training=True)
+                feed_dict = self._get_feed_dict(examples_batch, mode=ModeKeys.TRAIN)
                 try:
                     _, loss = self.sess.run([train_op, self.loss], feed_dict=feed_dict)
                 except Exception as e:
@@ -577,7 +584,7 @@ class BertJointModel(BaseModel):
         for start in range(0, len(examples), batch_size):
             end = start + batch_size
             examples_batch = examples[start:end]
-            feed_dict = self._get_feed_dict(examples_batch, training=False)
+            feed_dict = self._get_feed_dict(examples_batch, mode=ModeKeys.VALID)
             loss_i, loss_ner_i, loss_re_i, ner_labels_pred, rel_labels_pred, num_entities = self.sess.run(
                 [
                     self.loss,
@@ -688,7 +695,7 @@ class BertJointModel(BaseModel):
         for start in range(0, len(chunks), batch_size):
             end = start + batch_size
             chunks_batch = chunks[start:end]
-            feed_dict = self._get_feed_dict(chunks_batch, training=False)
+            feed_dict = self._get_feed_dict(chunks_batch, mode=ModeKeys.TEST)
             ner_labels_pred, rel_labels_pred, num_entities = self.sess.run(
                 [self.ner_preds_inference, self.re_labels_pred_entities, self.num_entities_pred],
                 feed_dict=feed_dict
@@ -734,6 +741,8 @@ class BertJointModel(BaseModel):
                     id_label = arcs_pred[j, k]
                     id_head = entities_sorted[j].id
                     id_dep = entities_sorted[k].id
+                    assert isinstance(id_head, str)  # чтоб не подсвечивалось жёлтым ниже
+                    assert isinstance(id_dep, str)
                     id_arc = "R" + str(len(example.arcs))
                     arc = Arc(id=id_arc, head=id_head, dep=id_dep, rel=self.inv_re_enc[id_label])
                     example.arcs.append(arc)
@@ -766,7 +775,10 @@ class BertJointModel(BaseModel):
         grads = tf.gradients(self.loss, tvars)
         self.train_op_head = opt.apply_gradients(zip(grads, tvars))
 
-    def _get_feed_dict(self, examples: List[Example], training: bool):
+    def _get_feed_dict(self, examples: List[Example], mode: str):
+        assert self.ner_enc is not None
+        assert self.re_enc is not None
+
         # bert
         input_ids = []
         input_mask = []
@@ -803,7 +815,10 @@ class BertJointModel(BaseModel):
                 input_ids_i += t.token_ids
                 input_mask_i += [1] * num_pieces_ij
                 segment_ids_i += [0] * num_pieces_ij
-                ner_labels_i.append(t.label_ids[0])  # ner решается на уровне токенов!
+                label = t.labels[0]
+                if mode != ModeKeys.TEST:
+                    id_label = self.ner_enc[label]
+                    ner_labels_i.append(id_label)  # ner решается на уровне токенов!
                 ptr += num_pieces_ij
 
             # [SEP]
@@ -812,10 +827,12 @@ class BertJointModel(BaseModel):
             segment_ids_i.append(0)
 
             # relations
-            for arc in x.arcs:
-                assert arc.head_index is not None
-                assert arc.dep_index is not None
-                re_labels.append((i, arc.head_index, arc.dep_index, arc.rel_id))
+            if mode != ModeKeys.TEST:
+                for arc in x.arcs:
+                    assert arc.head_index is not None
+                    assert arc.dep_index is not None
+                    id_rel = self.re_enc[arc.rel]
+                    re_labels.append((i, arc.head_index, arc.dep_index, id_rel))
 
             # write
             num_pieces.append(len(input_ids_i))
@@ -841,6 +858,8 @@ class BertJointModel(BaseModel):
         if len(re_labels) == 0:
             re_labels.append((0, 0, 0, 0))
 
+        training = mode == ModeKeys.TRAIN
+
         d = {
             # bert
             self.input_ids_ph: input_ids,
@@ -851,14 +870,15 @@ class BertJointModel(BaseModel):
             self.first_pieces_coords_ph: first_pieces_coords,
             self.num_pieces_ph: num_pieces,
             self.num_tokens_ph: num_tokens,
-            self.ner_labels_ph: ner_labels,
-
-            # re
-            self.re_labels_ph: re_labels,
 
             # common
             self.training_ph: training
         }
+
+        if mode != ModeKeys.TEST:
+            d[self.ner_labels_ph] = ner_labels
+            d[self.re_labels_ph] = re_labels
+
         return d
 
     def _set_placeholders(self):
@@ -1209,7 +1229,7 @@ class BertForRelationExtraction(BertJointModel):
 
         return model
 
-    def _get_feed_dict(self, examples: List[Example], training: bool):
+    def _get_feed_dict(self, examples: List[Example], mode: str):
         # bert
         input_ids = []
         input_mask = []
@@ -1306,6 +1326,8 @@ class BertForRelationExtraction(BertJointModel):
 
         if len(entity_coords) == 0:
             entity_coords.append([(0, 0)])
+
+        training = mode == ModeKeys.TRAIN
 
         d = {
             # bert
