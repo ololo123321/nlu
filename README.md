@@ -23,6 +23,8 @@ TODO:
 "valid" - нужны лейблы для лоса, но не нужны дропауты,
 "test" - истинные лейблы неизвестны, дропауты не нужны 
 * [ ] - реалзиовать случай window > 1 в инференсе всех моделей (пока сделано только для BertForCoreferenceResolutionV2)
+* [ ] - фикс sent_candidates в src.data.preprocessing.split_example_v2 с учётом того, 
+что разделение на предложения может проходить через токен
 
 * [x] постпроцессинг предиктов модели BertForCoreferenceResolutionV2:
 * петли (head != dep);

@@ -757,6 +757,7 @@ def to_conll(examples, path):
 
 
 # TODO: создавать инстансы класса Event на уровне model.predict
+# TODO: зачем copy_texts??
 def to_brat(
         examples: List[Example],
         output_dir: str,

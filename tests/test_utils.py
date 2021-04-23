@@ -25,8 +25,11 @@ from src.utils import get_entity_spans, get_connected_components
     pytest.param(["B-ORG", "O", "B-ORG"], {"ORG": {(0, 0), (2, 2)}}),
     pytest.param(["B-ORG", "I-ORG", "B-ORG"], {"ORG": {(0, 1), (2, 2)}}),
     pytest.param(["B-ORG", "I-ORG", "O", "B-ORG"], {"ORG": {(0, 1), (3, 3)}}),
+    pytest.param(["O", "B-ORG", "O", "B-ORG"], {"ORG": {(1, 1), (3, 3)}}),
+    pytest.param(["O", "B-ORG", "I-ORG", "B-ORG", "I-ORG"], {"ORG": {(1, 2), (3, 4)}}),
     # несколько сущностей
     pytest.param(["B-ORG", "B-LOC"], {"ORG": {(0, 0)}, "LOC": {(1, 1)}}),
+    pytest.param(["B-ORG", "O", "B-LOC"], {"ORG": {(0, 0)}, "LOC": {(2, 2)}}),
     pytest.param(["B-ORG", "I-LOC"], {"ORG": {(0, 0)}}),
     pytest.param(["B-ORG", "I-ORG", "I-LOC"], {"ORG": {(0, 1)}}),
     pytest.param(["B-ORG", "I-ORG", "B-LOC"], {"ORG": {(0, 1)}, "LOC": {(2, 2)}}),
