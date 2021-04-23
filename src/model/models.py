@@ -2816,12 +2816,15 @@ class BertForCoreferenceResolutionV3(BertForCoreferenceResolutionV2):
         # num_entities - [batch_size]
         x, num_entities = self._get_entities_representation(bert_out=bert_out, ner_labels=ner_labels)
 
+        batch_size = tf.shape(x)[0]
+        x_root = tf.tile(self.root_emb, [batch_size, 1])
+        x_root = x_root[:, None, :]
+
+        num_entities_inner = num_entities + tf.ones_like(num_entities)
+
         order = 1  # TODO: вынести в конфиг
         for i in range(order):
             # добавление root
-            batch_size = tf.shape(x)[0]
-            x_root = tf.tile(self.root_emb, [batch_size, 1])
-            x_root = x_root[:, None, :]
             x_dep = tf.concat([x_root, x], axis=1)  # [batch_size, num_entities + 1, bert_dim]
 
             # encoding of pairs
@@ -2832,7 +2835,6 @@ class BertForCoreferenceResolutionV3(BertForCoreferenceResolutionV2):
             logits = tf.squeeze(logits, axis=[-1])  # [batch_size, num_entities, num_entities + 1]
 
             # mask
-            num_entities_inner = num_entities + tf.ones_like(num_entities)
             mask = tf.sequence_mask(num_entities_inner, dtype=tf.float32)
             logits += (1.0 - mask[:, None, :]) * -1e9  # [batch_size, num_entities, num_entities + 1]
 
