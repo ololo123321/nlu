@@ -2816,9 +2816,85 @@ class BertForCoreferenceResolutionV3(BertForCoreferenceResolutionV2):
     def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
 
-        self.root_emb = None
-        self.re_logits_true_entities = None
-        self.re_logits_pred_entities = None
+        self.w = None
+
+    # TODO: копипаста из родительского класса только из-за инициализации self.w
+    def build(self):
+        """
+        добавлен self.root_emb
+        """
+        self._set_placeholders()
+
+        # N - batch size
+        # D - bert dim
+        # T_pieces - число bpe-сиволов (включая [CLS] и [SEP])
+        # T_tokens - число токенов (не вклчая [CLS] и [SEP])
+        with tf.variable_scope(self.model_scope):
+            bert_out_train = self._build_bert(training=True)  # [N, T_pieces, D]
+            bert_out_pred = self._build_bert(training=False)  # [N, T_pieces, D]
+
+            self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
+
+            with tf.variable_scope(self.ner_scope):
+                if self.config["model"]["ner"]["use_birnn"]:
+                    self.birnn_ner = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
+
+                self.tokens_pair_enc = GraphEncoder(**self.config["model"]["ner"]["biaffine"])
+
+                self.ner_logits_train = self._build_ner_head(bert_out=bert_out_train)
+                self.ner_logits_inference = self._build_ner_head(bert_out=bert_out_pred)
+
+            # re
+            with tf.variable_scope(self.re_scope):
+                if self.config["model"]["re"]["use_entity_emb"]:
+                    num_entities = self.config["model"]["ner"]["biaffine"]["num_labels"]
+                    if self.config["model"]["re"]["use_birnn"]:
+                        emb_dim = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
+                    else:
+                        emb_dim = self.config["model"]["bert"]["dim"]
+                    self.ner_emb = tf.keras.layers.Embedding(num_entities, emb_dim)
+                    if self.config["model"]["re"]["use_entity_emb_layer_norm"]:
+                        self.ner_emb_layer_norm = tf.keras.layers.LayerNormalization()
+                    self.ner_emb_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["entity_emb_dropout"])
+
+                if self.config["model"]["re"]["use_birnn"]:
+                    self.birnn_re = StackedBiRNN(**self.config["model"]["re"]["rnn"])
+
+                self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
+
+                if self.config["model"]["re"]["use_birnn"]:
+                    emb_dim = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
+                else:
+                    emb_dim = self.config["model"]["bert"]["dim"]
+                self.root_emb = tf.get_variable("root_emb", shape=[1, emb_dim], dtype=tf.float32)
+
+                self.w = tf.get_variable("w_update", shape=[emb_dim * 2, emb_dim], dtype=tf.float32)
+
+                shape = tf.shape(self.ner_logits_train)[:-1]
+                no_entity_id = self.config["model"]["ner"]["no_entity_id"]
+                ner_labels_dense = get_dense_labels_from_indices(
+                    indices=self.ner_labels_ph, shape=shape, no_label_id=no_entity_id
+                )
+
+                ner_preds_inference = tf.argmax(self.ner_logits_inference, axis=-1, output_type=tf.int32)
+
+                self.re_logits_train, self.num_entities = self._build_re_head(
+                    bert_out=bert_out_train, ner_labels=ner_labels_dense
+                )
+
+                self.re_logits_true_entities, _ = self._build_re_head(
+                    bert_out=bert_out_pred, ner_labels=ner_labels_dense
+                )
+                self.re_logits_pred_entities, self.num_entities_pred = self._build_re_head(
+                    bert_out=bert_out_pred, ner_labels=ner_preds_inference
+                )
+
+                # argmax
+                self.re_labels_true_entities = tf.argmax(self.re_logits_true_entities, axis=-1)
+                self.re_labels_pred_entities = tf.argmax(self.re_logits_pred_entities, axis=-1)
+
+            self._set_loss()
+            self._set_train_op()
 
     def _build_re_head(self, bert_out: tf.Tensor, ner_labels: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         # x - [batch_size, num_entities, bert_dim]
@@ -2831,14 +2907,12 @@ class BertForCoreferenceResolutionV3(BertForCoreferenceResolutionV2):
 
         num_entities_inner = num_entities + tf.ones_like(num_entities)
 
-        order = 1  # TODO: вынести в конфиг
-        for i in range(order):
-            # добавление root
-            x_dep = tf.concat([x_root, x], axis=1)  # [batch_size, num_entities + 1, bert_dim]
+        def get_logits(enc, g):
+            g_dep = tf.concat([x_root, g], axis=1)  # [batch_size, num_entities + 1, bert_dim]
 
             # encoding of pairs
-            inputs = GraphEncoderInputs(head=x, dep=x_dep)
-            logits = self.entity_pairs_enc(inputs=inputs, training=self.training_ph)  # [N, num_ent, num_ent + 1, 1]
+            inputs = GraphEncoderInputs(head=g, dep=g_dep)
+            logits = enc(inputs=inputs, training=self.training_ph)  # [N, num_ent, num_ent + 1, 1]
 
             # squeeze
             logits = tf.squeeze(logits, axis=[-1])  # [batch_size, num_entities, num_entities + 1]
@@ -2847,9 +2921,23 @@ class BertForCoreferenceResolutionV3(BertForCoreferenceResolutionV2):
             mask = tf.sequence_mask(num_entities_inner, dtype=tf.float32)
             logits += (1.0 - mask[:, None, :]) * -1e9  # [batch_size, num_entities, num_entities + 1]
 
-            # re-weighting
+            return g_dep, logits
+
+        # n = 1 - baseline
+        # n = 2 - like in paper
+        n = self.config["model"]["re"]["order"]
+        for i in range(n - 1):
+            x_dep, logits = get_logits(self.entity_pairs_enc, x)
+
+            # expected antecedent representation
             prob = tf.nn.softmax(logits, axis=-1)  # [batch_size, num_entities, num_entities + 1]
-            x = tf.matmul(prob, x_dep)  # [batch_size, num_entities, bert_dim]
+            a = tf.matmul(prob, x_dep)  # [batch_size, num_entities, bert_dim]
+
+            # update
+            f = tf.nn.sigmoid(tf.matmul(tf.concat([x, a], axis=-1), self.w))
+            x = f * x + (1.0 - f) * a
+
+        _, logits = get_logits(self.entity_pairs_enc, x)
 
         return logits, num_entities
 
