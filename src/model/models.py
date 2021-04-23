@@ -2812,13 +2812,22 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
 class BertForCoreferenceResolutionV3(BertForCoreferenceResolutionV2):
     """
     https://arxiv.org/abs/1804.05392
+
+    + config["model"]["re"]["order"]:
+        1 - as in V2
+        2 - as in paper
+    + config["model"]["re"]["w_dropout"]: dropout for self.w
+    + config["model"]["re"]["w_dropout_policy"]:
+        0 - same mask on each iteration
+        1 - different mask on each iteration
     """
     def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
 
         self.w = None
+        self.w_dropout = None
 
-    # TODO: копипаста из родительского класса только из-за инициализации self.w
+    # TODO: копипаста из родительского класса только из-за инициализации self.w и self.w_dropout
     def build(self):
         """
         добавлен self.root_emb
@@ -2869,6 +2878,7 @@ class BertForCoreferenceResolutionV3(BertForCoreferenceResolutionV2):
                 self.root_emb = tf.get_variable("root_emb", shape=[1, emb_dim], dtype=tf.float32)
 
                 self.w = tf.get_variable("w_update", shape=[emb_dim * 2, emb_dim], dtype=tf.float32)
+                self.w_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["w_dropout"])
 
                 shape = tf.shape(self.ner_logits_train)[:-1]
                 no_entity_id = self.config["model"]["ner"]["no_entity_id"]
@@ -2926,6 +2936,18 @@ class BertForCoreferenceResolutionV3(BertForCoreferenceResolutionV2):
         # n = 1 - baseline
         # n = 2 - like in paper
         n = self.config["model"]["re"]["order"]
+
+        # 0 - one mask for each iteration
+        # 1 - different mask on each iteration
+        dropout_policy = self.config["model"]["re"]["w_dropout_policy"]
+
+        if dropout_policy == 0:
+            w = self.w_dropout(self.w, training=self.training_ph)
+        elif dropout_policy == 1:
+            w = self.w
+        else:
+            raise NotImplementedError
+
         for i in range(n - 1):
             x_dep, logits = get_logits(self.entity_pairs_enc, x)
 
@@ -2934,7 +2956,9 @@ class BertForCoreferenceResolutionV3(BertForCoreferenceResolutionV2):
             a = tf.matmul(prob, x_dep)  # [batch_size, num_entities, bert_dim]
 
             # update
-            f = tf.nn.sigmoid(tf.matmul(tf.concat([x, a], axis=-1), self.w))
+            if dropout_policy == 1:
+                w = self.w_dropout(self.w, training=self.training_ph)
+            f = tf.nn.sigmoid(tf.matmul(tf.concat([x, a], axis=-1), w))
             x = f * x + (1.0 - f) * a
 
         _, logits = get_logits(self.entity_pairs_enc, x)

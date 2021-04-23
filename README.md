@@ -45,3 +45,4 @@ TODO:
 * [ ] markov clustering: https://micans.org/mcl/. наверное, это лучше пробовать на логитах модели, которая училась на таргете, описанном в пунтке ниже.
 * [ ] попробовать поменять таргет: label(i, j) = {1, если сущности i и j принадлежат одной компоненте, 0 - иначе}
 * [ ] linking pairs -> agglomerative clustering (https://arxiv.org/pdf/1606.01323.pdf)
+* [ ] dropout на BertForCoreferenceResolutionV3.w (ибо эта матрица содержит большинство обучаемых параметров)
