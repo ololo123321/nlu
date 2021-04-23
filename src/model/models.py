@@ -2457,7 +2457,7 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
         return logits, num_entities
 
     # TODO: много копипасты!
-    def _get_feed_dict(self, examples: List[Example], training: bool):
+    def _get_feed_dict(self, examples: List[Example], mode: str):
         assert self.ner_enc is not None
         assert self.re_enc is not None
 
@@ -2504,20 +2504,21 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
             segment_ids_i.append(0)
 
             # ner, re
-            id2entity = {entity.id: entity for entity in x.entities}
-            head2dep = {arc.head: id2entity[arc.dep] for arc in x.arcs}
+            if mode != ModeKeys.TEST:
+                id2entity = {entity.id: entity for entity in x.entities}
+                head2dep = {arc.head: id2entity[arc.dep] for arc in x.arcs}
 
-            for entity in x.entities:
-                start = entity.tokens[0].index_rel
-                end = entity.tokens[-1].index_rel
-                id_label = self.ner_enc[entity.label]
-                ner_labels.append((i, start, end, id_label))
+                for entity in x.entities:
+                    start = entity.tokens[0].index_rel
+                    end = entity.tokens[-1].index_rel
+                    id_label = self.ner_enc[entity.label]
+                    ner_labels.append((i, start, end, id_label))
 
-                if entity.id in head2dep.keys():
-                    dep_index = head2dep[entity.id].index + 1
-                else:
-                    dep_index = 0
-                re_labels.append((i, entity.index, dep_index))
+                    if entity.id in head2dep.keys():
+                        dep_index = head2dep[entity.id].index + 1
+                    else:
+                        dep_index = 0
+                    re_labels.append((i, entity.index, dep_index))
 
             # write
             num_pieces.append(len(input_ids_i))
@@ -2543,6 +2544,8 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
         if len(re_labels) == 0:
             re_labels.append((0, 0, 0))
 
+        training = mode == ModeKeys.TRAIN
+
         d = {
             self.input_ids_ph: input_ids,
             self.input_mask_ph: input_mask,
@@ -2550,10 +2553,13 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
             self.first_pieces_coords_ph: first_pieces_coords,
             self.num_pieces_ph: num_pieces,
             self.num_tokens_ph: num_tokens,
-            self.ner_labels_ph: ner_labels,
-            self.re_labels_ph: re_labels,
             self.training_ph: training
         }
+
+        if mode != ModeKeys.TEST:
+            d[self.ner_labels_ph] = ner_labels
+            d[self.re_labels_ph] = re_labels
+
         return d
 
     # TODO: копипаста
@@ -2578,7 +2584,7 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
         for start in range(0, len(examples), batch_size):
             end = start + batch_size
             examples_batch = examples[start:end]
-            feed_dict = self._get_feed_dict(examples_batch, training=False)
+            feed_dict = self._get_feed_dict(examples_batch, mode=ModeKeys.VALID)
             loss_i, loss_ner_i, loss_re_i, ner_logits, num_entities, re_labels_pred = self.sess.run([
                 self.loss,
                 self.loss_ner,
@@ -2689,6 +2695,9 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
         return performance_info
 
     # TODO: копипаста
+    # TODO: пока в _get_feed_dict суётся ModeKeys.VALID, потому что предполагается,
+    #  что сущности уже найдены. избавиться от этого костыля, путём создания отдельного
+    #  класса под модель, где нужно искать только кореференции
     def predict(
             self,
             examples: List[Example],
@@ -2716,7 +2725,7 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
         for start in range(0, len(chunks), batch_size):
             end = start + batch_size
             chunks_batch = chunks[start:end]
-            feed_dict = self._get_feed_dict(chunks_batch, training=False)
+            feed_dict = self._get_feed_dict(chunks_batch, mode=ModeKeys.VALID)
             re_labels_pred, re_logits_pred = self.sess.run(
                 [self.re_labels_true_entities, self.re_logits_true_entities],
                 feed_dict=feed_dict
