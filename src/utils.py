@@ -117,6 +117,7 @@ def get_entity_spans(labels: List[str], joiner: str = '-') -> Dict[str, Set[Span
         label = labels[i]
         bio = label[0]
         tag = label.split(joiner)[-1]
+
         if bio == "B":
             if entity_tag is not None:
                 tag2spans[entity_tag].add(Span(start, end))
@@ -135,6 +136,9 @@ def get_entity_spans(labels: List[str], joiner: str = '-') -> Dict[str, Set[Span
             if flag:
                 tag2spans[entity_tag].add(Span(start, end))
                 flag = False
+        else:
+            raise NotImplementedError(f"only BIO encoding supported, but got label {label}")
+
     if flag:
         tag2spans[entity_tag].add(Span(start, end))
     return tag2spans
@@ -153,7 +157,7 @@ def get_connected_components(g):
     for parent, children in g.items():
         vertices.add(parent)
         for child in children:
-            assert child in g, f"unknown node {child}"
+            assert child in g, f"unknown node {child} among children of {parent}"
             g2[parent].add(child)
             g2[child].add(parent)
     components = []

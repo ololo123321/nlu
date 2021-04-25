@@ -3,7 +3,7 @@ import os
 import json
 import shutil
 from typing import Dict, List, Callable, Tuple
-from itertools import chain
+from itertools import chain, groupby, combinations
 from abc import ABC, abstractmethod
 
 import tensorflow as tf
@@ -103,7 +103,7 @@ class BaseModel(ABC):
         Вся логика инференса должна быть реализована здесь.
         Предполагается, что модель училась не на целых документах, а на кусках (chunks).
         Следовательно, предикт модель должна делать тоже на уровне chunks.
-        Но в конечном счёте нас интересуют предсказанные лейблы на исходных документах (examples).
+        Но в конечном итоге нас интересуют предсказанные лейблы на исходных документах (examples).
         Поэтому схема такая:
         1. получить модельные предикты на уровне chunks
         2. аггрегировать результат из п.1 и записать на уровне examples
@@ -2716,6 +2716,11 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
         :param no_or_one_parent_per_node
         :return:
         """
+        # проверка на то, то в примерах нет рёбер
+        # TODO: как-то обработать случай отсутствия сущнсоетй
+        for x in examples:
+            assert len(x.arcs) == 0
+
         id_to_num_sentences = {x.id: x.tokens[-1].id_sent + 1 for x in examples}
 
         # y_pred = set()
@@ -2754,7 +2759,7 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
                     # for idx_head, idx_dep in enumerate(re_labels_pred_i):
                     for idx_head in range(num_entities_chunk):
                         idx_dep = re_labels_pred[i, idx_head]
-                        # нет ребра
+                        # нет исходящего ребра
                         if idx_dep == 0:
                             continue
                         # петля
@@ -2800,12 +2805,273 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
                 if key in head2dep:
                     dep = head2dep[key]["dep"]
                     g[entity.id].add(dep)
+                    id_arc = "R" + str(len(x.arcs))
+                    arc = Arc(id=id_arc, head=entity.id, dep=dep, rel=self.inv_re_enc[1])
+                    x.arcs.append(arc)
 
             components = get_connected_components(g)
 
             for id_chain, comp in enumerate(components):
                 for id_entity in comp:
                     id2entity[id_entity].id_chain = id_chain
+
+
+class BertForCoreferenceResolutionV21(BertForCoreferenceResolutionV2):
+    """
+    + один таргет: (i, j) -> {1, если сущности относятся к одному кластеру, 0 - иначе}
+    """
+    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
+        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
+
+        self.entity_pairs_enc2 = None
+        self.re_labels2_ph = None
+        self.re_logits2_train = None
+
+    def build(self):
+        """
+        добавлен self.root_emb
+        """
+        self._set_placeholders()
+
+        # N - batch size
+        # D - bert dim
+        # T_pieces - число bpe-сиволов (включая [CLS] и [SEP])
+        # T_tokens - число токенов (не вклчая [CLS] и [SEP])
+        with tf.variable_scope(self.model_scope):
+            bert_out_train = self._build_bert(training=True)  # [N, T_pieces, D]
+            bert_out_pred = self._build_bert(training=False)  # [N, T_pieces, D]
+
+            self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
+
+            with tf.variable_scope(self.ner_scope):
+                if self.config["model"]["ner"]["use_birnn"]:
+                    self.birnn_ner = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
+
+                self.tokens_pair_enc = GraphEncoder(**self.config["model"]["ner"]["biaffine"])
+
+                self.ner_logits_train = self._build_ner_head(bert_out=bert_out_train)
+                self.ner_logits_inference = self._build_ner_head(bert_out=bert_out_pred)
+
+            # re
+            with tf.variable_scope(self.re_scope):
+                if self.config["model"]["re"]["use_entity_emb"]:
+                    num_entities = self.config["model"]["ner"]["biaffine"]["num_labels"]
+                    if self.config["model"]["re"]["use_birnn"]:
+                        emb_dim = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
+                    else:
+                        emb_dim = self.config["model"]["bert"]["dim"]
+                    self.ner_emb = tf.keras.layers.Embedding(num_entities, emb_dim)
+                    if self.config["model"]["re"]["use_entity_emb_layer_norm"]:
+                        self.ner_emb_layer_norm = tf.keras.layers.LayerNormalization()
+                    self.ner_emb_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["entity_emb_dropout"])
+
+                if self.config["model"]["re"]["use_birnn"]:
+                    self.birnn_re = StackedBiRNN(**self.config["model"]["re"]["rnn"])
+
+                self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
+                self.entity_pairs_enc2 = GraphEncoder(**self.config["model"]["re"]["biaffine"])
+
+                if self.config["model"]["re"]["use_birnn"]:
+                    emb_dim = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
+                else:
+                    emb_dim = self.config["model"]["bert"]["dim"]
+                self.root_emb = tf.get_variable("root_emb", shape=[1, emb_dim], dtype=tf.float32)
+
+                shape = tf.shape(self.ner_logits_train)[:-1]
+                no_entity_id = self.config["model"]["ner"]["no_entity_id"]
+                ner_labels_dense = get_dense_labels_from_indices(
+                    indices=self.ner_labels_ph, shape=shape, no_label_id=no_entity_id
+                )
+
+                ner_preds_inference = tf.argmax(self.ner_logits_inference, axis=-1, output_type=tf.int32)
+
+                # first re head
+                self.re_logits_train, self.num_entities = self._build_re_head(
+                    bert_out=bert_out_train, ner_labels=ner_labels_dense
+                )
+
+                self.re_logits_true_entities, _ = self._build_re_head(
+                    bert_out=bert_out_pred, ner_labels=ner_labels_dense
+                )
+                self.re_logits_pred_entities, self.num_entities_pred = self._build_re_head(
+                    bert_out=bert_out_pred, ner_labels=ner_preds_inference
+                )
+
+                # seconds re head
+                self.re_logits2_train, _ = self._build_re_head2(
+                    bert_out=bert_out_train, ner_labels=ner_labels_dense
+                )
+
+                # argmax
+                self.re_labels_true_entities = tf.argmax(self.re_logits_true_entities, axis=-1)
+                self.re_labels_pred_entities = tf.argmax(self.re_logits_pred_entities, axis=-1)
+
+            self._set_loss()
+            self._set_train_op()
+
+    def _build_re_head2(self, bert_out: tf.Tensor, ner_labels: tf.Tensor):
+        x, num_entities = self._get_entities_representation(bert_out=bert_out, ner_labels=ner_labels)
+
+        # encoding of pairs
+        inputs = GraphEncoderInputs(head=x, dep=x)
+        logits = self.entity_pairs_enc2(inputs=inputs, training=self.training_ph)  # [N, num_ent, num_ent, 1]
+
+        # squeeze
+        logits = tf.squeeze(logits, axis=[-1])  # [N, num_ent, num_ent]
+        return logits, num_entities
+
+    def _set_placeholders(self):
+        super()._set_placeholders()
+        self.re_labels2_ph = tf.placeholder(
+            dtype=tf.int32, shape=[None, 3], name="re_labels2"
+        )  # [id_example, id_head, id_dep]
+
+    def _get_re_loss(self):
+        loss1 = super()._get_re_loss()
+
+        no_rel_id = self.config["model"]["re"]["no_relation_id"]
+        logits_shape = tf.shape(self.re_logits2_train)
+        labels_shape = logits_shape[:3]
+        labels = get_dense_labels_from_indices(indices=self.re_labels2_ph, shape=labels_shape, no_label_id=no_rel_id)
+        per_example_loss = tf.nn.sigmoid_cross_entropy_with_logits(
+            labels=labels, logits=self.re_logits2_train
+        )  # [batch_size, num_entities, num_entities]
+
+        sequence_mask = tf.sequence_mask(self.num_entities, maxlen=logits_shape[1], dtype=tf.float32)
+        mask = sequence_mask[:, None, :] * sequence_mask[:, :, None]
+
+        masked_per_example_loss = per_example_loss * mask
+        total_loss = tf.reduce_sum(masked_per_example_loss)
+        num_pairs = tf.cast(tf.reduce_sum(mask), tf.float32)
+        num_pairs = tf.maximum(num_pairs, 1.0)
+        loss2 = total_loss / num_pairs
+        loss2 *= self.config["model"]["re"]["loss_coef"]
+
+        loss = loss1 + loss2
+        return loss
+
+    # TODO: много копипасты!
+    def _get_feed_dict(self, examples: List[Example], mode: str):
+        assert self.ner_enc is not None
+        assert self.re_enc is not None
+
+        # bert
+        input_ids = []
+        input_mask = []
+        segment_ids = []
+
+        # ner
+        first_pieces_coords = []
+        num_pieces = []
+        num_tokens = []
+        ner_labels = []
+
+        # re
+        re_labels = []
+        re_labels2 = []
+
+        # filling
+        for i, x in enumerate(examples):
+            input_ids_i = []
+            input_mask_i = []
+            segment_ids_i = []
+            first_pieces_coords_i = []
+
+            # [CLS]
+            input_ids_i.append(self.config["model"]["bert"]["cls_token_id"])
+            input_mask_i.append(1)
+            segment_ids_i.append(0)
+
+            ptr = 1
+
+            # tokens
+            for t in x.tokens:
+                first_pieces_coords_i.append((i, ptr))
+                num_pieces_ij = len(t.pieces)
+                input_ids_i += t.token_ids
+                input_mask_i += [1] * num_pieces_ij
+                segment_ids_i += [0] * num_pieces_ij
+                ptr += num_pieces_ij
+
+            # [SEP]
+            input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
+            input_mask_i.append(1)
+            segment_ids_i.append(0)
+
+            # ner, re
+            if mode != ModeKeys.TEST:
+                id2entity = {}
+                for entity in x.entities:
+                    assert entity.id_chain is not None
+                    id2entity[entity.id] = entity
+
+                head2dep = {}
+                for arc in x.arcs:
+                    head2dep[arc.head] = arc.dep
+
+                for entity in x.entities:
+                    start = entity.tokens[0].index_rel
+                    end = entity.tokens[-1].index_rel
+                    id_label = self.ner_enc[entity.label]
+                    ner_labels.append((i, start, end, id_label))
+
+                    if entity.id in head2dep.keys():
+                        dep_index = head2dep[entity.id].index + 1
+                    else:
+                        dep_index = 0
+                    re_labels.append((i, entity.index, dep_index))
+                    re_labels2.append((i, entity.index, entity.index))  # сущность сама с собой всегда в одном кластере
+
+                for _, group in groupby(sorted(x.entities, key=lambda e: e.id_chain), key=lambda e: e.id_chain):
+                    for head, dep in combinations(group, 2):
+                        re_labels2.append((i, head.index, dep.index))
+                        re_labels2.append((i, dep.index, head.index))
+
+            # write
+            num_pieces.append(len(input_ids_i))
+            num_tokens.append(len(x.tokens))
+            input_ids.append(input_ids_i)
+            input_mask.append(input_mask_i)
+            segment_ids.append(segment_ids_i)
+            first_pieces_coords.append(first_pieces_coords_i)
+
+        # padding
+        pad_token_id = self.config["model"]["bert"]["pad_token_id"]
+        num_tokens_max = max(num_tokens)
+        num_pieces_max = max(num_pieces)
+        for i in range(len(examples)):
+            input_ids[i] += [pad_token_id] * (num_pieces_max - num_pieces[i])
+            input_mask[i] += [0] * (num_pieces_max - num_pieces[i])
+            segment_ids[i] += [0] * (num_pieces_max - num_pieces[i])
+            first_pieces_coords[i] += [(i, 0)] * (num_tokens_max - num_tokens[i])
+
+        if len(ner_labels) == 0:
+            ner_labels.append((0, 0, 0, 0))
+
+        if len(re_labels) == 0:
+            re_labels.append((0, 0, 0))
+
+        if len(re_labels2) == 0:
+            re_labels2.append((0, 0, 0))
+
+        training = mode == ModeKeys.TRAIN
+
+        d = {
+            self.input_ids_ph: input_ids,
+            self.input_mask_ph: input_mask,
+            self.segment_ids_ph: segment_ids,
+            self.first_pieces_coords_ph: first_pieces_coords,
+            self.num_pieces_ph: num_pieces,
+            self.num_tokens_ph: num_tokens,
+            self.training_ph: training
+        }
+
+        if mode != ModeKeys.TEST:
+            d[self.ner_labels_ph] = ner_labels
+            d[self.re_labels_ph] = re_labels
+            d[self.re_labels2_ph] = re_labels2
+
+        return d
 
 
 # TODO: переименовать в BertForCoreferenceResolutionHigherOrder
