@@ -2818,7 +2818,8 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
 
 class BertForCoreferenceResolutionV21(BertForCoreferenceResolutionV2):
     """
-    + один таргет: (i, j) -> {1, если сущности относятся к одному кластеру, 0 - иначе}
+    + один таргет: (i, j) -> {1, если сущности i и j относятся к одному кластеру, 0 - иначе}
+    процедура инференса не меняется
     """
     def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
@@ -2869,7 +2870,9 @@ class BertForCoreferenceResolutionV21(BertForCoreferenceResolutionV2):
                     self.birnn_re = StackedBiRNN(**self.config["model"]["re"]["rnn"])
 
                 self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
-                self.entity_pairs_enc2 = GraphEncoder(**self.config["model"]["re"]["biaffine"])
+
+                with tf.variable_scope("re_head_second"):
+                    self.entity_pairs_enc2 = GraphEncoder(**self.config["model"]["re"]["biaffine"])
 
                 if self.config["model"]["re"]["use_birnn"]:
                     emb_dim = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
@@ -2923,16 +2926,21 @@ class BertForCoreferenceResolutionV21(BertForCoreferenceResolutionV2):
     def _set_placeholders(self):
         super()._set_placeholders()
         self.re_labels2_ph = tf.placeholder(
-            dtype=tf.int32, shape=[None, 3], name="re_labels2"
-        )  # [id_example, id_head, id_dep]
+            dtype=tf.int32, shape=[None, 4], name="re_labels2"
+        )  # [id_example, id_head, id_dep, id_rel]
 
     def _get_re_loss(self):
         loss1 = super()._get_re_loss()
 
         no_rel_id = self.config["model"]["re"]["no_relation_id"]
-        logits_shape = tf.shape(self.re_logits2_train)
-        labels_shape = logits_shape[:3]
-        labels = get_dense_labels_from_indices(indices=self.re_labels2_ph, shape=labels_shape, no_label_id=no_rel_id)
+        logits_shape = tf.shape(self.re_logits2_train)  # [4]
+        labels_shape = logits_shape[:3]  # [3]
+        labels = get_dense_labels_from_indices(
+            indices=self.re_labels2_ph,
+            shape=labels_shape,
+            no_label_id=no_rel_id
+        )  # [batch_size, num_entities, num_entities]
+        labels = tf.cast(labels, tf.float32)
         per_example_loss = tf.nn.sigmoid_cross_entropy_with_logits(
             labels=labels, logits=self.re_logits2_train
         )  # [batch_size, num_entities, num_entities]
@@ -3005,9 +3013,9 @@ class BertForCoreferenceResolutionV21(BertForCoreferenceResolutionV2):
                     assert entity.id_chain is not None
                     id2entity[entity.id] = entity
 
-                head2dep = {}
+                id_head_to_dep_index = {}
                 for arc in x.arcs:
-                    head2dep[arc.head] = arc.dep
+                    id_head_to_dep_index[arc.head] = id2entity[arc.dep].index
 
                 for entity in x.entities:
                     start = entity.tokens[0].index_rel
@@ -3015,17 +3023,17 @@ class BertForCoreferenceResolutionV21(BertForCoreferenceResolutionV2):
                     id_label = self.ner_enc[entity.label]
                     ner_labels.append((i, start, end, id_label))
 
-                    if entity.id in head2dep.keys():
-                        dep_index = head2dep[entity.id].index + 1
+                    if entity.id in id_head_to_dep_index.keys():
+                        dep_index = id_head_to_dep_index[entity.id] + 1
                     else:
                         dep_index = 0
                     re_labels.append((i, entity.index, dep_index))
-                    re_labels2.append((i, entity.index, entity.index))  # сущность сама с собой всегда в одном кластере
+                    re_labels2.append((i, entity.index, entity.index, 1))  # сущность сама с собой всегда в одном кластере
 
                 for _, group in groupby(sorted(x.entities, key=lambda e: e.id_chain), key=lambda e: e.id_chain):
                     for head, dep in combinations(group, 2):
-                        re_labels2.append((i, head.index, dep.index))
-                        re_labels2.append((i, dep.index, head.index))
+                        re_labels2.append((i, head.index, dep.index, 1))
+                        re_labels2.append((i, dep.index, head.index, 1))
 
             # write
             num_pieces.append(len(input_ids_i))
@@ -3052,7 +3060,7 @@ class BertForCoreferenceResolutionV21(BertForCoreferenceResolutionV2):
             re_labels.append((0, 0, 0))
 
         if len(re_labels2) == 0:
-            re_labels2.append((0, 0, 0))
+            re_labels2.append((0, 0, 0, 0))
 
         training = mode == ModeKeys.TRAIN
 

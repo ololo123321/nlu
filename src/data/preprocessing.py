@@ -223,7 +223,8 @@ def split_example_v2(
                     tokens=[token_assignment_map[t] for t in entity.tokens],
                     is_event_trigger=entity.is_event_trigger,
                     attrs=entity.attrs.copy(),
-                    comment=entity.comment
+                    comment=entity.comment,
+                    id_chain=entity.id_chain
                 )
                 entities.append(entity_new)
                 entity_ids.add(entity.id)
