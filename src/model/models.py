@@ -1209,27 +1209,67 @@ class BertForRelationExtraction(BertJointModel):
 
         return performance_info
 
-    # TODO: адаптировать под новую логику функици predict
-    # def predict(self, examples: List[Example], chunks: List[Example], window: int = 1, batch_size: int = 16, **kwargs):
-    #     for start in range(0, len(examples), batch_size):
-    #         end = start + batch_size
-    #         examples_batch = examples[start:end]
-    #         feed_dict = self._get_feed_dict(examples_batch, mode=ModeKeys.TEST)
-    #         rel_labels_pred = self.sess.run(self.re_labels_true_entities, feed_dict=feed_dict)
-    #
-    #         for i, x in enumerate(examples_batch):
-    #             # re TODO: рассмотреть случаи num_events == 0
-    #             num_entities_i = len(x.entities)
-    #             arcs_pred = rel_labels_pred[i, :num_entities_i, :num_entities_i]
-    #             index2id = {entity.index: entity.id for entity in x.entities}
-    #             for j, k in zip(*np.where(arcs_pred != 0)):
-    #                 arc = Arc(
-    #                     id=f"R{len(x.arcs)}",
-    #                     head=index2id[j],
-    #                     dep=index2id[k],
-    #                     rel=self.inv_re_enc[arcs_pred[j, k]]
-    #                 )
-    #                 x.arcs.append(arc)
+    def predict(self, examples: List[Example], chunks: List[Example], window: int = 1, batch_size: int = 16, **kwargs):
+        """
+        Оценка качества на уровне документа.
+        :param examples: документы
+        :param chunks: куски (stride 1). предполагаетя, что для каждого документа из examples должны быть куски в chunks
+        :param window: размер кусков (в предложениях)
+        :param batch_size:
+        :return:
+        """
+        # проверка на то, то в примерах нет рёбер
+        # TODO: как-то обработать случай отсутствия сущнсоетй
+
+        id2example = {}
+        id_to_num_sentences = {}
+        for x in examples:
+            assert len(x.arcs) == 0
+            id2example[x.id] = x
+            id_to_num_sentences[x.id] = x.tokens[-1].id_sent + 1
+
+        for start in range(0, len(chunks), batch_size):
+            end = start + batch_size
+            chunks_batch = chunks[start:end]
+            feed_dict = self._get_feed_dict(chunks_batch, mode=ModeKeys.VALID)
+            re_labels_pred = self.sess.run(self.re_labels_true_entities, feed_dict=feed_dict)
+
+            for i in range(len(chunks_batch)):
+                chunk = chunks_batch[i]
+                parent = id2example[chunk.parent]
+
+                num_sentences = id_to_num_sentences[chunk.parent]
+                end_rel = chunk.tokens[-1].id_sent - chunk.tokens[0].id_sent
+                assert end_rel < window, f"[{chunk.id}] relative end {end_rel} >= window size {window}"
+                is_first = chunk.tokens[0].id_sent == 0
+                is_last = chunk.tokens[-1].id_sent == num_sentences - 1
+                pairs = get_sent_pairs_to_predict_for(end=end_rel, is_first=is_first, is_last=is_last, window=window)
+
+                num_entities_i = len(chunk.entities)
+                arcs_pred = re_labels_pred[i, :num_entities_i, :num_entities_i]
+                index2entity = {entity.index: entity.id for entity in chunk.entities}
+                assert len(index2entity) == num_entities_i
+
+                # предсказанные лейблы, которые можно получить из предиктов для кусочка chunk
+                for id_sent_rel_a, id_sent_rel_b in pairs:
+                    id_sent_abs_a = id_sent_rel_a + chunk.tokens[0].id_sent
+                    id_sent_abs_b = id_sent_rel_b + chunk.tokens[0].id_sent
+                    for idx_head, idx_dep in zip(*np.where(arcs_pred != 0)):
+                        head = index2entity[idx_head]
+                        dep = index2entity[idx_dep]
+                        id_sent_head = head.tokens[0].id_sent
+                        id_sent_dep = dep.tokens[0].id_sent
+                        if (id_sent_head == id_sent_abs_a and id_sent_dep == id_sent_abs_b) or \
+                                (id_sent_head == id_sent_abs_b and id_sent_dep == id_sent_abs_a):
+                            id_arc = "R" + str(len(parent.arcs))
+                            id_label = arcs_pred[idx_head, idx_dep]
+                            arc = Arc(
+                                id=id_arc,
+                                head=head.id,
+                                dep=dep.id,
+                                rel=self.inv_re_enc[id_label]
+                            )
+                            parent.arcs.append(arc)
 
     def save(self, model_dir: str, force: bool = True, scope_to_save: str = None):
         assert self.entity_label_to_token_id is not None
@@ -2743,7 +2783,9 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
                 chunk = chunks_batch[i]
 
                 num_entities_chunk = len(chunk.entities)
-                entities_sorted = sorted(chunk.entities, key=lambda e: (e.tokens[0].index_rel, e.tokens[-1].index_rel))
+                # entities_sorted = sorted(chunk.entities, key=lambda e: (e.tokens[0].index_rel, e.tokens[-1].index_rel))
+                index2entity = {entity.index: entity.id for entity in chunk.entities}
+                assert len(index2entity) == num_entities_chunk
 
                 num_sentences = id_to_num_sentences[chunk.parent]
                 end_rel = chunk.tokens[-1].id_sent - chunk.tokens[0].id_sent
@@ -2765,8 +2807,10 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
                         # петля
                         if idx_head == idx_dep - 1:
                             continue
-                        head = entities_sorted[idx_head]
-                        dep = entities_sorted[idx_dep - 1]
+                        # head = entities_sorted[idx_head]
+                        # dep = entities_sorted[idx_dep - 1]
+                        head = index2entity[idx_head]
+                        dep = index2entity[idx_dep - 1]
                         id_sent_head = head.tokens[0].id_sent
                         id_sent_dep = dep.tokens[0].id_sent
                         if (id_sent_head == id_sent_abs_a and id_sent_dep == id_sent_abs_b) or \
