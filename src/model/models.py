@@ -1247,7 +1247,7 @@ class BertForRelationExtraction(BertJointModel):
 
                 num_entities_i = len(chunk.entities)
                 arcs_pred = re_labels_pred[i, :num_entities_i, :num_entities_i]
-                index2entity = {entity.index: entity.id for entity in chunk.entities}
+                index2entity = {entity.index: entity for entity in chunk.entities}
                 assert len(index2entity) == num_entities_i
 
                 # предсказанные лейблы, которые можно получить из предиктов для кусочка chunk
