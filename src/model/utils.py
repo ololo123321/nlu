@@ -163,22 +163,22 @@ def get_entity_embeddings_concat_half(
 
 
 # TODO: должна возвращать [batch_size, num_entities_max, span_size_max]
-def get_span_indices(start_coords: tf.Tensor, end_coords: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+def get_span_indices(start_ids: tf.Tensor, end_ids: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
     """
 
-    :param start_coords:
-    :param end_coords:
-    :return: tf.Tensor of shape [batch_size, max_span_size] and dtype tf.int32
+    :param start_ids: tf.Tensor of shape [batch_size, num_entities] and dtype tf.int32
+    :param end_ids: tf.Tensor of shape [batch_size, num_entities] and dtype tf.int32
+    :return: tf.Tensor of shape [batch_size, num_entities, max_span_size] and dtype tf.int32
     """
-    span_sizes = end_coords - start_coords + 1
-    sequence_mask = tf.sequence_mask(span_sizes, dtype=tf.int32)
-    m = tf.reduce_max(span_sizes)
-    n = tf.shape(start_coords)[0]
-    res = tf.range(m)
-    res = tf.expand_dims(res, [0])
-    res = tf.tile(res, [n, 1])
-    res += tf.expand_dims(start_coords, [1])
-    res *= sequence_mask
+    span_sizes = end_ids - start_ids + 1  # [N, E]
+    m = tf.reduce_max(span_sizes)  # []
+    start_ids_shape = tf.shape(start_ids)  # [2]
+    res = tf.range(m)  # [S]
+    res = res[None, None, :]  # [1, 1, S]
+    res = tf.tile(res, [start_ids_shape[0], start_ids_shape[1], 1])  # [N, E, S]
+    res += start_ids[:, :, None]  # [N, E, S]
+    sequence_mask = tf.sequence_mask(span_sizes, dtype=tf.int32)  # [N, E, S]
+    res *= sequence_mask  # [N, E, S]
     return res, sequence_mask
 
 

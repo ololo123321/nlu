@@ -3602,9 +3602,9 @@ class BertForCoreferenceResolutionV4(BertForCoreferenceResolutionV3):
         if self.birnn_re is not None:
             sequence_mask = tf.sequence_mask(self.num_tokens_ph)
             x = self.birnn_re(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
-            d_model = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
-        else:
-            d_model = self.config["model"]["bert"]["dim"]
+        #     d_model = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
+        # else:
+        #     d_model = self.config["model"]["bert"]["dim"]
 
         # маскирование
         num_tokens = tf.shape(ner_labels)[1]
@@ -3615,24 +3615,24 @@ class BertForCoreferenceResolutionV4(BertForCoreferenceResolutionV3):
         no_entity_id = self.config["model"]["ner"]["no_entity_id"]
         span_mask = tf.not_equal(ner_labels, no_entity_id)  # [batch_size, num_tokens, num_tokens]
         start_coords, end_coords, num_entities = get_padded_coords_3d(mask_3d=span_mask)
-        x_entity = get_entity_embeddings_concat(
-            x=x,
-            start_coords=start_coords,
-            end_coords=end_coords
-        )  # [batch_size, num_entities, d_model * 2]
+        x_start = tf.gather_nd(x, start_coords)  # [N, num_entities, D]
+        x_end = tf.gather_nd(x, end_coords)  # [N, num_entities, D]
 
-        # attn  TODO: {start, end}_coords: [batch_size, num_entities]
-        grid, sequence_mask_span = get_span_indices(start_coords=start_coords, end_coords=end_coords)
-        x_span = tf.gather_nd(x, grid)  # [batch_size, max_span_size, d_model]
-        w = self.dense_attn_1(x_span)  # [batch_size, max_span_size, 128]
-        w = self.dense_attn_2(w)  # [batch_size, max_span_size, 1]
+        # attn
+        grid, sequence_mask_span = get_span_indices(
+            start_ids=start_coords[:, :, 1],
+            end_ids=end_coords[:, :, 1]
+        )  # ([batch_size, num_entities, span_size], [batch_size, num_entities, span_size])
+        x_span = tf.gather_nd(x, grid)  # [batch_size, num_entities, span_size, d_model]
+        w = self.dense_attn_1(x_span)  # [batch_size, num_entities, span_size, H]
+        w = self.dense_attn_2(w)  # [batch_size, num_entities, span_size, 1]
         sequence_mask_span = tf.cast(tf.expand_dims(sequence_mask_span, -1), tf.float32)
-        w += (1.0 - sequence_mask_span) * -1e9
-        w = tf.nn.softmax(w, axis=-1)
-        x_span = tf.reduce_sum(x_span * w, axis=1)  # [batch_size, d_model]
+        w += (1.0 - sequence_mask_span) * -1e9  # [batch_size, num_entities, span_size, 1]
+        w = tf.nn.softmax(w, axis=2)  # [batch_size, num_entities, span_size, 1]
+        x_span = tf.reduce_sum(x_span * w, axis=2)  # [batch_size, num_entities, d_model]
 
         # concat
-        x_entity = tf.concat([x_entity, x_span], axis=-1)  # [batch_size, num_entities, d_model * 3]
+        x_entity = tf.concat([x_start, x_end, x_span], axis=-1)  # [batch_size, num_entities, d_model * 3]
 
         return x_entity, num_entities
 
