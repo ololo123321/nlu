@@ -3474,7 +3474,7 @@ class ElmoJointModel(BertJointModel):
         self.init_uninitialized()
 
 
-class BertForCoreferenceResolutionV4(BertForCoreferenceResolutionV3):
+class BertForCoreferenceResolutionV4(BertForCoreferenceResolutionV2):
     """
     task:
     для каждого mention предсказывать подмножество antecedents
@@ -3493,13 +3493,13 @@ class BertForCoreferenceResolutionV4(BertForCoreferenceResolutionV3):
     s(i, j) = 0, if j >=i and j = 0 (no coref)
     During inference, the model only creates a link if the highest antecedent score is positive.
     """
-    def __init__(self, sess, config=None):
-        super().__init__(sess=sess, config=config)
+    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
+        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
 
         self.dense_attn_1 = None
         self.dense_attn_2 = None
 
-    # TODO: копипаста из родительского класса только из-за инициализации ffnn_attn
+    # TODO: копипаста из родительского класса из-за 1) инициализации ffnn_attn, 2) root_emb -> bert_dim * 3
     def build(self):
         """
         добавлен self.root_emb
@@ -3547,10 +3547,10 @@ class BertForCoreferenceResolutionV4(BertForCoreferenceResolutionV3):
                     emb_dim = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
                 else:
                     emb_dim = self.config["model"]["bert"]["dim"]
-                self.root_emb = tf.get_variable("root_emb", shape=[1, emb_dim], dtype=tf.float32)
+                self.root_emb = tf.get_variable("root_emb", shape=[1, emb_dim * 3], dtype=tf.float32)
 
-                self.w = tf.get_variable("w_update", shape=[emb_dim * 2, emb_dim], dtype=tf.float32)
-                self.w_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["w_dropout"])
+                # self.w = tf.get_variable("w_update", shape=[emb_dim * 6, emb_dim * 3], dtype=tf.float32)
+                # self.w_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["w_dropout"])
 
                 # TODO: вынести гиперпараметры в конфиг!!1!
                 self.dense_attn_1 = MLP(num_layers=1, hidden_dim=128, activation=tf.nn.relu, dropout=0.33)
@@ -3623,7 +3623,15 @@ class BertForCoreferenceResolutionV4(BertForCoreferenceResolutionV3):
             start_ids=start_coords[:, :, 1],
             end_ids=end_coords[:, :, 1]
         )  # ([batch_size, num_entities, span_size], [batch_size, num_entities, span_size])
-        x_span = tf.gather_nd(x, grid)  # [batch_size, num_entities, span_size, d_model]
+
+        batch_size = tf.shape(x)[0]
+        x_coord = tf.range(batch_size)[:, None, None, None]  # [batch_size, 1, 1, 1]
+        grid_shape = tf.shape(grid)  # [3]
+        x_coord = tf.tile(x_coord, [1, grid_shape[1], grid_shape[2], 1])  # [batch_size, num_entities, span_size, 1]
+        y_coord = tf.expand_dims(grid, -1)  # [batch_size, num_entities, span_size, 1]
+        coords = tf.concat([x_coord, y_coord], axis=-1)  # [batch_size, num_entities, span_size, 2]
+        x_span = tf.gather_nd(x, coords)  # [batch_size, num_entities, span_size, d_model]
+        # print(x_span)
         w = self.dense_attn_1(x_span)  # [batch_size, num_entities, span_size, H]
         w = self.dense_attn_2(w)  # [batch_size, num_entities, span_size, 1]
         sequence_mask_span = tf.cast(tf.expand_dims(sequence_mask_span, -1), tf.float32)
