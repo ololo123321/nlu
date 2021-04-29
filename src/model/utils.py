@@ -138,10 +138,21 @@ def get_entity_embeddings(
 
 def get_entity_embeddings_concat(
         x: tf.Tensor,
+        start_coords: tf.Tensor,
+        end_coords: tf.Tensor = None
+) -> tf.Tensor:
+    x_start = tf.gather_nd(x, start_coords)  # [N, num_entities, D]
+    x_end = tf.gather_nd(x, end_coords)  # [N, num_entities, D]
+    x_span = tf.concat([x_start, x_end], axis=-1)  # [N, num_entities, D * 2]
+    return x_span
+
+
+def get_entity_embeddings_concat_half(
+        x: tf.Tensor,
         d_model: int,
         start_coords: tf.Tensor,
         end_coords: tf.Tensor = None
-):
+) -> tf.Tensor:
     x_i = tf.gather_nd(x, start_coords)  # [N, num_entities, D]
     x_j = tf.gather_nd(x, end_coords)  # [N, num_entities, D]
     d_model_half = d_model // 2
@@ -149,6 +160,26 @@ def get_entity_embeddings_concat(
     x_end = x_j[:, :, d_model_half:]
     x_span = tf.concat([x_start, x_end], axis=-1)  # [N, num_entities, D]
     return x_span
+
+
+# TODO: должна возвращать [batch_size, num_entities_max, span_size_max]
+def get_span_indices(start_coords: tf.Tensor, end_coords: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+    """
+
+    :param start_coords:
+    :param end_coords:
+    :return: tf.Tensor of shape [batch_size, max_span_size] and dtype tf.int32
+    """
+    span_sizes = end_coords - start_coords + 1
+    sequence_mask = tf.sequence_mask(span_sizes, dtype=tf.int32)
+    m = tf.reduce_max(span_sizes)
+    n = tf.shape(start_coords)[0]
+    res = tf.range(m)
+    res = tf.expand_dims(res, [0])
+    res = tf.tile(res, [n, 1])
+    res += tf.expand_dims(start_coords, [1])
+    res *= sequence_mask
+    return res, sequence_mask
 
 
 def get_dense_labels_from_indices(indices: tf.Tensor, shape: tf.Tensor, no_label_id: int = 0):

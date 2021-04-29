@@ -6,12 +6,18 @@ class MLP(tf.keras.layers.Layer):
     def __init__(self, num_layers, hidden_dim, activation, dropout):
         super().__init__()
         self.dense_layers = [tf.keras.layers.Dense(hidden_dim, activation=activation) for _ in range(num_layers)]
-        self.dropout_layers = [tf.keras.layers.Dropout(dropout) for _ in range(num_layers)]
+        self.dropout_layers = []
+        for _ in range(num_layers):
+            if dropout is None or dropout == 0.0:
+                self.dropout_layers.append(None)
+            else:
+                self.dropout_layers.append(tf.keras.layers.Dropout(dropout))
 
     def call(self, x: tf.Tensor, training: bool = False):
         for dense, dropout in zip(self.dense_layers, self.dropout_layers):
             x = dense(x)
-            x = dropout(x, training=training)
+            if dropout is not None:
+                x = dropout(x, training=training)
         return x
 
 

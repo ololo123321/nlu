@@ -22,10 +22,12 @@ from src.model.utils import (
     get_padded_coords_3d,
     upper_triangular,
     get_entity_embeddings_concat,
+    get_entity_embeddings_concat_half,
     get_entity_pairs_mask,
     get_sent_pairs_to_predict_for,
+    get_span_indices
 )
-from src.model.layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN
+from src.model.layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN, MLP
 from src.data.base import Example, Arc, Entity
 from src.data.postprocessing import get_valid_spans
 from src.metrics import classification_report, classification_report_ner, f1_precision_recall_support
@@ -1823,7 +1825,7 @@ class BertJointModelWithNestedNer(BertJointModel):
 
         # encoding of pairs
         inputs = GraphEncoderInputs(head=x, dep=x)
-        logits = self.tokens_pair_enc(inputs=inputs, training=self.training_ph)  # [N, num_ent, num_ent, num_relation]
+        logits = self.tokens_pair_enc(inputs=inputs, training=self.training_ph)  # [N, num_tok, num_tok, num_entities]
         return logits
 
     def _get_entities_representation(self, bert_out: tf.Tensor, ner_labels: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
@@ -1863,7 +1865,7 @@ class BertJointModelWithNestedNer(BertJointModel):
             # требуется специальный токен начала и окончания последовательности
             entity_emb_fn = get_entity_embeddings
         elif self.config["model"]["re"]["entity_emb_type"] == 1:
-            entity_emb_fn = get_entity_embeddings_concat
+            entity_emb_fn = get_entity_embeddings_concat_half
         else:
             raise
         x_entity = entity_emb_fn(x=x, d_model=d_model, start_coords=start_coords, end_coords=end_coords)
@@ -3470,3 +3472,191 @@ class ElmoJointModel(BertJointModel):
 
     def initialize(self):
         self.init_uninitialized()
+
+
+class BertForCoreferenceResolutionV4(BertForCoreferenceResolutionV3):
+    """
+    task:
+    для каждого mention предсказывать подмножество antecedents
+    из множества ранее упомянутых mentions.
+
+    entity representation:
+    g = [x_start, x_end, x_attn]
+
+    coref score:
+    biaffine without one component
+
+    loss:
+    softmax_loss
+
+    inference:
+    s(i, j) = 0, if j >=i and j = 0 (no coref)
+    During inference, the model only creates a link if the highest antecedent score is positive.
+    """
+    def __init__(self, sess, config=None):
+        super().__init__(sess=sess, config=config)
+
+        self.dense_attn_1 = None
+        self.dense_attn_2 = None
+
+    # TODO: копипаста из родительского класса только из-за инициализации ffnn_attn
+    def build(self):
+        """
+        добавлен self.root_emb
+        """
+        self._set_placeholders()
+
+        # N - batch size
+        # D - bert dim
+        # T_pieces - число bpe-сиволов (включая [CLS] и [SEP])
+        # T_tokens - число токенов (не вклчая [CLS] и [SEP])
+        with tf.variable_scope(self.model_scope):
+            bert_out_train = self._build_bert(training=True)  # [N, T_pieces, D]
+            bert_out_pred = self._build_bert(training=False)  # [N, T_pieces, D]
+
+            self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
+
+            with tf.variable_scope(self.ner_scope):
+                if self.config["model"]["ner"]["use_birnn"]:
+                    self.birnn_ner = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
+
+                self.tokens_pair_enc = GraphEncoder(**self.config["model"]["ner"]["biaffine"])
+
+                self.ner_logits_train = self._build_ner_head(bert_out=bert_out_train)
+                self.ner_logits_inference = self._build_ner_head(bert_out=bert_out_pred)
+
+            # re
+            with tf.variable_scope(self.re_scope):
+                if self.config["model"]["re"]["use_entity_emb"]:
+                    num_entities = self.config["model"]["ner"]["biaffine"]["num_labels"]
+                    if self.config["model"]["re"]["use_birnn"]:
+                        emb_dim = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
+                    else:
+                        emb_dim = self.config["model"]["bert"]["dim"]
+                    self.ner_emb = tf.keras.layers.Embedding(num_entities, emb_dim)
+                    if self.config["model"]["re"]["use_entity_emb_layer_norm"]:
+                        self.ner_emb_layer_norm = tf.keras.layers.LayerNormalization()
+                    self.ner_emb_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["entity_emb_dropout"])
+
+                if self.config["model"]["re"]["use_birnn"]:
+                    self.birnn_re = StackedBiRNN(**self.config["model"]["re"]["rnn"])
+
+                self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
+
+                if self.config["model"]["re"]["use_birnn"]:
+                    emb_dim = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
+                else:
+                    emb_dim = self.config["model"]["bert"]["dim"]
+                self.root_emb = tf.get_variable("root_emb", shape=[1, emb_dim], dtype=tf.float32)
+
+                self.w = tf.get_variable("w_update", shape=[emb_dim * 2, emb_dim], dtype=tf.float32)
+                self.w_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["w_dropout"])
+
+                # TODO: вынести гиперпараметры в конфиг!!1!
+                self.dense_attn_1 = MLP(num_layers=1, hidden_dim=128, activation=tf.nn.relu, dropout=0.33)
+                self.dense_attn_2 = MLP(num_layers=1, hidden_dim=1, activation=None, dropout=None)
+
+                shape = tf.shape(self.ner_logits_train)[:-1]
+                no_entity_id = self.config["model"]["ner"]["no_entity_id"]
+                ner_labels_dense = get_dense_labels_from_indices(
+                    indices=self.ner_labels_ph, shape=shape, no_label_id=no_entity_id
+                )
+
+                ner_preds_inference = tf.argmax(self.ner_logits_inference, axis=-1, output_type=tf.int32)
+
+                self.re_logits_train, self.num_entities = self._build_re_head(
+                    bert_out=bert_out_train, ner_labels=ner_labels_dense
+                )
+
+                self.re_logits_true_entities, _ = self._build_re_head(
+                    bert_out=bert_out_pred, ner_labels=ner_labels_dense
+                )
+                self.re_logits_pred_entities, self.num_entities_pred = self._build_re_head(
+                    bert_out=bert_out_pred, ner_labels=ner_preds_inference
+                )
+
+                # argmax
+                self.re_labels_true_entities = tf.argmax(self.re_logits_true_entities, axis=-1)
+                self.re_labels_pred_entities = tf.argmax(self.re_logits_pred_entities, axis=-1)
+
+            self._set_loss()
+            self._set_train_op()
+
+    def _get_entities_representation(self, bert_out: tf.Tensor, ner_labels: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+        """
+
+
+        bert_out - [batch_size, num_pieces, bert_dim]
+        ner_labels - [batch_size, num_tokens, num_tokens]
+
+        logits - [batch_size, num_entities_max, bert_bim or cell_dim * 2]
+        num_entities - [batch_size]
+        """
+        # dropout
+        bert_out = self.bert_dropout(bert_out, training=self.training_ph)
+
+        # pieces -> tokens
+        x = tf.gather_nd(bert_out, self.first_pieces_coords_ph)  # [batch_size, num_tokens, bert_dim]
+
+        # birnn
+        if self.birnn_re is not None:
+            sequence_mask = tf.sequence_mask(self.num_tokens_ph)
+            x = self.birnn_re(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
+            d_model = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
+        else:
+            d_model = self.config["model"]["bert"]["dim"]
+
+        # маскирование
+        num_tokens = tf.shape(ner_labels)[1]
+        mask = upper_triangular(num_tokens, dtype=tf.int32)
+        ner_labels *= mask[None, :, :]
+
+        # векторизация сущностей
+        no_entity_id = self.config["model"]["ner"]["no_entity_id"]
+        span_mask = tf.not_equal(ner_labels, no_entity_id)  # [batch_size, num_tokens, num_tokens]
+        start_coords, end_coords, num_entities = get_padded_coords_3d(mask_3d=span_mask)
+        x_entity = get_entity_embeddings_concat(
+            x=x,
+            start_coords=start_coords,
+            end_coords=end_coords
+        )  # [batch_size, num_entities, d_model * 2]
+
+        # attn  TODO: {start, end}_coords: [batch_size, num_entities]
+        grid, sequence_mask_span = get_span_indices(start_coords=start_coords, end_coords=end_coords)
+        x_span = tf.gather_nd(x, grid)  # [batch_size, max_span_size, d_model]
+        w = self.dense_attn_1(x_span)  # [batch_size, max_span_size, 128]
+        w = self.dense_attn_2(w)  # [batch_size, max_span_size, 1]
+        sequence_mask_span = tf.cast(tf.expand_dims(sequence_mask_span, -1), tf.float32)
+        w += (1.0 - sequence_mask_span) * -1e9
+        w = tf.nn.softmax(w, axis=-1)
+        x_span = tf.reduce_sum(x_span * w, axis=1)  # [batch_size, d_model]
+
+        # concat
+        x_entity = tf.concat([x_entity, x_span], axis=-1)  # [batch_size, num_entities, d_model * 3]
+
+        return x_entity, num_entities
+
+
+class E2ECoref:
+    """
+    task:
+    для каждого mention предсказывать подмножество antecedents
+    из множества ранее упомянутых mentions.
+
+    ner_labels_ph = [id_example, start, end]
+
+    coreference score:
+    s(i, j) = s_m(i) + s_m(j) + s_a(i, j)
+    s_m(i) = w_m * ffnn_m(g_i)
+    s_m(j) = w_m * ffnn_m(g_j)
+    s_a(i, j) = w_a * ffnn([g_i, g_j, g_i * g_j, feats(i, j)])
+    не очень понятно, нужны ли компоненты s_m(i) и s_m(j) в случае заранее определённых
+    истинных mentions.
+    g = [x_start, x_end, x_attn]
+
+    loss:
+    softmax_loss
+
+    inference:
+    get_predicted_antecedents, get_predicted_clusters
+    """
