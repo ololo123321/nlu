@@ -3645,6 +3645,39 @@ class BertForCoreferenceResolutionV4(BertForCoreferenceResolutionV2):
         return x_entity, num_entities
 
 
+class BertForCoreferenceResolutionV5(BertForCoreferenceResolutionV2):
+    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
+        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
+
+    def _build_re_head(self, bert_out: tf.Tensor, ner_labels: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+        x, num_entities = self._get_entities_representation(bert_out=bert_out, ner_labels=ner_labels)
+
+        # добавление root
+        batch_size = tf.shape(x)[0]
+        x_root = tf.tile(self.root_emb, [batch_size, 1])
+        x_root = x_root[:, None, :]
+        x_dep = tf.concat([x_root, x], axis=1)  # [batch_size, num_entities + 1, bert_dim]
+
+        # encoding of pairs
+        inputs = GraphEncoderInputs(head=x, dep=x_dep)
+        logits = self.entity_pairs_enc(inputs=inputs, training=self.training_ph)  # [N, num_ent, num_ent + 1, 1]
+
+        # squeeze
+        logits = tf.squeeze(logits, axis=[-1])  # [batch_size, num_entities, num_entities + 1]
+
+        # mask padding
+        num_entities_inner = num_entities + tf.ones_like(num_entities)
+        mask1 = tf.sequence_mask(num_entities_inner, dtype=tf.float32)  # [batch_size, num_entities]
+
+        # mask antecedent
+        n = tf.shape(logits)[1]
+        mask2 = tf.linalg.band_part(tf.ones((n, n + 1), dtype=tf.float32), -1, 0)  # lower-triangular
+
+        mask = mask1[:, :, None] * mask2[None, :, :]
+        logits += (1.0 - mask) * -1e9
+        return logits, num_entities
+
+
 class E2ECoref:
     """
     task:
