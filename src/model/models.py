@@ -3645,6 +3645,7 @@ class BertForCoreferenceResolutionV4(BertForCoreferenceResolutionV2):
         return x_entity, num_entities
 
 
+# current best model
 class BertForCoreferenceResolutionV5(BertForCoreferenceResolutionV2):
     def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
@@ -3798,6 +3799,43 @@ class BertForCoreferenceResolutionV5(BertForCoreferenceResolutionV2):
             for id_chain, comp in enumerate(components):
                 for id_entity in comp:
                     id2entity[id_entity].id_chain = id_chain
+
+
+# TODO: при инференсе dep выбирать по argmax
+# TODO: при инференсе добавить условие на то, что максимальный скор должен быть неотрицательным
+# TODO: как быть с evaluate?
+class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
+    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
+        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
+
+    def _get_re_loss(self):
+        no_rel_id = 0  # должен быть ноль обязательно
+        logits_shape = tf.shape(self.re_logits_train)
+        ones = tf.ones_like(self.re_labels_ph[:, :1])
+        indices = tf.concat([self.re_labels_ph, ones], axis=1)
+        labels = get_dense_labels_from_indices(
+            indices=indices, shape=logits_shape, no_label_id=no_rel_id
+        )  # [batch_size, num_entities, num_entities + 1], {0, 1}
+
+        # предполагается, что логиты уже маскированы по последнему измерению (pad, look-ahead)
+        scores_model = tf.reduce_logsumexp(self.re_logits_train, axis=-1)  # [batch_size, num_entities]
+        logits_gold = self.re_logits_train + tf.log(tf.cast(labels, tf.float32))  # [batch_size, num_entities]
+        scores_gold = tf.reduce_logsumexp(logits_gold, axis=-1)  # [batch_size, num_entities]
+        per_example_loss = scores_model - scores_gold  # [batch_size, num_entities]
+
+        # mask
+        sequence_mask = tf.sequence_mask(self.num_entities, maxlen=logits_shape[1], dtype=tf.float32)
+        masked_per_example_loss = per_example_loss * sequence_mask
+
+        # aggregate
+        total_loss = tf.reduce_sum(masked_per_example_loss)
+        num_pairs = tf.cast(tf.reduce_sum(sequence_mask), tf.float32)
+        num_pairs = tf.maximum(num_pairs, 1.0)
+        loss = total_loss / num_pairs
+
+        # weight
+        loss *= self.config["model"]["re"]["loss_coef"]
+        return loss
 
 
 class E2ECoref:
