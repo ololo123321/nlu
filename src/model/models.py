@@ -2786,7 +2786,7 @@ class BertForCoreferenceResolutionV2(BertForCoreferenceResolution):
 
                 num_entities_chunk = len(chunk.entities)
                 # entities_sorted = sorted(chunk.entities, key=lambda e: (e.tokens[0].index_rel, e.tokens[-1].index_rel))
-                index2entity = {entity.index: entity.id for entity in chunk.entities}
+                index2entity = {entity.index: entity for entity in chunk.entities}
                 assert len(index2entity) == num_entities_chunk
 
                 num_sentences = id_to_num_sentences[chunk.parent]
@@ -3676,6 +3676,128 @@ class BertForCoreferenceResolutionV5(BertForCoreferenceResolutionV2):
         mask = mask_pad[:, None, :] * mask_ant[None, :, :]
         logits += (1.0 - mask) * -1e9
         return logits, num_entities
+
+    # TODO: копипаста
+    # TODO: пока в _get_feed_dict суётся ModeKeys.VALID, потому что предполагается,
+    #  что сущности уже найдены. избавиться от этого костыля, путём создания отдельного
+    #  класса под модель, где нужно искать только кореференции
+    def predict(
+            self,
+            examples: List[Example],
+            chunks: List[Example],
+            window: int = 1,
+            batch_size: int = 16,
+            no_or_one_parent_per_node: bool = False,
+            **kwargs
+    ):
+        """
+        Оценка качества на уровне документа.
+        :param examples: документы
+        :param chunks: куски (stride 1). предполагаетя, что для каждого документа из examples должны быть куски в chunks
+        :param window: размер кусков (в предложениях)
+        :param batch_size:
+        :param no_or_one_parent_per_node
+        :return:
+        """
+        # проверка на то, то в примерах нет рёбер
+        # TODO: как-то обработать случай отсутствия сущнсоетй
+        for x in examples:
+            assert len(x.arcs) == 0
+
+        id_to_num_sentences = {x.id: x.tokens[-1].id_sent + 1 for x in examples}
+
+        # y_pred = set()
+        head2dep = {}  # (file, head) -> {dep, score}
+        dep2head = {}
+
+        for start in range(0, len(chunks), batch_size):
+            end = start + batch_size
+            chunks_batch = chunks[start:end]
+            feed_dict = self._get_feed_dict(chunks_batch, mode=ModeKeys.VALID)
+            re_labels_pred, re_logits_pred = self.sess.run(
+                [self.re_labels_true_entities, self.re_logits_true_entities],
+                feed_dict=feed_dict
+            )
+            # re_labels_pred: np.ndarray, shape [batch_size, num_entities], dtype np.int32
+            # values in range [0, num_ent]; 0 means no dep.
+            # re_logits_pred: np.ndarray, shape [batch_size, num_entities, num_entities + 1], dtype np.float32
+
+            for i in range(len(chunks_batch)):
+                chunk = chunks_batch[i]
+
+                num_entities_chunk = len(chunk.entities)
+                # entities_sorted = sorted(chunk.entities, key=lambda e: (e.tokens[0].index_rel, e.tokens[-1].index_rel))
+                index2entity = {entity.index: entity for entity in chunk.entities}
+                assert len(index2entity) == num_entities_chunk
+
+                num_sentences = id_to_num_sentences[chunk.parent]
+                end_rel = chunk.tokens[-1].id_sent - chunk.tokens[0].id_sent
+                assert end_rel < window, f"[{chunk.id}] relative end {end_rel} >= window size {window}"
+                is_first = chunk.tokens[0].id_sent == 0
+                is_last = chunk.tokens[-1].id_sent == num_sentences - 1
+                pairs = get_sent_pairs_to_predict_for(end=end_rel, is_first=is_first, is_last=is_last, window=window)
+
+                # предсказанные лейблы, которые можно получить из предиктов для кусочка chunk
+                for id_sent_rel_a, id_sent_rel_b in pairs:
+                    id_sent_abs_a = id_sent_rel_a + chunk.tokens[0].id_sent
+                    id_sent_abs_b = id_sent_rel_b + chunk.tokens[0].id_sent
+                    # for idx_head, idx_dep in enumerate(re_labels_pred_i):
+                    for idx_head in range(num_entities_chunk):
+                        idx_dep = re_labels_pred[i, idx_head]
+                        # нет исходящего ребра или находится дальше по тексту
+                        if idx_dep == 0 or idx_dep >= idx_head + 1:
+                            continue
+                        # head = entities_sorted[idx_head]
+                        # dep = entities_sorted[idx_dep - 1]
+                        head = index2entity[idx_head]
+                        dep = index2entity[idx_dep - 1]
+                        id_sent_head = head.tokens[0].id_sent
+                        id_sent_dep = dep.tokens[0].id_sent
+                        if (id_sent_head == id_sent_abs_a and id_sent_dep == id_sent_abs_b) or \
+                                (id_sent_head == id_sent_abs_b and id_sent_dep == id_sent_abs_a):
+                            score = re_logits_pred[i, idx_head, idx_dep]
+                            key_head = chunk.parent, head.id
+                            key_dep = chunk.parent, dep.id
+                            if key_head in head2dep:
+                                if head2dep[key_head]["score"] < score:
+                                    head2dep[key_head] = {"dep": dep.id, "score": score}
+                                else:
+                                    pass
+                            else:
+                                if no_or_one_parent_per_node:
+                                    if key_dep in dep2head:
+                                        if dep2head[key_dep]["score"] < score:
+                                            dep2head[key_dep] = {"head": head.id, "score": score}
+                                            head2dep.pop(key_head, None)
+                                        else:
+                                            pass
+                                    else:
+                                        dep2head[key_dep] = {"head": head.id, "score": score}
+                                        head2dep[key_head] = {"dep": dep.id, "score": score}
+                                else:
+                                    head2dep[key_head] = {"dep": dep.id, "score": score}
+
+        # присвоение id_chain
+        for x in examples:
+            id2entity = {}
+            g = {}
+            for entity in x.entities:
+                g[entity.id] = set()
+                id2entity[entity.id] = entity
+            for entity in x.entities:
+                key = x.id, entity.id
+                if key in head2dep:
+                    dep = head2dep[key]["dep"]
+                    g[entity.id].add(dep)
+                    id_arc = "R" + str(len(x.arcs))
+                    arc = Arc(id=id_arc, head=entity.id, dep=dep, rel=self.inv_re_enc[1])
+                    x.arcs.append(arc)
+
+            components = get_connected_components(g)
+
+            for id_chain, comp in enumerate(components):
+                for id_entity in comp:
+                    id2entity[id_entity].id_chain = id_chain
 
 
 class E2ECoref:
