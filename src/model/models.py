@@ -3667,13 +3667,13 @@ class BertForCoreferenceResolutionV5(BertForCoreferenceResolutionV2):
 
         # mask padding
         num_entities_inner = num_entities + tf.ones_like(num_entities)
-        mask1 = tf.sequence_mask(num_entities_inner, dtype=tf.float32)  # [batch_size, num_entities]
+        mask_pad = tf.sequence_mask(num_entities_inner, dtype=tf.float32)  # [batch_size, num_entities + 1]
 
         # mask antecedent
         n = tf.shape(logits)[1]
-        mask2 = tf.linalg.band_part(tf.ones((n, n + 1), dtype=tf.float32), -1, 0)  # lower-triangular
+        mask_ant = tf.linalg.band_part(tf.ones((n, n + 1), dtype=tf.float32), -1, 0)  # lower-triangular
 
-        mask = mask1[:, :, None] * mask2[None, :, :]
+        mask = mask_pad[:, None, :] * mask_ant[None, :, :]
         logits += (1.0 - mask) * -1e9
         return logits, num_entities
 
