@@ -13,7 +13,7 @@ import numpy as np
 from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 
-from src.utils import get_entity_spans, get_connected_components
+from src.utils import get_entity_spans, get_connected_components, parse_conll_metrics
 from src.model.utils import (
     get_batched_coords_from_labels,
     get_labels_mask,
@@ -21,7 +21,6 @@ from src.model.utils import (
     get_entity_embeddings,
     get_padded_coords_3d,
     upper_triangular,
-    get_entity_embeddings_concat,
     get_entity_embeddings_concat_half,
     get_entity_pairs_mask,
     get_sent_pairs_to_predict_for,
@@ -30,7 +29,8 @@ from src.model.utils import (
 from src.model.layers import GraphEncoder, GraphEncoderInputs, StackedBiRNN, MLP
 from src.data.base import Example, Arc, Entity
 from src.data.postprocessing import get_valid_spans
-from src.metrics import classification_report, classification_report_ner, f1_precision_recall_support
+from src.data.io import to_conll
+from src.metrics import classification_report, classification_report_ner, f1_precision_recall_support, get_coreferense_resolution_metrics
 
 
 class ModeKeys:
@@ -3801,12 +3801,157 @@ class BertForCoreferenceResolutionV5(BertForCoreferenceResolutionV2):
                     id2entity[id_entity].id_chain = id_chain
 
 
-# TODO: при инференсе dep выбирать по argmax
-# TODO: при инференсе добавить условие на то, что максимальный скор должен быть неотрицательным
-# TODO: как быть с evaluate?
 class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
     def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
+
+        self.examples_valid_copy = None
+        self.examples_valid_copy_cache = None
+
+    def predict(
+            self,
+            examples: List[Example],
+            chunks: List[Example],
+            window: int = 1,
+            batch_size: int = 16,
+            no_or_one_parent_per_node: bool = False,
+            **kwargs
+    ):
+        """
+        Оценка качества на уровне документа.
+        :param examples: документы
+        :param chunks: куски (stride 1). предполагаетя, что для каждого документа из examples должны быть куски в chunks
+        :param window: размер кусков (в предложениях)
+        :param batch_size:
+        :param no_or_one_parent_per_node
+        :return:
+        """
+        # проверка на то, то в примерах нет рёбер
+        # TODO: как-то обработать случай отсутствия сущнсоетй
+        for x in examples:
+            assert len(x.arcs) == 0
+
+        id_to_num_sentences = {x.id: x.tokens[-1].id_sent + 1 for x in examples}
+
+        # y_pred = set()
+        head2dep = {}  # (file, head) -> {dep, score}
+
+        for start in range(0, len(chunks), batch_size):
+            end = start + batch_size
+            chunks_batch = chunks[start:end]
+            feed_dict = self._get_feed_dict(chunks_batch, mode=ModeKeys.VALID)
+            re_labels_pred, re_logits_pred = self.sess.run(
+                [self.re_labels_true_entities, self.re_logits_true_entities],
+                feed_dict=feed_dict
+            )
+            # re_labels_pred: np.ndarray, shape [batch_size, num_entities], dtype np.int32
+            # values in range [0, num_ent]; 0 means no dep.
+            # re_logits_pred: np.ndarray, shape [batch_size, num_entities, num_entities + 1], dtype np.float32
+
+            for i in range(len(chunks_batch)):
+                chunk = chunks_batch[i]
+
+                num_entities_chunk = len(chunk.entities)
+                index2entity = {entity.index: entity for entity in chunk.entities}
+                assert len(index2entity) == num_entities_chunk
+
+                num_sentences = id_to_num_sentences[chunk.parent]
+                end_rel = chunk.tokens[-1].id_sent - chunk.tokens[0].id_sent
+                assert end_rel < window, f"[{chunk.id}] relative end {end_rel} >= window size {window}"
+                is_first = chunk.tokens[0].id_sent == 0
+                is_last = chunk.tokens[-1].id_sent == num_sentences - 1
+                pairs = get_sent_pairs_to_predict_for(end=end_rel, is_first=is_first, is_last=is_last, window=window)
+
+                # предсказанные лейблы, которые можно получить из предиктов для кусочка chunk
+                for id_sent_rel_a, id_sent_rel_b in pairs:
+                    id_sent_abs_a = id_sent_rel_a + chunk.tokens[0].id_sent
+                    id_sent_abs_b = id_sent_rel_b + chunk.tokens[0].id_sent
+                    # for idx_head, idx_dep in enumerate(re_labels_pred_i):
+                    for idx_head in range(num_entities_chunk):
+                        idx_dep = re_labels_pred[i, idx_head]
+                        # нет исходящего ребра или находится дальше по тексту
+                        if idx_dep == 0 or idx_dep >= idx_head + 1:
+                            continue
+                        score = re_logits_pred[i, idx_head, idx_dep]
+                        if score <= 0.0:
+                            continue
+                        head = index2entity[idx_head]
+                        dep = index2entity[idx_dep - 1]
+                        id_sent_head = head.tokens[0].id_sent
+                        id_sent_dep = dep.tokens[0].id_sent
+                        if (id_sent_head == id_sent_abs_a and id_sent_dep == id_sent_abs_b) or \
+                                (id_sent_head == id_sent_abs_b and id_sent_dep == id_sent_abs_a):
+                            key_head = chunk.parent, head.id
+                            if key_head in head2dep:
+                                if head2dep[key_head]["score"] < score:
+                                    head2dep[key_head] = {"dep": dep.id, "score": score}
+                                else:
+                                    pass
+                            else:
+                                head2dep[key_head] = {"dep": dep.id, "score": score}
+
+        # присвоение id_chain
+        for x in examples:
+            id2entity = {}
+            g = {}
+            for entity in x.entities:
+                g[entity.id] = set()
+                id2entity[entity.id] = entity
+            for entity in x.entities:
+                key = x.id, entity.id
+                if key in head2dep:
+                    dep = head2dep[key]["dep"]
+                    g[entity.id].add(dep)
+                    id_arc = "R" + str(len(x.arcs))
+                    arc = Arc(id=id_arc, head=entity.id, dep=dep, rel=self.inv_re_enc[1])
+                    x.arcs.append(arc)
+
+            components = get_connected_components(g)
+
+            for id_chain, comp in enumerate(components):
+                for id_entity in comp:
+                    id2entity[id_entity].id_chain = id_chain
+
+    def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
+        assert self.examples_valid_copy is not None
+        assert self.examples_valid_copy_cache is not None
+
+        for x in self.examples_valid_copy_cache:
+            x.arcs = []
+
+        self.predict(
+            examples=self.examples_valid_copy_cache,
+            chunks=examples,
+            batch_size=batch_size,
+            window=self.config["valid"]["window"],
+        )
+
+        to_conll(
+            examples=self.examples_valid_copy,
+            path=self.config["valid"]["path_true"]
+        )
+
+        to_conll(
+            examples=self.examples_valid_copy_cache,
+            path=self.config["valid"]["path_pred"]
+        )
+
+        metrics = {}
+        for metric in ["muc", "bcub", "ceafm", "ceafe", "blanc"]:
+            stdout = get_coreferense_resolution_metrics(
+                path_true=self.config["valid"]["path_true"],
+                path_pred=self.config["valid"]["path_pred"],
+                scorer_path=self.config["valid"]["scorer_path"],
+                metric=metric
+            )
+            metrics[metric] = parse_conll_metrics(stdout=stdout)
+
+        d = {
+            "loss": 0.0,
+            "score": (metrics["muc"]["f1"] + metrics["bcub"]["f1"] + metrics["ceafm"]["f1"] + metrics["ceafe"]["f1"]) / 4.0,
+            "metrics": metrics
+        }
+        return d
 
     def _get_re_loss(self):
         no_rel_id = 0  # должен быть ноль обязательно
@@ -3836,6 +3981,120 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
         # weight
         loss *= self.config["model"]["re"]["loss_coef"]
         return loss
+
+    # TODO: много копипасты!
+    def _get_feed_dict(self, examples: List[Example], mode: str):
+        assert self.ner_enc is not None
+        assert self.re_enc is not None
+
+        # bert
+        input_ids = []
+        input_mask = []
+        segment_ids = []
+
+        # ner
+        first_pieces_coords = []
+        num_pieces = []
+        num_tokens = []
+        ner_labels = []
+
+        # re
+        re_labels = []
+
+        # filling
+        for i, x in enumerate(examples):
+            input_ids_i = []
+            input_mask_i = []
+            segment_ids_i = []
+            first_pieces_coords_i = []
+
+            # [CLS]
+            input_ids_i.append(self.config["model"]["bert"]["cls_token_id"])
+            input_mask_i.append(1)
+            segment_ids_i.append(0)
+
+            ptr = 1
+
+            # tokens
+            for t in x.tokens:
+                first_pieces_coords_i.append((i, ptr))
+                num_pieces_ij = len(t.pieces)
+                input_ids_i += t.token_ids
+                input_mask_i += [1] * num_pieces_ij
+                segment_ids_i += [0] * num_pieces_ij
+                ptr += num_pieces_ij
+
+            # [SEP]
+            input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
+            input_mask_i.append(1)
+            segment_ids_i.append(0)
+
+            # ner, re
+            if mode != ModeKeys.TEST:
+                # id2entity = {entity.id: entity for entity in x.entities}
+                id2entity = {}
+                chain2entities = {}
+                for entity in x.entities:
+                    assert isinstance(entity.index, int)
+                    assert isinstance(entity.id_chain, int)
+                    id2entity[entity.id] = entity
+                    if entity.id_chain in chain2entities:
+                        chain2entities[entity.id_chain].add(entity)
+                    else:
+                        chain2entities[entity.id_chain] = {entity}
+
+                for entity in x.entities:
+                    start = entity.tokens[0].index_rel
+                    end = entity.tokens[-1].index_rel
+                    id_label = self.ner_enc[entity.label]
+                    ner_labels.append((i, start, end, id_label))
+
+                    re_labels.append((i, entity.index, 0))
+                    for entity_chain in chain2entities[entity.id_chain]:
+                        if entity_chain.index < entity.index:
+                            re_labels.append((i, entity.index, entity_chain.index + 1))
+
+            # write
+            num_pieces.append(len(input_ids_i))
+            num_tokens.append(len(x.tokens))
+            input_ids.append(input_ids_i)
+            input_mask.append(input_mask_i)
+            segment_ids.append(segment_ids_i)
+            first_pieces_coords.append(first_pieces_coords_i)
+
+        # padding
+        pad_token_id = self.config["model"]["bert"]["pad_token_id"]
+        num_tokens_max = max(num_tokens)
+        num_pieces_max = max(num_pieces)
+        for i in range(len(examples)):
+            input_ids[i] += [pad_token_id] * (num_pieces_max - num_pieces[i])
+            input_mask[i] += [0] * (num_pieces_max - num_pieces[i])
+            segment_ids[i] += [0] * (num_pieces_max - num_pieces[i])
+            first_pieces_coords[i] += [(i, 0)] * (num_tokens_max - num_tokens[i])
+
+        if len(ner_labels) == 0:
+            ner_labels.append((0, 0, 0, 0))
+
+        if len(re_labels) == 0:
+            re_labels.append((0, 0, 0))
+
+        training = mode == ModeKeys.TRAIN
+
+        d = {
+            self.input_ids_ph: input_ids,
+            self.input_mask_ph: input_mask,
+            self.segment_ids_ph: segment_ids,
+            self.first_pieces_coords_ph: first_pieces_coords,
+            self.num_pieces_ph: num_pieces,
+            self.num_tokens_ph: num_tokens,
+            self.training_ph: training
+        }
+
+        if mode != ModeKeys.TEST:
+            d[self.ner_labels_ph] = ner_labels
+            d[self.re_labels_ph] = re_labels
+
+        return d
 
 
 class E2ECoref:
