@@ -3802,6 +3802,60 @@ class BertForCoreferenceResolutionV5(BertForCoreferenceResolutionV2):
                     id2entity[id_entity].id_chain = id_chain
 
 
+class BertForCoreferenceResolutionV51(BertForCoreferenceResolutionV5):
+    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
+        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
+
+        self.examples_valid = None
+        self.examples_valid_copy = None
+
+    def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
+        assert self.examples_valid is not None
+        assert self.examples_valid_copy is not None
+
+        for x in self.examples_valid_copy:
+            x.arcs = []
+            for entity in x.entities:
+                entity.id_chain = None
+
+        self.predict(
+            examples=self.examples_valid_copy,
+            chunks=examples,
+            batch_size=batch_size,
+            window=self.config["valid"]["window"],
+        )
+
+        to_conll(
+            examples=self.examples_valid,
+            path=self.config["valid"]["path_true"]
+        )
+
+        to_conll(
+            examples=self.examples_valid_copy,
+            path=self.config["valid"]["path_pred"]
+        )
+
+        metrics = {}
+        for metric in ["muc", "bcub", "ceafm", "ceafe", "blanc"]:
+            stdout = get_coreferense_resolution_metrics(
+                path_true=self.config["valid"]["path_true"],
+                path_pred=self.config["valid"]["path_pred"],
+                scorer_path=self.config["valid"]["scorer_path"],
+                metric=metric
+            )
+            # print(metric)
+            # print(stdout)
+            parse_fn = parse_conll_blanc if metric == "blanc" else parse_conll_metrics
+            metrics[metric] = parse_fn(stdout=stdout)
+
+        d = {
+            "loss": 0.0,
+            "score": (metrics["muc"]["f1"] + metrics["bcub"]["f1"] + metrics["ceafm"]["f1"] + metrics["ceafe"]["f1"]) / 4.0,
+            "metrics": metrics
+        }
+        return d
+
+
 class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
     def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
