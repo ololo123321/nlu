@@ -5,6 +5,7 @@ import shutil
 from typing import Dict, List, Callable, Tuple
 from itertools import chain, groupby, combinations
 from abc import ABC, abstractmethod
+from collections import defaultdict
 
 import tensorflow as tf
 import tensorflow_hub as hub
@@ -13,7 +14,7 @@ import numpy as np
 from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 
-from src.utils import get_entity_spans, get_connected_components, parse_conll_metrics
+from src.utils import get_entity_spans, get_connected_components, parse_conll_metrics, parse_conll_blanc
 from src.model.utils import (
     get_batched_coords_from_labels,
     get_labels_mask,
@@ -3805,8 +3806,8 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
     def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
 
+        self.examples_valid = None
         self.examples_valid_copy = None
-        self.examples_valid_copy_cache = None
 
     def predict(
             self,
@@ -3870,11 +3871,14 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
                     for idx_head in range(num_entities_chunk):
                         idx_dep = re_labels_pred[i, idx_head]
                         # нет исходящего ребра или находится дальше по тексту
+                        # print(0)
                         if idx_dep == 0 or idx_dep >= idx_head + 1:
                             continue
                         score = re_logits_pred[i, idx_head, idx_dep]
+                        # print(1)
                         if score <= 0.0:
                             continue
+                        # print(2)
                         head = index2entity[idx_head]
                         dep = index2entity[idx_dep - 1]
                         id_sent_head = head.tokens[0].id_sent
@@ -3906,6 +3910,7 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
                     arc = Arc(id=id_arc, head=entity.id, dep=dep, rel=self.inv_re_enc[1])
                     x.arcs.append(arc)
 
+            # print(g)
             components = get_connected_components(g)
 
             for id_chain, comp in enumerate(components):
@@ -3913,26 +3918,28 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
                     id2entity[id_entity].id_chain = id_chain
 
     def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
+        assert self.examples_valid is not None
         assert self.examples_valid_copy is not None
-        assert self.examples_valid_copy_cache is not None
 
-        for x in self.examples_valid_copy_cache:
+        for x in self.examples_valid_copy:
             x.arcs = []
+            for entity in x.entities:
+                entity.id_chain = None
 
         self.predict(
-            examples=self.examples_valid_copy_cache,
+            examples=self.examples_valid_copy,
             chunks=examples,
             batch_size=batch_size,
             window=self.config["valid"]["window"],
         )
 
         to_conll(
-            examples=self.examples_valid_copy,
+            examples=self.examples_valid,
             path=self.config["valid"]["path_true"]
         )
 
         to_conll(
-            examples=self.examples_valid_copy_cache,
+            examples=self.examples_valid_copy,
             path=self.config["valid"]["path_pred"]
         )
 
@@ -3944,7 +3951,10 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
                 scorer_path=self.config["valid"]["scorer_path"],
                 metric=metric
             )
-            metrics[metric] = parse_conll_metrics(stdout=stdout)
+            # print(metric)
+            # print(stdout)
+            parse_fn = parse_conll_blanc if metric == "blanc" else parse_conll_metrics
+            metrics[metric] = parse_fn(stdout=stdout)
 
         d = {
             "loss": 0.0,
@@ -3964,7 +3974,7 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
 
         # предполагается, что логиты уже маскированы по последнему измерению (pad, look-ahead)
         scores_model = tf.reduce_logsumexp(self.re_logits_train, axis=-1)  # [batch_size, num_entities]
-        logits_gold = self.re_logits_train + tf.log(tf.cast(labels, tf.float32))  # [batch_size, num_entities]
+        logits_gold = self.re_logits_train + (1.0 - tf.cast(labels, tf.float32)) * -1e9  # [batch_size, num_entities, num_entities + 1]
         scores_gold = tf.reduce_logsumexp(logits_gold, axis=-1)  # [batch_size, num_entities]
         per_example_loss = scores_model - scores_gold  # [batch_size, num_entities]
 
@@ -3974,9 +3984,9 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
 
         # aggregate
         total_loss = tf.reduce_sum(masked_per_example_loss)
-        num_pairs = tf.cast(tf.reduce_sum(sequence_mask), tf.float32)
-        num_pairs = tf.maximum(num_pairs, 1.0)
-        loss = total_loss / num_pairs
+        num_entities_total = tf.cast(tf.reduce_sum(self.num_entities), tf.float32)
+        num_entities_total = tf.maximum(num_entities_total, 1.0)
+        loss = total_loss / num_entities_total
 
         # weight
         loss *= self.config["model"]["re"]["loss_coef"]
@@ -4033,26 +4043,33 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
             if mode != ModeKeys.TEST:
                 # id2entity = {entity.id: entity for entity in x.entities}
                 id2entity = {}
-                chain2entities = {}
+                chain2entities = defaultdict(set)
+
+                # если бежать по сортированному списку, то значения в chain2entities будут сортированы
                 for entity in x.entities:
                     assert isinstance(entity.index, int)
                     assert isinstance(entity.id_chain, int)
                     id2entity[entity.id] = entity
-                    if entity.id_chain in chain2entities:
-                        chain2entities[entity.id_chain].add(entity)
-                    else:
-                        chain2entities[entity.id_chain] = {entity}
+                    chain2entities[entity.id_chain].add(entity)
 
                 for entity in x.entities:
+                    # ner
                     start = entity.tokens[0].index_rel
                     end = entity.tokens[-1].index_rel
                     id_label = self.ner_enc[entity.label]
                     ner_labels.append((i, start, end, id_label))
 
-                    re_labels.append((i, entity.index, 0))
+                    # re
+                    antecedents = []
                     for entity_chain in chain2entities[entity.id_chain]:
                         if entity_chain.index < entity.index:
-                            re_labels.append((i, entity.index, entity_chain.index + 1))
+                            antecedents.append(entity_chain.index)
+                    if len(antecedents) > 0:
+                        for id_dep in antecedents:
+                            re_labels.append((i, entity.index, id_dep))
+
+                    else:
+                        re_labels.append((i, entity.index, 0))
 
             # write
             num_pieces.append(len(input_ids_i))

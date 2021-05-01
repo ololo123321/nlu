@@ -6,6 +6,7 @@ from src.data.base import Span
 
 
 COREF_RESULTS_REGEX = re.compile(r".*Coreference: Recall: \([0-9.]+ / [0-9.]+\) ([0-9.]+)%\tPrecision: \([0-9.]+ / [0-9.]+\) ([0-9.]+)%\tF1: ([0-9.]+)%.*", re.DOTALL)
+COREF_RESULTS_REGEX_BLANC = re.compile(r".*BLANC: Recall: \([0-9.]+ / [0-9.]+\) ([0-9.]+)%\tPrecision: \([0-9.]+ / [0-9.]+\) ([0-9.]+)%\tF1: ([0-9.]+)%.*", re.DOTALL)
 
 
 def train_test_split(
@@ -200,7 +201,18 @@ def dfs(g: Dict[str, Set[str]], v: str, warn_on_cycles: bool = False):
 
 
 def parse_conll_metrics(stdout: str) -> Dict:
-    coref_results_match = re.match(COREF_RESULTS_REGEX, stdout)
+    coref_results_match = COREF_RESULTS_REGEX.match(stdout)
+    d = {
+        "recall": float(coref_results_match.group(1)),
+        "precision": float(coref_results_match.group(2)),
+        "f1": float(coref_results_match.group(3))
+    }
+    return d
+
+
+# TODO: копипаста
+def parse_conll_blanc(stdout: str) -> Dict:
+    coref_results_match = COREF_RESULTS_REGEX_BLANC.match(stdout)
     d = {
         "recall": float(coref_results_match.group(1)),
         "precision": float(coref_results_match.group(2)),
