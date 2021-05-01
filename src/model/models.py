@@ -3809,6 +3809,7 @@ class BertForCoreferenceResolutionV51(BertForCoreferenceResolutionV5):
         self.examples_valid = None
         self.examples_valid_copy = None
 
+    # TODO: копипаста из V6
     def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
         assert self.examples_valid is not None
         assert self.examples_valid_copy is not None
