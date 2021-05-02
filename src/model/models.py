@@ -4055,7 +4055,8 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
                 )
                 is_blanc = metric == "blanc"
                 d["metrics"][metric + "_test"] = parse_conll_metrics(stdout=stdout, is_blanc=is_blanc)
-                d["test_score"] += d["metrics"][metric + "_test"]["f1"] * 0.25
+                if metric in {"muc", "bcub", "ceafm", "ceafe"}:
+                    d["test_score"] += d["metrics"][metric + "_test"]["f1"] * 0.25
 
         return d
 
