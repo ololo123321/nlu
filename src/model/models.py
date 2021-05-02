@@ -3857,6 +3857,7 @@ class BertForCoreferenceResolutionV51(BertForCoreferenceResolutionV5):
         return d
 
 
+# TODO: s(i, eps) = 0
 class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
     def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
@@ -4121,8 +4122,7 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
                             antecedents.append(entity_chain.index)
                     if len(antecedents) > 0:
                         for id_dep in antecedents:
-                            re_labels.append((i, entity.index, id_dep))
-
+                            re_labels.append((i, entity.index, id_dep + 1))
                     else:
                         re_labels.append((i, entity.index, 0))
 
