@@ -43,18 +43,28 @@ def train_test_valid_split(
     return train, valid, test
 
 
-def classification_report_to_string(d: Dict, digits: int = 4) -> str:
+def classification_report_to_string(d: Dict, digits: int = 4, truncated: bool = False) -> str:
     """
     :param d: словарь вида {"label": {"f1": 0.9, ....}, ...}. см. src.metrics.classification_report
     :param digits: до скольки цифр округлять float
+    :param truncated: если True, то выводить только f1, precision, recall
     :return:
     """
-    cols = ["f1", "precision", "recall", "support", "tp", "fp", "fn"]
+    cols = ["f1", "precision", "recall"]
+    if not truncated:
+        cols += ["support", "tp", "fp", "fn"]
+
+    # check input
+    for k, v in d.items():
+        assert isinstance(v, dict), f"expected label info to be a dict with keys {cols}, but got {v} for label {k}"
+        for col in cols:
+            assert col in v.keys(), f"label {k} has no key {col}"
+
     float_cols = {"f1", "precision", "recall"}
     col_dist = 2  # расстояние между столбцами
     micro = "micro"
     # так как значения метрик лежат в промежутке [0.0, 1.0], стоит ровно одна цифра слева от точки
-    # таким образом длина числа равна 1 ("0" или "1") + 1 (".") + digits (точность округления)
+    # таким образом, длина числа равна 1 ("0" или "1") + 1 (".") + digits (точность округления)
     max_float_length = digits + 2  # 0.1234
 
     indices = sorted(d.keys())
@@ -200,19 +210,9 @@ def dfs(g: Dict[str, Set[str]], v: str, warn_on_cycles: bool = False):
     return visited
 
 
-def parse_conll_metrics(stdout: str) -> Dict:
-    coref_results_match = COREF_RESULTS_REGEX.match(stdout)
-    d = {
-        "recall": float(coref_results_match.group(1)),
-        "precision": float(coref_results_match.group(2)),
-        "f1": float(coref_results_match.group(3))
-    }
-    return d
-
-
-# TODO: копипаста
-def parse_conll_blanc(stdout: str) -> Dict:
-    coref_results_match = COREF_RESULTS_REGEX_BLANC.match(stdout)
+def parse_conll_metrics(stdout: str, is_blanc: bool) -> Dict:
+    expression = COREF_RESULTS_REGEX_BLANC if is_blanc else COREF_RESULTS_REGEX
+    coref_results_match = expression.match(stdout)
     d = {
         "recall": float(coref_results_match.group(1)),
         "precision": float(coref_results_match.group(2)),

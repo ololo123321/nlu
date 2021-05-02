@@ -14,7 +14,7 @@ import numpy as np
 from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 
-from src.utils import get_entity_spans, get_connected_components, parse_conll_metrics, parse_conll_blanc
+from src.utils import get_entity_spans, get_connected_components, parse_conll_metrics
 from src.model.utils import (
     get_batched_coords_from_labels,
     get_labels_mask,
@@ -3846,12 +3846,13 @@ class BertForCoreferenceResolutionV51(BertForCoreferenceResolutionV5):
             )
             # print(metric)
             # print(stdout)
-            parse_fn = parse_conll_blanc if metric == "blanc" else parse_conll_metrics
-            metrics[metric] = parse_fn(stdout=stdout)
+            is_blanc = metric == "blanc"
+            metrics[metric] = parse_conll_metrics(stdout=stdout, is_blanc=is_blanc)
 
+        score = (metrics["muc"]["f1"] + metrics["bcub"]["f1"] + metrics["ceafm"]["f1"] + metrics["ceafe"]["f1"]) / 4.0
         d = {
             "loss": 0.0,
-            "score": (metrics["muc"]["f1"] + metrics["bcub"]["f1"] + metrics["ceafm"]["f1"] + metrics["ceafe"]["f1"]) / 4.0,
+            "score": score,
             "metrics": metrics
         }
         return d
@@ -3864,6 +3865,11 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
 
         self.examples_valid = None
         self.examples_valid_copy = None
+
+        # для отладки переобучения
+        self.examples_test = None
+        self.examples_test_copy = None
+        self.chunks_test = None
 
     def predict(
             self,
@@ -3927,14 +3933,13 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
                     for idx_head in range(num_entities_chunk):
                         idx_dep = re_labels_pred[i, idx_head]
                         # нет исходящего ребра или находится дальше по тексту
-                        # print(0)
                         if idx_dep == 0 or idx_dep >= idx_head + 1:
                             continue
                         score = re_logits_pred[i, idx_head, idx_dep]
-                        # print(1)
-                        if score <= 0.0:
-                            continue
-                        # print(2)
+                        # это условие акутально только тогда,
+                        # когда реализована оригинальная логика: s(i, eps) = 0
+                        # if score <= 0.0:
+                        #     continue
                         head = index2entity[idx_head]
                         dep = index2entity[idx_dep - 1]
                         id_sent_head = head.tokens[0].id_sent
@@ -4007,16 +4012,51 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
                 scorer_path=self.config["valid"]["scorer_path"],
                 metric=metric
             )
-            # print(metric)
-            # print(stdout)
-            parse_fn = parse_conll_blanc if metric == "blanc" else parse_conll_metrics
-            metrics[metric] = parse_fn(stdout=stdout)
+            is_blanc = metric == "blanc"
+            metrics[metric] = parse_conll_metrics(stdout=stdout, is_blanc=is_blanc)
 
+        score = (metrics["muc"]["f1"] + metrics["bcub"]["f1"] + metrics["ceafm"]["f1"] + metrics["ceafe"]["f1"]) / 4.0
         d = {
             "loss": 0.0,
-            "score": (metrics["muc"]["f1"] + metrics["bcub"]["f1"] + metrics["ceafm"]["f1"] + metrics["ceafe"]["f1"]) / 4.0,
+            "score": score,
             "metrics": metrics
         }
+
+        if self.chunks_test is not None and self.examples_test is not None and self.examples_test_copy is not None:
+            for x in self.examples_test_copy:
+                x.arcs = []
+                for entity in x.entities:
+                    entity.id_chain = None
+
+            self.predict(
+                examples=self.examples_test_copy,
+                chunks=self.chunks_test,
+                batch_size=batch_size,
+                window=self.config["valid"]["window"],
+            )
+
+            to_conll(
+                examples=self.examples_test,
+                path=self.config["valid"]["path_true"]
+            )
+
+            to_conll(
+                examples=self.examples_test_copy,
+                path=self.config["valid"]["path_pred"]
+            )
+
+            d["test_score"] = 0.0
+            for metric in ["muc", "bcub", "ceafm", "ceafe", "blanc"]:
+                stdout = get_coreferense_resolution_metrics(
+                    path_true=self.config["valid"]["path_true"],
+                    path_pred=self.config["valid"]["path_pred"],
+                    scorer_path=self.config["valid"]["scorer_path"],
+                    metric=metric
+                )
+                is_blanc = metric == "blanc"
+                d["metrics"][metric + "_test"] = parse_conll_metrics(stdout=stdout, is_blanc=is_blanc)
+                d["test_score"] += d["metrics"][metric + "_test"]["f1"] * 0.25
+
         return d
 
     def _get_re_loss(self):
@@ -4101,7 +4141,6 @@ class BertForCoreferenceResolutionV6(BertForCoreferenceResolutionV5):
                 id2entity = {}
                 chain2entities = defaultdict(set)
 
-                # если бежать по сортированному списку, то значения в chain2entities будут сортированы
                 for entity in x.entities:
                     assert isinstance(entity.index, int)
                     assert isinstance(entity.id_chain, int)
