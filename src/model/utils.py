@@ -216,6 +216,15 @@ def noam_scheme(init_lr: int, global_step: int, warmup_steps: int = 4000):
     return init_lr * warmup_steps ** 0.5 * tf.minimum(step * warmup_steps ** -1.5, step ** -0.5)
 
 
+def get_additive_mask(mask: tf.Tensor) -> tf.Tensor:
+    """
+    [True, False] -> [0.0, -1e9]
+    :param mask: tf.Tensor of dtype tf.bool
+    :return:
+    """
+    return (1.0 - tf.cast(mask, tf.float32)) * -1e9
+
+
 def get_entity_pairs_mask(entity_sent_ids, i, j):
     """
     entity_sent_ids: np.ndarray of shape [num_entities]

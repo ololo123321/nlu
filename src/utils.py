@@ -5,14 +5,10 @@ from typing import List, Dict, Set
 from src.data.base import Span
 
 
-COREF_RESULTS_REGEX = re.compile(r".*Coreference: Recall: \([0-9.]+ / [0-9.]+\) ([0-9.]+)%\tPrecision: \([0-9.]+ / [0-9.]+\) ([0-9.]+)%\tF1: ([0-9.]+)%.*", re.DOTALL)
-COREF_RESULTS_REGEX_BLANC = re.compile(r".*BLANC: Recall: \([0-9.]+ / [0-9.]+\) ([0-9.]+)%\tPrecision: \([0-9.]+ / [0-9.]+\) ([0-9.]+)%\tF1: ([0-9.]+)%.*", re.DOTALL)
-
-
 def train_test_split(
     examples: List,
-    seed: int = 228,
     train_frac: float = 0.7,
+    seed: int = 228,
 ):
     """чтоб не тащить весь sklearn в проект только ради этого"""
     assert train_frac < 1.0
@@ -159,7 +155,7 @@ def get_entity_spans(labels: List[str], joiner: str = '-') -> Dict[str, Set[Span
     return tag2spans
 
 
-def get_connected_components(g):
+def get_connected_components(g: Dict) -> List:
     """
     {1: set(), 2: {1}, 3: set()} -> [[1, 2], [3]]
     g - граф в виде родитель -> дети
@@ -186,12 +182,11 @@ def get_connected_components(g):
     return components
 
 
-def get_strongly_connected_components(g):
+def get_strongly_connected_components(g: Dict) -> List:
     """
     {1: set(), 2: {1}, 3: set()} -> [[1], [2], [3]]
     пока не надо
     """
-    pass
 
 
 def dfs(g: Dict[str, Set[str]], v: str, warn_on_cycles: bool = False):
@@ -210,12 +205,17 @@ def dfs(g: Dict[str, Set[str]], v: str, warn_on_cycles: bool = False):
     return visited
 
 
+_coref_pattern = r".*{}: Recall: \([0-9.]+ / [0-9.]+\) ([0-9.]+)%\tPrecision: \([0-9.]+ / [0-9.]+\) ([0-9.]+)%\tF1: ([0-9.]+)%.*"
+COREF_RESULTS_REGEX = re.compile(_coref_pattern.format("Coreference"), re.DOTALL)
+COREF_RESULTS_REGEX_BLANC = re.compile(_coref_pattern.format("BLANC"), re.DOTALL)
+
+
 def parse_conll_metrics(stdout: str, is_blanc: bool) -> Dict:
     expression = COREF_RESULTS_REGEX_BLANC if is_blanc else COREF_RESULTS_REGEX
     coref_results_match = expression.match(stdout)
     d = {
-        "recall": float(coref_results_match.group(1)),
-        "precision": float(coref_results_match.group(2)),
-        "f1": float(coref_results_match.group(3))
+        "recall": float(coref_results_match.group(1)) * 0.01,
+        "precision": float(coref_results_match.group(2)) * 0.01,
+        "f1": float(coref_results_match.group(3)) * 0.01
     }
     return d

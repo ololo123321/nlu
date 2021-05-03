@@ -193,7 +193,8 @@ class Example(ReprMixin):
             arcs: List[Arc] = None,
             events: List[Event] = None,  # пока только для дебага
             label: int = None,
-            parent: str = None
+            parent: str = None,
+            chunks: List = None
     ):
         self.filename = filename
         self.id = id
@@ -204,5 +205,4 @@ class Example(ReprMixin):
         self.events = events if events is not None else []
         self.label = label  # в случае классификации предложений
         self.parent = parent
-
-        self.arcs_pred = []
+        self.chunks = chunks if chunks is not None else []  # список инстансов класса Example
