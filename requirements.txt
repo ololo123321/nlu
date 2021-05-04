@@ -1,7 +1,8 @@
 tensorflow==1.14
 tensorflow_hub==0.6.0
 bert-tensorflow==1.0.1
-numpy
+numpy==1.20.2
 pytest==5.3.2
 rusenttokenize==0.0.5
 nltk
+tqdm==4.60.0

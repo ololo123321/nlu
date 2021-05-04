@@ -163,29 +163,29 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         # n = 2 - like in paper
         order = self.config["model"]["coref"]["hoi"]["order"]
 
-        # 0 - one mask for each iteration
-        # 1 - different mask on each iteration
-        dropout_policy = self.config["model"]["coref"]["hoi"]["w_dropout_policy"]
-
-        if dropout_policy == 0:
-            w = self.w_dropout(self.w, training=self.training_ph)
-        elif dropout_policy == 1:
-            w = self.w
-        else:
-            raise NotImplementedError
-
-        for i in range(order - 1):
-            x_dep, logits = get_logits(self.entity_pairs_enc, x)
-
-            # expected antecedent representation
-            prob = tf.nn.softmax(logits, axis=-1)  # [batch_size, num_entities, num_entities + 1]
-            a = tf.matmul(prob, x_dep)  # [batch_size, num_entities, bert_dim]
-
-            # update
-            if dropout_policy == 1:
+        if order > 1:
+            # 0 - one mask for each iteration
+            # 1 - different mask on each iteration
+            dropout_policy = self.config["model"]["coref"]["hoi"]["w_dropout_policy"]
+            if dropout_policy == 0:
                 w = self.w_dropout(self.w, training=self.training_ph)
-            f = tf.nn.sigmoid(tf.matmul(tf.concat([x, a], axis=-1), w))
-            x = f * x + (1.0 - f) * a
+            elif dropout_policy == 1:
+                w = self.w
+            else:
+                raise NotImplementedError
+
+            for i in range(order - 1):
+                x_dep, logits = get_logits(self.entity_pairs_enc, x)
+
+                # expected antecedent representation
+                prob = tf.nn.softmax(logits, axis=-1)  # [batch_size, num_entities, num_entities + 1]
+                a = tf.matmul(prob, x_dep)  # [batch_size, num_entities, bert_dim]
+
+                # update
+                if dropout_policy == 1:
+                    w = self.w_dropout(self.w, training=self.training_ph)
+                f = tf.nn.sigmoid(tf.matmul(tf.concat([x, a], axis=-1), w))
+                x = f * x + (1.0 - f) * a
 
         _, logits = get_logits(self.entity_pairs_enc, x)
 
@@ -499,8 +499,9 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
 
     # TODO: много копипасты из predict
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
-        if self.examples_valid_copy is None:
-            self.examples_valid_copy = copy.deepcopy(examples)
+        # if self.examples_valid_copy is None:
+        #     self.examples_valid_copy = copy.deepcopy(examples)
+        self.examples_valid_copy = copy.deepcopy(examples)
 
         # проверка примеров
         chunks = []
@@ -804,8 +805,9 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
 
     # TODO: много копипасты из predict
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
-        if self.examples_valid_copy is None:
-            self.examples_valid_copy = copy.deepcopy(examples)
+        # if self.examples_valid_copy is None:
+        #     self.examples_valid_copy = copy.deepcopy(examples)
+        self.examples_valid_copy = copy.deepcopy(examples)  # в случае смены примеров логика выше будет неверна
 
         # проверка примеров
         chunks = []

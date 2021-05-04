@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 
 import tensorflow as tf
 import numpy as np
+import tqdm
 from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 
@@ -181,12 +182,12 @@ class BaseModel(ABC):
 
         chunks_train = []
         for x in examples_train:
-            assert len(x.chunks) > 0, f"[{x.id}] example didn't split by chunks!"
+            # assert len(x.chunks) > 0, f"[{x.id}] example didn't split by chunks!"
             chunks_train += x.chunks
 
         chunks_valid = []
         for x in examples_valid:
-            assert len(x.chunks) > 0, f"[{x.id}] example didn't split by chunks!"
+            # assert len(x.chunks) > 0, f"[{x.id}] example didn't split by chunks!"
             chunks_valid += x.chunks
 
         batch_size = self.config["training"]["batch_size"]
@@ -200,7 +201,7 @@ class BaseModel(ABC):
 
         for epoch in range(self.config["training"]["num_epochs"]):
             # print("epoch:", epoch)
-            for _ in range(num_epoch_steps):
+            for _ in tqdm.trange(num_epoch_steps):
                 # print("step:", _)
                 if len(chunks_train) > batch_size:
                     chunks_batch = random.sample(chunks_train, batch_size)
@@ -260,6 +261,7 @@ class BaseModel(ABC):
             examples: List[Example],
             folds: Iterable,
             valid_frac: float = 0.15,
+            verbose: bool = False,
             verbose_fn: Callable = None
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -270,8 +272,8 @@ class BaseModel(ABC):
         :param verbose_fn:
         :return:
         """
-        for x in examples:
-            assert len(x.chunks) > 0, f"[{x.id}] example didn't split by chunks!"
+        # for x in examples:
+        #     assert len(x.chunks) > 0, f"[{x.id}] example didn't split by chunks!"
 
         scores_valid = []
         scores_test = []
@@ -306,14 +308,13 @@ class BaseModel(ABC):
                 train_op_name="train_op",
                 model_dir=None,
                 scope_to_save=None,
-                verbose=False,
+                verbose=verbose,
                 verbose_fn=verbose_fn
             )
 
-            # TODO: batch_size для инференса вынести в config
-            d_valid = self.evaluate(examples=examples_valid, batch_size=16)
+            d_valid = self.evaluate(examples=examples_valid)
             verbose_fn(d_valid)
-            d_test = self.evaluate(examples=examples_test, batch_size=16)
+            d_test = self.evaluate(examples=examples_test)
             verbose_fn(d_test)
 
             scores_valid.append(d_valid["score"])
