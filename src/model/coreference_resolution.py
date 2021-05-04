@@ -56,7 +56,8 @@ class BaseModeCoreferenceResolution(BaseModel):
 # TODO: span size features
 # TODO: distance features
 # TODO: s(i, eps) = 0
-# TODO: ченкуть реализацию инференса здесь: https://github.com/kentonl/e2e-coref/blob/9d1ee1972f6e34eb5d1dcbb1fd9b9efdf53fc298/coref_model.py#L498
+# TODO: ченкуть реализацию инференса здесь:
+#  https://github.com/kentonl/e2e-coref/blob/9d1ee1972f6e34eb5d1dcbb1fd9b9efdf53fc298/coref_model.py#L498
 class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelBert):
     """
     mentions уже известны
@@ -626,6 +627,9 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
 
         # compute performance info
         loss = total_loss / loss_denominator
+        # print("loss:", loss)
+        # print("total loss:", total_loss)
+        # print("denominator:", loss_denominator)
 
         to_conll(examples=examples, path=self.config["valid"]["path_true"])
         to_conll(examples=self.examples_valid_copy, path=self.config["valid"]["path_pred"])
@@ -818,7 +822,7 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
             f"but got {len(id_to_num_sentences)} unique ids among {len(examples)} examples"
 
         head2dep = {}  # (file, head) -> {dep, score}
-        window = self.config["model"]["inference"]["window"]
+        window = self.config["inference"]["window"]
 
         total_loss = 0.0
         loss_denominator = 0
@@ -908,15 +912,8 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
         # compute performance info
         loss = total_loss / loss_denominator
 
-        to_conll(
-            examples=examples,
-            path=self.config["valid"]["path_true"]
-        )
-
-        to_conll(
-            examples=self.examples_valid_copy,
-            path=self.config["valid"]["path_pred"]
-        )
+        to_conll(examples=examples, path=self.config["valid"]["path_true"])
+        to_conll(examples=self.examples_valid_copy, path=self.config["valid"]["path_pred"])
 
         metrics = {}
         for metric in ["muc", "bcub", "ceafm", "ceafe", "blanc"]:

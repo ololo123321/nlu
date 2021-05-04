@@ -198,3 +198,42 @@ def test_bert_for_cr_mention_pair():
         "scorer_path": "/home/vitaly/reference-coreference-scorers/scorer.pl"
     }
     _test_model(BertForCoreferenceResolutionMentionPair, config=config)
+
+
+def test_bert_for_cr_mention_ranking():
+    config = common_config.copy()
+    config["model"]["coref"] = {
+        "use_birnn": False,
+        "rnn": {
+            "num_layers": 1,
+            "cell_dim": 256,
+            "dropout": 0.5,
+            "recurrent_dropout": 0.0
+        },
+        "use_attn": True,
+        "attn": {
+            "hidden_dim": 128,
+            "dropout": 0.3,
+            "activation": "relu"
+        },
+        "hoi": {
+            "order": 2,
+            "w_dropout": 0.5,
+            "w_dropout_policy": 0  # 0 - one mask; 1 - different mask
+        },
+        "biaffine": {
+            "num_mlp_layers": 1,
+            "activation": "relu",
+            "head_dim": 128,
+            "dep_dim": 128,
+            "dropout": 0.33,
+            "num_labels": 1,
+            "use_dep_prior": False
+        }
+    }
+    config["valid"] = {
+        "path_true": "/tmp/gold.conll",
+        "path_pred": "/tmp/pred.conll",
+        "scorer_path": "/home/vitaly/reference-coreference-scorers/scorer.pl"
+    }
+    _test_model(BertForCoreferenceResolutionMentionRanking, config=config)

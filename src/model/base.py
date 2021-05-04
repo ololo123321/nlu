@@ -2,6 +2,7 @@ import random
 import os
 import json
 import shutil
+import math
 from typing import Dict, List, Callable, Tuple, Iterable
 from abc import ABC, abstractmethod
 
@@ -189,21 +190,32 @@ class BaseModel(ABC):
             chunks_valid += x.chunks
 
         batch_size = self.config["training"]["batch_size"]
-        num_epoch_steps = int(len(chunks_train) / batch_size)
+        num_epoch_steps = math.ceil(len(chunks_train) / batch_size)
         best_score = -1
         num_steps_wo_improvement = 0
         verbose_fn = verbose_fn if verbose_fn is not None else print
         train_loss = []
 
+        # print("num chunks train:", len(chunks_train))
+
         for epoch in range(self.config["training"]["num_epochs"]):
+            # print("epoch:", epoch)
             for _ in range(num_epoch_steps):
+                # print("step:", _)
                 if len(chunks_train) > batch_size:
                     chunks_batch = random.sample(chunks_train, batch_size)
                 else:
                     chunks_batch = chunks_train
+                # print("num chunks batch:", len(chunks_batch))
                 feed_dict = self._get_feed_dict(chunks_batch, mode=ModeKeys.TRAIN)
                 try:
                     _, loss = self.sess.run([train_op, self.loss], feed_dict=feed_dict)
+                    # print("loss:", loss)
+                    # print("feed_dict:", feed_dict)
+                    # print("per_example_loss:", per_example_loss)
+                    # print("labels_dense:", labels_dense)
+                    # print("logits_shape:", logits_shape)
+                    # print("logits_train:", logits_train)
                     train_loss.append(loss)
                 except Exception as e:
                     print("current batch:", [x.id for x in chunks_batch])
