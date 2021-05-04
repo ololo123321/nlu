@@ -182,6 +182,8 @@ def get_span_indices(start_ids: tf.Tensor, end_ids: tf.Tensor) -> Tuple[tf.Tenso
     return res, sequence_mask
 
 
+# TODO: явно прокидывать indices и updates
+# TODO: tensor_scatter_nd_update -> scatter_nd; deprecate no_label_id (must always be zero)
 def get_dense_labels_from_indices(indices: tf.Tensor, shape: tf.Tensor, no_label_id: int = 0):
     """
     лейблы отношений.

@@ -401,6 +401,9 @@ class BaseModelBert(BaseModel):
         self.num_pieces_ph = None  # для обучаемых с нуля рекуррентных слоёв
         self.num_tokens_ph = None  # для crf
 
+        # LAYERS
+        self.bert_dropout = None
+
     def _build_embedder(self):
         self.bert_out_train = self._build_bert(training=True)  # [N, T_pieces, D]
         self.bert_out_pred = self._build_bert(training=False)  # [N, T_pieces, D]

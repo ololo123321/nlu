@@ -121,7 +121,6 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         self.ner_preds_inference = None
 
         # LAYERS
-        self.bert_dropout = None
         self.birnn_ner = None
         self.dense_ner_labels = None
 

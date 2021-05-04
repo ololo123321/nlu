@@ -1,32 +1,35 @@
 import os
 import json
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from abc import abstractmethod
 from itertools import chain
 
-from bert.modeling import BertModel, BertConfig
-from bert.optimization import create_optimizer
 import tensorflow as tf
 import numpy as np
 
 from src.data.base import Example, Entity
-from src.data.postprocessing import get_valid_spans
 from src.model.base import BaseModel, BaseModelBert, ModeKeys
-from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs
-from src.model.utils import get_dense_labels_from_indices, upper_triangular
+from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs, MLP
+from src.model.utils import get_dense_labels_from_indices, upper_triangular, get_additive_mask, get_padded_coords_3d, get_span_indices
 from src.metrics import classification_report, classification_report_ner
 from src.utils import get_entity_spans, batches_gen
 
 
 class BaseModeCoreferenceResolution(BaseModel):
-    ner_scope = "ner"
+    coref_scope = "coref"
 
     def __init__(self, sess: tf.Session = None, config: Dict = None):
         super().__init__(sess=sess, config=config)
 
+        # PLACEHOLDERS
+        self.mention_coords_ph = None
+
+        # LAYERS
+        self.birnn = None
+
     def _build_graph(self):
         self._build_embedder()
-        with tf.variable_scope(self.ner_scope):
+        with tf.variable_scope(self.coref_scope):
             self._build_coref_head()
 
     @abstractmethod
@@ -34,432 +37,201 @@ class BaseModeCoreferenceResolution(BaseModel):
         pass
 
 
-class BertBaseModelNER(BaseModelNER):
-    def __init__(self, sess, config: dict = None, ner_enc: Dict = None):
-        super().__init__(sess=sess, config=config, ner_enc=ner_enc)
-
-        # PLACEHOLDERS
-        # bert
-        self.input_ids_ph = None
-        self.input_mask_ph = None
-        self.segment_ids_ph = None
-
-        # ner
-        self.first_pieces_coords_ph = None
-        self.num_pieces_ph = None  # для обучаемых с нуля рекуррентных слоёв
-        self.num_tokens_ph = None  # для crf
-        self.ner_labels_ph = None
-
-        self.bert_out_train = None
-        self.bert_out_pred = None
-
-    def _build_embedder(self):
-        self.bert_out_train = self._build_bert(training=True)  # [N, T_pieces, D]
-        self.bert_out_pred = self._build_bert(training=False)  # [N, T_pieces, D]
-
-    def _build_bert(self, training):
-        bert_dir = self.config["model"]["bert"]["dir"]
-        bert_scope = self.config["model"]["bert"]["scope"]
-        reuse = not training
-        with tf.variable_scope(bert_scope, reuse=reuse):
-            bert_config = BertConfig.from_json_file(os.path.join(bert_dir, "bert_config.json"))
-            bert_config.attention_probs_dropout_prob = self.config["model"]["bert"]["attention_probs_dropout_prob"]
-            bert_config.hidden_dropout_prob = self.config["model"]["bert"]["hidden_dropout_prob"]
-            model = BertModel(
-                config=bert_config,
-                is_training=training,
-                input_ids=self.input_ids_ph,
-                input_mask=self.input_mask_ph,
-                token_type_ids=self.segment_ids_ph
-            )
-            x = model.get_sequence_output()
-        return x
-
-    def _actual_name_to_checkpoint_name(self, name: str) -> str:
-        bert_scope = self.config["model"]["bert"]["scope"]
-        prefix = f"{self.model_scope}/{bert_scope}/"
-        name = name[len(prefix):]
-        name = name.replace(":0", "")
-        return name
-
-    def _set_placeholders(self):
-        # bert inputs
-        self.input_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_ids")
-        self.input_mask_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_mask")
-        self.segment_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="segment_ids")
-
-        # ner inputs
-        # [id_example, id_piece]
-        self.first_pieces_coords_ph = tf.placeholder(dtype=tf.int32, shape=[None, None, 2], name="first_pieces_coords")
-        self.num_pieces_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_pieces")
-        self.num_tokens_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_tokens")
-
-        # common inputs
-        self.training_ph = tf.placeholder(dtype=tf.bool, shape=None, name="training_ph")
-
-    def reset_weights(self, scope: str = None):
-        super().reset_weights(scope=scope)
-
-        bert_dir = self.config["model"]["bert"]["dir"]
-        bert_scope = self.config["model"]["bert"]["scope"]
-        var_list = {
-            self._actual_name_to_checkpoint_name(x.name): x for x in tf.trainable_variables()
-            if x.name.startswith(f"{self.model_scope}/{bert_scope}")
-        }
-        saver = tf.train.Saver(var_list)
-        checkpoint_path = os.path.join(bert_dir, "bert_model.ckpt")
-        saver.restore(self.sess, checkpoint_path)
-
-    def _set_train_op(self):
-        num_samples = self.config["training"]["num_train_samples"]
-        batch_size = self.config["training"]["batch_size"]
-        num_epochs = self.config["training"]["num_epochs"]
-        num_train_steps = int(num_samples / batch_size) * num_epochs
-        warmup_proportion = self.config["optimizer"]["warmup_proportion"]
-        num_warmup_steps = int(num_train_steps * warmup_proportion)
-        init_lr = self.config["optimizer"]["init_lr"]
-        self.train_op = create_optimizer(
-            loss=self.loss,
-            init_lr=init_lr,
-            num_train_steps=num_train_steps,
-            num_warmup_steps=num_warmup_steps,
-            use_tpu=False
-        )
-
-
-class BertForFlatNER(BertBaseModelNER):
+class BertForCoreferenceResolutionMentionPair(BaseModeCoreferenceResolution, BaseModelBert):
     """
-    bert -> [bilstm x N] -> logits -> [crf]
+    mentions уже известны
     """
-
-    def __init__(self, sess=None, config=None, ner_enc=None):
+    def __init__(self, sess: tf.Session = None, config: Dict = None):
         """
-        config = {
-            "model": {
-                "bert": {
-                    "dir": "~/bert",
-                    "dim": 768,
-                    "attention_probs_dropout_prob": 0.5,  # default 0.1
-                    "hidden_dropout_prob": 0.1,
-                    "dropout": 0.1,
-                    "scope": "bert",
-                    "pad_token_id": 0,
-                    "cls_token_id": 1,
-                    "sep_token_id": 2
-                },
-                "ner": {
-                    "use_crf": True,
-                    "num_labels": 7,
-                    "no_entity_id": 0,
-                    "start_ids": [1, 2, 3],  # id лейблов первых токенов сущностей. нужно для векторизации сущностей
-                    "prefix_joiner": "-",
-                    "loss_coef": 1.0,
-                    "use_birnn": True,
-                    "rnn": {
-                        "num_layers": 1,
-                        "cell_dim": 128,
-                        "dropout": 0.5,
-                        "recurrent_dropout": 0.0
-                    }
-                },
-            },
-            "training": {
-                "num_epochs": 100,
-                "batch_size": 16,
-                "max_epochs_wo_improvement": 10
-            },
-            "inference": {
-                "window": 1,
-                "max_tokens_per_batch: 10000
-            },
-            "optimizer": {
-                "init_lr": 2e-5,
-                "num_train_steps": 100000,
-                "num_warmup_steps": 10000
+        coref: {
+            "use_birnn": False,
+            "rnn": {...},
+            "use_attn": True,
+            "attn": {
+                "hidden_dim": 128,
+                "dropout": 0.3,
+                "activation": "relu"
             }
+            "hoi": {
+                "order": 1,  # no hoi
+                "w_dropout": 0.5,
+                "w_dropout_policy": 0  # 0 - one mask; 1 - different mask
+            },
         }
+
+        :param sess:
+        :param config:
         """
-        super().__init__(sess=sess, config=config, ner_enc=ner_enc)
+        super().__init__(sess=sess, config=config)
 
-        # TENSORS
-        self.ner_logits_train = None
-        self.transition_params = None
-        self.ner_preds_inference = None
-
-        # LAYERS
-        self.bert_dropout = None
-        self.birnn_ner = None
-        self.dense_ner_labels = None
-
-    def _build_ner_head(self):
+    def _build_coref_head(self):
         self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
 
-        if self.config["model"]["ner"]["use_birnn"]:
-            self.birnn_ner = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
+        if self.config["model"]["coref"]["use_birnn"]:
+            self.birnn_re = StackedBiRNN(**self.config["model"]["coref"]["rnn"])
+            emb_dim = self.config["model"]["coref"]["rnn"]["cell_dim"] * 2
+        else:
+            emb_dim = self.config["model"]["bert"]["dim"]
 
-        self.dense_ner_labels = tf.keras.layers.Dense(self.config["model"]["ner"]["num_labels"])
+        self.entity_pairs_enc = GraphEncoder(**self.config["model"]["coref"]["biaffine"])
+        multiple = 2 + int(self.config["model"]["coref"]["use_attn"])
+        self.root_emb = tf.get_variable("root_emb", shape=[1, emb_dim * multiple], dtype=tf.float32)
 
-        self.ner_logits_train, _, self.transition_params = self._build_ner_head_fn(bert_out=self.bert_out_train)
-        _, self.ner_preds_inference, _ = self._build_ner_head_fn(bert_out=self.bert_out_pred)
+        if self.config["model"]["coref"]["hoi"]["order"] > 1:
+            self.w = tf.get_variable("w_update", shape=[emb_dim * multiple * 2, emb_dim * multiple], dtype=tf.float32)
+            self.w_dropout = tf.keras.layers.Dropout(self.config["model"]["coref"]["hoi"]["w_dropout"])
 
-    # TODO: профилирование!!!
-    def evaluate(self, examples: List[Example], **kwargs) -> Dict:
-        chunks = []
-        for x in examples:
-            assert len(x.chunks) > 0
-            chunks += x.chunks
+        if self.config["model"]["coref"]["use_attn"]:
+            self.dense_attn_1 = MLP(num_layers=1, **self.config["model"]["coref"]["attn"])
+            self.dense_attn_2 = MLP(num_layers=1, hidden_dim=1, activation=None, dropout=None)
 
-        y_true_ner = []
-        y_pred_ner = []
+        # [batch_size, num_entities, num_entities + 1], [batch_size]
+        self.logits_train, self.num_entities = self._build_coref_head_fn(bert_out=self.bert_out_train)
+        self.logits_inference, _ = self._build_coref_head_fn(bert_out=self.bert_out_pred)
 
-        loss = 0.0
-        num_batches = 0
+        # argmax
+        self.labels_pred = tf.argmax(self.logits_inference, axis=-1)  # [batch_size, num_entities]
 
-        gen = batches_gen(
-            examples=chunks,
-            max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
-            pieces_level=True
-        )
-        for batch in gen:
-            feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
-            loss_i, ner_labels_pred = self.sess.run([self.loss, self.ner_preds_inference], feed_dict=feed_dict)
-            loss += loss_i
+    def _build_coref_head_fn(self, bert_out):
+        x, num_entities = self._get_entities_representation(bert_out=bert_out)
 
-            for i, x in enumerate(batch):
-                y_true_ner_i = []
-                y_pred_ner_i = []
-                for j, t in enumerate(x.tokens):
-                    y_true_ner_i.append(t.labels[0])
-                    y_pred_ner_i.append(self.inv_ner_enc[ner_labels_pred[i, j]])
-                y_true_ner.append(y_true_ner_i)
-                y_pred_ner.append(y_pred_ner_i)
+        batch_size = tf.shape(x)[0]
+        x_root = tf.tile(self.root_emb, [batch_size, 1])
+        x_root = x_root[:, None, :]
 
-            num_batches += 1
+        num_entities_inner = num_entities + tf.ones_like(num_entities)
 
-        # loss
-        # TODO: учитывать, что последний батч может быть меньше. тогда среднее не совсем корректно так считать
-        loss /= num_batches
+        # mask padding
+        mask_pad = tf.sequence_mask(num_entities_inner)  # [batch_size, num_entities + 1]
 
-        # ner
-        joiner = self.config["model"]["ner"]["prefix_joiner"]
-        ner_metrics_entity_level = classification_report_ner(y_true=y_true_ner, y_pred=y_pred_ner, joiner=joiner)
-        y_true_ner_flat = list(chain(*y_true_ner))
-        y_pred_ner_flat = list(chain(*y_pred_ner))
-        ner_metrics_token_level = classification_report(
-            y_true=y_true_ner_flat, y_pred=y_pred_ner_flat, trivial_label="O"
-        )
+        # mask antecedent
+        n = tf.reduce_max(num_entities)
+        mask_ant = tf.linalg.band_part(tf.ones((n, n + 1), dtype=tf.bool), -1, 0)  # lower-triangular
 
-        score = ner_metrics_entity_level["micro"]["f1"]
-        performance_info = {
-            "loss": loss,
-            "score": score,
-            "metrics": {
-                "entity_level": ner_metrics_entity_level,
-                "token_level": ner_metrics_token_level
-            }
-        }
+        mask = tf.logical_and(mask_pad[:, None, :], mask_ant[None, :, :])
+        mask_additive = get_additive_mask(mask)
 
-        return performance_info
+        def get_logits(enc, g):
+            g_dep = tf.concat([x_root, g], axis=1)  # [batch_size, num_entities + 1, bert_dim]
 
-    # TODO: реалзиовать случай window > 1
-    def predict(self, examples: List[Example], **kwargs) -> None:
+            # encoding of pairs
+            inputs = GraphEncoderInputs(head=g, dep=g_dep)
+            logits = enc(inputs=inputs, training=self.training_ph)  # [N, num_ent, num_ent + 1, 1]
+
+            # squeeze
+            logits = tf.squeeze(logits, axis=[-1])  # [batch_size, num_entities, num_entities + 1]
+
+            # mask
+            logits += mask_additive
+
+            return g_dep, logits
+
+        # n = 1 - baseline
+        # n = 2 - like in paper
+        order = self.config["model"]["coref"]["hoi"]["order"]
+
+        # 0 - one mask for each iteration
+        # 1 - different mask on each iteration
+        dropout_policy = self.config["model"]["coref"]["hoi"]["w_dropout_policy"]
+
+        if dropout_policy == 0:
+            w = self.w_dropout(self.w, training=self.training_ph)
+        elif dropout_policy == 1:
+            w = self.w
+        else:
+            raise NotImplementedError
+
+        for i in range(order - 1):
+            x_dep, logits = get_logits(self.entity_pairs_enc, x)
+
+            # expected antecedent representation
+            prob = tf.nn.softmax(logits, axis=-1)  # [batch_size, num_entities, num_entities + 1]
+            a = tf.matmul(prob, x_dep)  # [batch_size, num_entities, bert_dim]
+
+            # update
+            if dropout_policy == 1:
+                w = self.w_dropout(self.w, training=self.training_ph)
+            f = tf.nn.sigmoid(tf.matmul(tf.concat([x, a], axis=-1), w))
+            x = f * x + (1.0 - f) * a
+
+        _, logits = get_logits(self.entity_pairs_enc, x)
+
+        return logits, num_entities
+
+    def _get_entities_representation(self, bert_out: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         """
-        инференс. примеры не должны содержать разметку токенов и пар сущностей!
-        сделано так для того, чтобы не было непредсказуемых результатов.
 
-        ner - запись лейблов в Token.labels
-        re - создание новых инстансов Arc и запись их в Example.arcs
+
+        bert_out - [batch_size, num_pieces, bert_dim]
+        ner_labels - [batch_size, num_tokens, num_tokens]
+
+        logits - [batch_size, num_entities_max, bert_bim or cell_dim * 2]
+        num_entities - [batch_size]
         """
-        # проверка примеров
-        chunks = []
-        for x in examples:
-            assert len(x.arcs) == 0, f"[{x.id}] arcs are already annotated"
-            assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
-            for t in x.tokens:
-                assert len(t.labels) == 0, f"[{x.id}] tokens are already annotated"
-            chunks += x.chunks
+        # dropout
+        bert_out = self.bert_dropout(bert_out, training=self.training_ph)
 
-        id2example = {x.id: x for x in examples}
+        # pieces -> tokens
+        x = tf.gather_nd(bert_out, self.first_pieces_coords_ph)  # [batch_size, num_tokens, bert_dim]
 
-        gen = batches_gen(examples=chunks, max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"])
-        for batch in gen:
-            feed_dict = self._get_feed_dict(batch, mode=ModeKeys.TEST)
-            ner_labels_pred = self.sess.run(self.ner_preds_inference, feed_dict=feed_dict)
+        # birnn
+        if self.birnn_re is not None:
+            sequence_mask = tf.sequence_mask(self.num_tokens_ph)
+            x = self.birnn_re(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
+        #     d_model = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
+        # else:
+        #     d_model = self.config["model"]["bert"]["dim"]
 
-            m = max(len(x.tokens) for x in batch)
-            assert m == ner_labels_pred.shape[1], f'{m} != {ner_labels_pred.shape[1]}'
+        # ner labels
+        num_tokens = tf.reduce_max(self.num_tokens_ph)
+        batch_size = tf.shape(self.num_tokens_ph)[0]
+        shape = tf.constant([batch_size, num_tokens, num_tokens], dtype=tf.int32)
+        no_mention_id = 0
+        ones = tf.ones_like(self.mention_coords_ph[:, :1])
+        indices = tf.concat([self.mention_coords_ph, ones], axis=1)
+        mention_coords_dense = get_dense_labels_from_indices(indices=indices, shape=shape, no_label_id=no_mention_id)
 
-            for i, chunk in enumerate(batch):
-                example = id2example[chunk.parent]
-                ner_labels_i = []
-                for j, t in enumerate(chunk.tokens):
-                    id_label = ner_labels_pred[i, j]
-                    label = self.inv_ner_enc[id_label]
-                    ner_labels_i.append(label)
+        # маскирование
+        mask = upper_triangular(num_tokens, dtype=tf.int32)
+        mention_coords_dense *= mask[None, :, :]
 
-                tag2spans = get_entity_spans(labels=ner_labels_i, joiner=self.config["model"]["ner"]["prefix_joiner"])
-                for label, spans in tag2spans.items():
-                    for span in spans:
-                        start_abs = chunk.tokens[span.start].index_abs
-                        end_abs = chunk.tokens[span.end].index_abs
-                        tokens = example.tokens[start_abs:end_abs + 1]
-                        t_first = tokens[0]
-                        t_last = tokens[-1]
-                        text = example.text[t_first.span_rel.start:t_last.span_rel.end]
-                        id_entity = 'T' + str(len(example.entities))
-                        entity = Entity(
-                            id=id_entity,
-                            label=label,
-                            text=text,
-                            tokens=tokens,
-                        )
-                        example.entities.append(entity)
+        # векторизация сущностей
+        span_mask = tf.not_equal(mention_coords_dense, no_mention_id)  # [batch_size, num_tokens, num_tokens]
+        start_coords, end_coords, num_entities = get_padded_coords_3d(mask_3d=span_mask)
+        x_start = tf.gather_nd(x, start_coords)  # [N, num_entities, D]
+        x_end = tf.gather_nd(x, end_coords)  # [N, num_entities, D]
 
-    def _get_feed_dict(self, examples: List[Example], mode: str):
-        assert self.ner_enc is not None
+        # attn
+        grid, sequence_mask_span = get_span_indices(
+            start_ids=start_coords[:, :, 1],
+            end_ids=end_coords[:, :, 1]
+        )  # ([batch_size, num_entities, span_size], [batch_size, num_entities, span_size])
 
-        # bert
-        input_ids = []
-        input_mask = []
-        segment_ids = []
+        batch_size = tf.shape(x)[0]
+        x_coord = tf.range(batch_size)[:, None, None, None]  # [batch_size, 1, 1, 1]
+        grid_shape = tf.shape(grid)  # [3]
+        x_coord = tf.tile(x_coord, [1, grid_shape[1], grid_shape[2], 1])  # [batch_size, num_entities, span_size, 1]
+        y_coord = tf.expand_dims(grid, -1)  # [batch_size, num_entities, span_size, 1]
+        coords = tf.concat([x_coord, y_coord], axis=-1)  # [batch_size, num_entities, span_size, 2]
+        x_span = tf.gather_nd(x, coords)  # [batch_size, num_entities, span_size, d_model]
+        # print(x_span)
+        w = self.dense_attn_1(x_span)  # [batch_size, num_entities, span_size, H]
+        w = self.dense_attn_2(w)  # [batch_size, num_entities, span_size, 1]
+        sequence_mask_span = tf.expand_dims(sequence_mask_span, -1)
+        w += get_additive_mask(sequence_mask_span)  # [batch_size, num_entities, span_size, 1]
+        w = tf.nn.softmax(w, axis=2)  # [batch_size, num_entities, span_size, 1]
+        x_span = tf.reduce_sum(x_span * w, axis=2)  # [batch_size, num_entities, d_model]
 
-        # ner
-        first_pieces_coords = []
-        num_pieces = []
-        num_tokens = []
-        ner_labels = []
+        # concat
+        x_entity = tf.concat([x_start, x_end, x_span], axis=-1)  # [batch_size, num_entities, d_model * 3]
 
-        # filling
-        for i, x in enumerate(examples):
-            input_ids_i = []
-            input_mask_i = []
-            segment_ids_i = []
-            first_pieces_coords_i = []
-
-            # [CLS]
-            input_ids_i.append(self.config["model"]["bert"]["cls_token_id"])
-            input_mask_i.append(1)
-            segment_ids_i.append(0)
-
-            ner_labels_i = []
-            ptr = 1
-
-            # tokens
-            for t in x.tokens:
-                first_pieces_coords_i.append((i, ptr))
-                num_pieces_ij = len(t.pieces)
-                input_ids_i += t.token_ids
-                input_mask_i += [1] * num_pieces_ij
-                segment_ids_i += [0] * num_pieces_ij
-                label = t.labels[0]
-                if mode != ModeKeys.TEST:
-                    id_label = self.ner_enc[label]
-                    ner_labels_i.append(id_label)  # ner решается на уровне токенов!
-                ptr += num_pieces_ij
-
-            # [SEP]
-            input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
-            input_mask_i.append(1)
-            segment_ids_i.append(0)
-
-            # write
-            num_pieces.append(len(input_ids_i))
-            num_tokens.append(len(x.tokens))
-            input_ids.append(input_ids_i)
-            input_mask.append(input_mask_i)
-            segment_ids.append(segment_ids_i)
-            ner_labels.append(ner_labels_i)
-            first_pieces_coords.append(first_pieces_coords_i)
-
-        # padding
-        pad_token_id = self.config["model"]["bert"]["pad_token_id"]
-        pad_label_id = self.config["model"]["ner"]["no_entity_id"]
-        num_tokens_max = max(num_tokens)
-        num_pieces_max = max(num_pieces)
-        for i in range(len(examples)):
-            input_ids[i] += [pad_token_id] * (num_pieces_max - num_pieces[i])
-            input_mask[i] += [0] * (num_pieces_max - num_pieces[i])
-            segment_ids[i] += [0] * (num_pieces_max - num_pieces[i])
-            ner_labels[i] += [pad_label_id] * (num_tokens_max - num_tokens[i])
-            first_pieces_coords[i] += [(i, 0)] * (num_tokens_max - num_tokens[i])
-
-        training = mode == ModeKeys.TRAIN
-
-        d = {
-            # bert
-            self.input_ids_ph: input_ids,
-            self.input_mask_ph: input_mask,
-            self.segment_ids_ph: segment_ids,
-
-            # ner
-            self.first_pieces_coords_ph: first_pieces_coords,
-            self.num_pieces_ph: num_pieces,
-            self.num_tokens_ph: num_tokens,
-
-            # common
-            self.training_ph: training
-        }
-
-        if mode != ModeKeys.TEST:
-            d[self.ner_labels_ph] = ner_labels
-
-        return d
+        return x_entity, num_entities
 
     def _set_placeholders(self):
         super()._set_placeholders()
-        self.ner_labels_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="ner_labels")
+        # [id_example, start, end]
+        self.mention_coords_ph = tf.placeholder(tf.int32, shape=[None, 3], name="mention_coords")
 
-    def _set_loss(self):
-        use_crf = self.config["model"]["ner"]["use_crf"]
-        if use_crf:
-            log_likelihood, _ = tf.contrib.crf.crf_log_likelihood(
-                inputs=self.ner_logits_train,
-                tag_indices=self.ner_labels_ph,
-                sequence_lengths=self.num_tokens_ph,
-                transition_params=self.transition_params
-            )
-            self.loss = -tf.reduce_mean(log_likelihood)
-        else:
-            loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                labels=self.ner_labels_ph, logits=self.ner_logits_train
-            )
-            self.loss = tf.reduce_mean(loss)
 
-    def _build_ner_head_fn(self,  bert_out):
-        """
-        bert_out -> dropout -> stacked birnn (optional) -> dense(num_labels) -> crf (optional)
-        :param bert_out:
-        :return:
-        """
-        use_crf = self.config["model"]["ner"]["use_crf"]
-        num_labels = self.config["model"]["ner"]["num_labels"]
-
-        # dropout
-        if (self.birnn_ner is None) or (self.config["model"]["ner"]["rnn"]["dropout"] == 0.0):
-            x = self.bert_dropout(bert_out, training=self.training_ph)
-        else:
-            x = bert_out
-
-        # birnn
-        if self.birnn_ner is not None:
-            sequence_mask = tf.sequence_mask(self.num_pieces_ph)
-            x = self.birnn_ner(x, training=self.training_ph, mask=sequence_mask)
-
-        # pieces -> tokens
-        # сделано так для того, чтобы в ElmoJointModel не нужно было переопределять данный метод
-        if self.first_pieces_coords_ph is not None:
-            x = tf.gather_nd(x, self.first_pieces_coords_ph)  # [N, num_tokens_tokens, bert_dim or cell_dim * 2]
-
-        # label logits
-        logits = self.dense_ner_labels(x)
-
-        # label ids
-        if use_crf:
-            with tf.variable_scope("crf", reuse=tf.AUTO_REUSE):
-                transition_params = tf.get_variable("transition_params", [num_labels, num_labels], dtype=tf.float32)
-            pred_ids, _ = tf.contrib.crf.crf_decode(logits, transition_params, self.num_tokens_ph)
-        else:
-            pred_ids = tf.argmax(logits, axis=-1)
-            transition_params = None
-
-        return logits, pred_ids, transition_params
+if __name__ == "__main__":
+    model = BertForCoreferenceResolutionMentionPair()
