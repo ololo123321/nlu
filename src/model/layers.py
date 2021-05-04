@@ -130,6 +130,7 @@ class MHA(tf.keras.layers.Layer):
 GraphEncoderInputs = namedtuple("GraphEncoderInputs", ["head", "dep"])
 
 
+# TODO: переименовать
 class GraphEncoder(tf.keras.layers.Layer):
     """
     кодирование пар вершин

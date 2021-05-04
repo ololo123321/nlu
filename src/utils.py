@@ -2,7 +2,7 @@ import random
 import re
 from collections import defaultdict
 from typing import List, Dict, Set
-from src.data.base import Span
+from src.data.base import Span, Example
 
 
 def train_test_split(
@@ -219,3 +219,28 @@ def parse_conll_metrics(stdout: str, is_blanc: bool) -> Dict:
         "f1": float(coref_results_match.group(3)) * 0.01
     }
     return d
+
+
+def batches_gen(examples: List[Example], max_tokens_per_batch: int = 10000, pieces_level: bool = False):
+    """
+    batch_size * max_len_batch <= max_tokens_per_batch
+    """
+    id2len = {}
+    for x in examples:
+        if pieces_level:
+            id2len[x.id] = sum(len(t.pieces) for t in x.tokens)
+        else:
+            id2len[x.id] = len(x.tokens)
+
+    examples_sorted = sorted(examples, key=lambda example: id2len[example.id])
+
+    batch = []
+    for x in examples_sorted:
+        if id2len[x.id] * (len(batch) + 1) <= max_tokens_per_batch:
+            batch.append(x)
+        else:
+            assert len(batch) > 0, f"[{x.id}] too large example: sequence len is {id2len[x.id]}, " \
+                f"which is greater than max_tokens_per_batch: {max_tokens_per_batch}"
+            yield batch
+            batch = [x]
+    yield batch

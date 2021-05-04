@@ -21,31 +21,45 @@ class ModeKeys:
 class BaseModel(ABC):
     """
     Interface for all models
+
+    config = {
+        "model": {
+            "embedder": {
+                ...
+            },
+            "ner": {
+                "loss_coef": 0.0,
+                ...
+            },
+            "re": {
+                "loss_coef": 0.0,
+                ...
+            }
+        },
+        "training": {
+            "num_epochs": 100,
+            "batch_size": 16,
+            "max_epochs_wo_improvement": 10
+        },
+        "inference": {
+            "window": 1,
+            "max_tokens_per_batch": 10000
+        },
+        "optimizer": {
+            "init_lr": 2e-5,
+            "num_train_steps": 100000,
+            "num_warmup_steps": 10000
+        }
+    }
     """
 
     model_scope = "model"
     ner_scope = "ner"
     re_scope = "re"
 
-    def __init__(self, sess, config=None, ner_enc=None, re_enc=None):
+    def __init__(self, sess: tf.Session = None, config: Dict = None):
         self.sess = sess
         self.config = config
-        self.ner_enc = ner_enc
-        self.re_enc = re_enc
-
-        if config is not None:
-            if "ner" in config["model"] and "re" in config["model"]:
-                assert config["model"]["ner"]["loss_coef"] + config["model"]["re"]["loss_coef"] > 0.0
-
-        if self.ner_enc is not None:
-            self.inv_ner_enc = {v: k for k, v in self.ner_enc.items()}
-        else:
-            self.inv_ner_enc = None
-
-        if self.re_enc is not None:
-            self.inv_re_enc = {v: k for k, v in self.re_enc.items()}
-        else:
-            self.re_enc = None
 
         self.loss = None
         self.train_op = None
@@ -55,6 +69,10 @@ class BaseModel(ABC):
     @abstractmethod
     def _build_graph(self):
         """построение вычислительного графа (без loss и train_op)"""
+
+    @abstractmethod
+    def _build_embedder(self):
+        """вход - токены, выход - векторизованные токены"""
 
     @abstractmethod
     def _get_feed_dict(self, examples: List[Example], mode: str) -> Dict:
@@ -73,13 +91,7 @@ class BaseModel(ABC):
         pass
 
     @abstractmethod
-    def predict(
-            self,
-            examples: List[Example],
-            window: int = 1,
-            batch_size: int = 16,
-            **kwargs
-    ) -> None:
+    def predict(self, examples: List[Example], **kwargs) -> None:
         """
         Вся логика инференса должна быть реализована здесь.
         Предполагается, что модель училась не на целых документах, а на кусках (chunks).
@@ -90,24 +102,38 @@ class BaseModel(ABC):
         2. аггрегировать результат из п.1 и записать на уровне examples
 
         :param examples: исходные документы. атрибут chunks должен быть заполнен!
-        :param window: размер куска (в предложениях)
-        :param batch_size:
         :param kwargs:
         :return:
         """
 
     @abstractmethod
-    def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
+    def evaluate(self, examples: List[Example], **kwargs) -> Dict:
         """
         Возвращаемый словарь должен обязательно содержать ключи "score" и "loss"
         :param examples: исходные документы. атрибут chunks должен быть заполнен!
-        :param batch_size:
+        :return:
+        """
+
+    @abstractmethod
+    def load_encoders(self, model_dir: str):
+        """
+        Подгрузка маппингов "label -> code"
+        :param model_dir:
+        :return:
+        """
+
+    @abstractmethod
+    def save_encoders(self, model_dir: str):
+        """
+        Сохранение маппингов "label -> code"
+        :param model_dir:
         :return:
         """
 
     # общие методы для всех моделей
 
     def build(self):
+        self._set_placeholders()
         with tf.variable_scope(self.model_scope):
             self._build_graph()
             self._set_loss()
@@ -305,80 +331,54 @@ class BaseModel(ABC):
 
         return scores_valid, scores_test
 
-    # TODO: разделить на сохранение весов и сохранение конфигов
     def save(self, model_dir: str, force: bool = True, scope_to_save: str = None):
         assert self.config is not None
         assert self.sess is not None
 
         if force:
-            try:
+            if os.path.isdir(model_dir):
                 shutil.rmtree(model_dir)
-            except:
-                pass
         else:
-            assert not os.path.exists(model_dir), \
-                f'dir {model_dir} already exists. exception raised due to flag "force" was set to "True"'
+            assert not os.path.isdir(model_dir), \
+                f'dir {model_dir} already exists. exception raised due to flag "force" was set to "False"'
 
         os.makedirs(model_dir, exist_ok=True)
-
-        if scope_to_save is not None:
-            scope = scope_to_save
-        else:
-            scope = self.model_scope
-
-        var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope)
-        saver = tf.train.Saver(var_list)
-        checkpoint_path = os.path.join(model_dir, "model.ckpt")
-        saver.save(self.sess, checkpoint_path)
 
         with open(os.path.join(model_dir, "config.json"), "w") as f:
             json.dump(self.config, f, indent=4)
 
-        if self.ner_enc is not None:
-            with open(os.path.join(model_dir, "ner_enc.json"), "w") as f:
-                json.dump(self.ner_enc, f, indent=4)
-
-        if self.re_enc is not None:
-            with open(os.path.join(model_dir, "re_enc.json"), "w") as f:
-                json.dump(self.re_enc, f, indent=4)
+        self.save_weights(model_dir=model_dir, scope=scope_to_save)
+        self.save_encoders(model_dir=model_dir)
 
     @classmethod
-    def load(cls, sess, model_dir: str, scope_to_load: str = None):
+    def load(cls, sess: tf.Session, model_dir: str, scope_to_load: str = None):
 
         with open(os.path.join(model_dir, "config.json")) as f:
             config = json.load(f)
 
-        ner_enc_path = os.path.join(model_dir, "ner_enc.json")
-        if os.path.exists(ner_enc_path):
-            with open(ner_enc_path) as f:
-                ner_enc = json.load(f)
-        else:
-            ner_enc = None
-
-        re_enc_path = os.path.join(model_dir, "re_enc.json")
-        if os.path.exists(re_enc_path):
-            with open(re_enc_path) as f:
-                re_enc = json.load(f)
-        else:
-            re_enc = None
-
-        model = cls(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
-
+        model = cls(sess=sess, config=config)
         model.build()
+        model.restore_weights(model_dir=model_dir, scope=scope_to_load)
+        model.load_encoders(model_dir=model_dir)
+        return model
 
-        if scope_to_load is not None:
-            scope = scope_to_load
-        else:
-            scope = model.model_scope
+    def save_weights(self, model_dir: str,  scope: str = None):
+        self._save_or_restore(model_dir=model_dir, save=True, scope=scope)
 
+    def restore_weights(self, model_dir: str,  scope: str = None):
+        self._save_or_restore(model_dir=model_dir, save=False, scope=scope)
+
+    def reset_weights(self, scope: str = None):
+        variables = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope)
+        init_op = tf.variables_initializer(variables)
+        self.sess.run(init_op)
+
+    def _save_or_restore(self, model_dir: str, save: bool, scope: str = None):
+        scope = scope if scope is not None else self.model_scope
         var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope)
         saver = tf.train.Saver(var_list)
         checkpoint_path = os.path.join(model_dir, "model.ckpt")
-        saver.restore(sess, checkpoint_path)
-
-        return model
-
-    def reset_weights(self):
-        global_vars = tf.global_variables()
-        init_op = tf.variables_initializer(global_vars)
-        self.sess.run(init_op)
+        if save:
+            saver.save(self.sess, checkpoint_path)
+        else:
+            saver.restore(self.sess, checkpoint_path)
