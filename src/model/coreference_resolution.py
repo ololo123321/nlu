@@ -271,7 +271,7 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         id_to_num_sentences = {}
         for x in examples:
             assert len(x.arcs) == 0
-            assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
+            # assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
             for chunk in x.chunks:
                 assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
                     f"It is not a problem, but must be set for clarity"
@@ -507,7 +507,7 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
         chunks = []
         id_to_num_sentences = {}
         for x in examples:
-            assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
+            # assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
             for chunk in x.chunks:
                 assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
                     f"It is not a problem, but must be set for clarity"
@@ -813,7 +813,7 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
         chunks = []
         id_to_num_sentences = {}
         for x in examples:
-            assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
+            # assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
             for chunk in x.chunks:
                 assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
                     f"It is not a problem, but must be set for clarity"
