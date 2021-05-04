@@ -78,6 +78,7 @@ class Token(ReprMixin):
             index_rel: int = None,
             labels: List[Union[str, int]] = None,
             pieces: List[Union[str, int]] = None,  # TODO: нужно ли?
+            token_ids: List[int] = None,
             id_sent: int = None
     ):
         """
@@ -100,10 +101,10 @@ class Token(ReprMixin):
         self.index_rel = index_rel  # пока не нужно
         self.labels = labels if labels is not None else []
         self.pieces = pieces if pieces is not None else []
+        self.token_ids = token_ids if token_ids is not None else []
         self.id_sent = id_sent
 
         self.labels_pieces = []
-        self.token_ids = []
         self.label_ids = []
 
 
@@ -139,7 +140,7 @@ class Entity(ReprMixin):
         self.id_chain = id_chain
 
         self.index = None
-        self.label_id = None
+        self.label_id = None  # deprecated
 
 
 class Event(ReprMixin):

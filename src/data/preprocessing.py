@@ -206,6 +206,7 @@ def split_example_v2(
                 index_rel=j,
                 labels=t.labels.copy(),
                 pieces=t.pieces.copy(),
+                token_ids=t.token_ids.copy(),
                 id_sent=t.id_sent
             )
             tokens.append(t_copy)

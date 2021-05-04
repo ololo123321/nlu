@@ -4,18 +4,19 @@ from typing import Dict, List
 from abc import abstractmethod
 from itertools import chain
 
-from bert.modeling import BertModel, BertConfig
-from bert.optimization import create_optimizer
 import tensorflow as tf
 import numpy as np
 
 from src.data.base import Example, Entity
 from src.data.postprocessing import get_valid_spans
-from src.model.base import BaseModel, ModeKeys
+from src.model.base import BaseModel, BaseModelBert, ModeKeys
 from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs
 from src.model.utils import get_dense_labels_from_indices, upper_triangular
 from src.metrics import classification_report, classification_report_ner
 from src.utils import get_entity_spans, batches_gen
+
+
+__all__ = ["BertForFlatNER", "BertForNestedNER"]
 
 
 class BaseModelNER(BaseModel):
@@ -60,100 +61,7 @@ class BaseModelNER(BaseModel):
             self._inv_ner_enc = {v: k for k, v in ner_enc.items()}
 
 
-class BertBaseModelNER(BaseModelNER):
-    def __init__(self, sess, config: dict = None, ner_enc: Dict = None):
-        super().__init__(sess=sess, config=config, ner_enc=ner_enc)
-
-        # PLACEHOLDERS
-        # bert
-        self.input_ids_ph = None
-        self.input_mask_ph = None
-        self.segment_ids_ph = None
-
-        # ner
-        self.first_pieces_coords_ph = None
-        self.num_pieces_ph = None  # для обучаемых с нуля рекуррентных слоёв
-        self.num_tokens_ph = None  # для crf
-        self.ner_labels_ph = None
-
-        self.bert_out_train = None
-        self.bert_out_pred = None
-
-    def _build_embedder(self):
-        self.bert_out_train = self._build_bert(training=True)  # [N, T_pieces, D]
-        self.bert_out_pred = self._build_bert(training=False)  # [N, T_pieces, D]
-
-    def _build_bert(self, training):
-        bert_dir = self.config["model"]["bert"]["dir"]
-        bert_scope = self.config["model"]["bert"]["scope"]
-        reuse = not training
-        with tf.variable_scope(bert_scope, reuse=reuse):
-            bert_config = BertConfig.from_json_file(os.path.join(bert_dir, "bert_config.json"))
-            bert_config.attention_probs_dropout_prob = self.config["model"]["bert"]["attention_probs_dropout_prob"]
-            bert_config.hidden_dropout_prob = self.config["model"]["bert"]["hidden_dropout_prob"]
-            model = BertModel(
-                config=bert_config,
-                is_training=training,
-                input_ids=self.input_ids_ph,
-                input_mask=self.input_mask_ph,
-                token_type_ids=self.segment_ids_ph
-            )
-            x = model.get_sequence_output()
-        return x
-
-    def _actual_name_to_checkpoint_name(self, name: str) -> str:
-        bert_scope = self.config["model"]["bert"]["scope"]
-        prefix = f"{self.model_scope}/{bert_scope}/"
-        name = name[len(prefix):]
-        name = name.replace(":0", "")
-        return name
-
-    def _set_placeholders(self):
-        # bert inputs
-        self.input_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_ids")
-        self.input_mask_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_mask")
-        self.segment_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="segment_ids")
-
-        # ner inputs
-        # [id_example, id_piece]
-        self.first_pieces_coords_ph = tf.placeholder(dtype=tf.int32, shape=[None, None, 2], name="first_pieces_coords")
-        self.num_pieces_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_pieces")
-        self.num_tokens_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_tokens")
-
-        # common inputs
-        self.training_ph = tf.placeholder(dtype=tf.bool, shape=None, name="training_ph")
-
-    def reset_weights(self, scope: str = None):
-        super().reset_weights(scope=scope)
-
-        bert_dir = self.config["model"]["bert"]["dir"]
-        bert_scope = self.config["model"]["bert"]["scope"]
-        var_list = {
-            self._actual_name_to_checkpoint_name(x.name): x for x in tf.trainable_variables()
-            if x.name.startswith(f"{self.model_scope}/{bert_scope}")
-        }
-        saver = tf.train.Saver(var_list)
-        checkpoint_path = os.path.join(bert_dir, "bert_model.ckpt")
-        saver.restore(self.sess, checkpoint_path)
-
-    def _set_train_op(self):
-        num_samples = self.config["training"]["num_train_samples"]
-        batch_size = self.config["training"]["batch_size"]
-        num_epochs = self.config["training"]["num_epochs"]
-        num_train_steps = int(num_samples / batch_size) * num_epochs
-        warmup_proportion = self.config["optimizer"]["warmup_proportion"]
-        num_warmup_steps = int(num_train_steps * warmup_proportion)
-        init_lr = self.config["optimizer"]["init_lr"]
-        self.train_op = create_optimizer(
-            loss=self.loss,
-            init_lr=init_lr,
-            num_train_steps=num_train_steps,
-            num_warmup_steps=num_warmup_steps,
-            use_tpu=False
-        )
-
-
-class BertForFlatNER(BertBaseModelNER):
+class BertForFlatNER(BaseModelNER, BaseModelBert):
     """
     bert -> [bilstm x N] -> logits -> [crf]
     """
@@ -373,7 +281,7 @@ class BertForFlatNER(BertBaseModelNER):
             # tokens
             for t in x.tokens:
                 first_pieces_coords_i.append((i, ptr))
-                num_pieces_ij = len(t.pieces)
+                num_pieces_ij = len(t.token_ids)
                 input_ids_i += t.token_ids
                 input_mask_i += [1] * num_pieces_ij
                 segment_ids_i += [0] * num_pieces_ij
@@ -491,12 +399,17 @@ class BertForFlatNER(BertBaseModelNER):
         return logits, pred_ids, transition_params
 
 
-class BertForNestedNER(BertBaseModelNER):
+class BertForNestedNER(BaseModelNER, BaseModelBert):
     def __init__(self, sess=None, config=None, ner_enc=None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc)
 
+        # TENSORS
         self.tokens_pair_enc = None
         self.ner_logits_inference = None
+
+        # LAYERS
+        self.bert_dropout = None
+        self.birnn_ner = None
 
     def _build_ner_head(self):
         self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
@@ -586,8 +499,9 @@ class BertForNestedNER(BertBaseModelNER):
 
             # tokens
             for t in x.tokens:
+                assert len(t.token_ids) > 0
                 first_pieces_coords_i.append((i, ptr))
-                num_pieces_ij = len(t.pieces)
+                num_pieces_ij = len(t.token_ids)
                 input_ids_i += t.token_ids
                 input_mask_i += [1] * num_pieces_ij
                 segment_ids_i += [0] * num_pieces_ij
@@ -600,8 +514,11 @@ class BertForNestedNER(BertBaseModelNER):
 
             # ner
             for entity in x.entities:
+                assert entity.label is not None
                 start = entity.tokens[0].index_rel
+                assert start is not None
                 end = entity.tokens[-1].index_rel
+                assert end is not None
                 id_label = self.ner_enc[entity.label]
                 ner_labels.append((i, start, end, id_label))
 
@@ -680,7 +597,7 @@ class BertForNestedNER(BertBaseModelNER):
                 for entity in x.entities:
                     start = entity.tokens[0].index_rel
                     end = entity.tokens[-1].index_rel
-                    spans_true[start, end] = entity.label_id
+                    spans_true[start, end] = self.ner_enc[entity.label]
 
                 spans_pred = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
                 ner_logits_i = ner_logits[i, :num_tokens, :num_tokens, :]

@@ -7,6 +7,8 @@ from abc import ABC, abstractmethod
 
 import tensorflow as tf
 import numpy as np
+from bert.modeling import BertModel, BertConfig
+from bert.optimization import create_optimizer
 
 from src.data.base import Example
 from src.utils import train_test_split
@@ -381,3 +383,95 @@ class BaseModel(ABC):
             saver.save(self.sess, checkpoint_path)
         else:
             saver.restore(self.sess, checkpoint_path)
+
+
+class BaseModelBert(BaseModel):
+    def __init__(self, sess, config: dict = None):
+        super().__init__(sess=sess, config=config)
+
+        # PLACEHOLDERS
+        self.input_ids_ph = None
+        self.input_mask_ph = None
+        self.segment_ids_ph = None
+        self.first_pieces_coords_ph = None
+        self.num_pieces_ph = None  # для обучаемых с нуля рекуррентных слоёв
+        self.num_tokens_ph = None  # для crf
+
+    def _build_embedder(self):
+        self.bert_out_train = self._build_bert(training=True)  # [N, T_pieces, D]
+        self.bert_out_pred = self._build_bert(training=False)  # [N, T_pieces, D]
+
+    def _build_bert(self, training):
+        if self.config["model"]["bert"]["test_mode"]:
+            input_shape = tf.shape(self.input_ids_ph)
+            x = tf.random.uniform((input_shape[0], input_shape[1], self.config["model"]["bert"]["dim"]))
+            return x
+        else:
+            bert_dir = self.config["model"]["bert"]["dir"]
+            bert_scope = self.config["model"]["bert"]["scope"]
+            reuse = not training
+            with tf.variable_scope(bert_scope, reuse=reuse):
+                bert_config = BertConfig.from_json_file(os.path.join(bert_dir, "bert_config.json"))
+                bert_config.attention_probs_dropout_prob = self.config["model"]["bert"]["attention_probs_dropout_prob"]
+                bert_config.hidden_dropout_prob = self.config["model"]["bert"]["hidden_dropout_prob"]
+                model = BertModel(
+                    config=bert_config,
+                    is_training=training,
+                    input_ids=self.input_ids_ph,
+                    input_mask=self.input_mask_ph,
+                    token_type_ids=self.segment_ids_ph
+                )
+                x = model.get_sequence_output()
+            return x
+
+    def _actual_name_to_checkpoint_name(self, name: str) -> str:
+        bert_scope = self.config["model"]["bert"]["scope"]
+        prefix = f"{self.model_scope}/{bert_scope}/"
+        name = name[len(prefix):]
+        name = name.replace(":0", "")
+        return name
+
+    def _set_placeholders(self):
+        # bert inputs
+        self.input_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_ids")
+        self.input_mask_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="input_mask")
+        self.segment_ids_ph = tf.placeholder(dtype=tf.int32, shape=[None, None], name="segment_ids")
+
+        # ner inputs
+        # [id_example, id_piece]
+        self.first_pieces_coords_ph = tf.placeholder(dtype=tf.int32, shape=[None, None, 2], name="first_pieces_coords")
+        self.num_pieces_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_pieces")
+        self.num_tokens_ph = tf.placeholder(dtype=tf.int32, shape=[None], name="num_tokens")
+
+        # common inputs
+        self.training_ph = tf.placeholder(dtype=tf.bool, shape=None, name="training_ph")
+
+    def reset_weights(self, scope: str = None):
+        super().reset_weights(scope=scope)
+
+        if not self.config["model"]["bert"]["test_mode"]:
+            bert_dir = self.config["model"]["bert"]["dir"]
+            bert_scope = self.config["model"]["bert"]["scope"]
+            var_list = {
+                self._actual_name_to_checkpoint_name(x.name): x for x in tf.trainable_variables()
+                if x.name.startswith(f"{self.model_scope}/{bert_scope}")
+            }
+            saver = tf.train.Saver(var_list)
+            checkpoint_path = os.path.join(bert_dir, "bert_model.ckpt")
+            saver.restore(self.sess, checkpoint_path)
+
+    def _set_train_op(self):
+        num_samples = self.config["training"]["num_train_samples"]
+        batch_size = self.config["training"]["batch_size"]
+        num_epochs = self.config["training"]["num_epochs"]
+        num_train_steps = int(num_samples / batch_size) * num_epochs
+        warmup_proportion = self.config["optimizer"]["warmup_proportion"]
+        num_warmup_steps = int(num_train_steps * warmup_proportion)
+        init_lr = self.config["optimizer"]["init_lr"]
+        self.train_op = create_optimizer(
+            loss=self.loss,
+            init_lr=init_lr,
+            num_train_steps=num_train_steps,
+            num_warmup_steps=num_warmup_steps,
+            use_tpu=False
+        )
