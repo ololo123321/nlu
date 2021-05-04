@@ -2,20 +2,21 @@ import copy
 import tensorflow as tf
 
 from src.model.ner import BertForFlatNER, BertForNestedNER
+from src.model.coreference_resolution import BertForCoreferenceResolutionMentionPair, BertForCoreferenceResolutionMentionRanking
 from src.data.base import Example, Entity, Token, Span
 
 
 def build_examples():
     tokens = [
-        Token(text="мама", labels=["B_FOO"], token_ids=[3], index_abs=0, index_rel=0,
+        Token(text="мама", labels=["B_FOO"], token_ids=[3], index_abs=0, index_rel=0, id_sent=0,
               span_abs=Span(start=0, end=4), span_rel=Span(start=0, end=4)),
-        Token(text="мыла", labels=["I_FOO"], token_ids=[4, 5], index_abs=1, index_rel=1,
+        Token(text="мыла", labels=["I_FOO"], token_ids=[4, 5], index_abs=1, index_rel=1, id_sent=0,
               span_abs=Span(start=5, end=9), span_rel=Span(start=5, end=9)),
-        Token(text="раму", labels=["O"], token_ids=[6], index_abs=2, index_rel=2,
+        Token(text="раму", labels=["O"], token_ids=[6], index_abs=2, index_rel=2, id_sent=0,
               span_abs=Span(start=10, end=14), span_rel=Span(start=10, end=14))
     ]
     entities = [
-        Entity(text="мама мыла", tokens=tokens[:2], label="FOO")
+        Entity(text="мама мыла", tokens=tokens[:2], label="FOO", id_chain=0, index=0)
     ]
     text = "мама мыла раму"
     _examples = [
@@ -63,7 +64,8 @@ common_config = {
     "inference": {
         "max_tokens_per_batch": 100,
         "window": 1
-    }
+    },
+    "valid": {}  # чтоб пайчарм не подчёркивал ниже
 }
 
 folds = [
@@ -73,10 +75,10 @@ folds = [
 ]
 
 
-def _test_model(model_cls, config, ner_enc):
+def _test_model(model_cls, config, **kwargs):
     tf.reset_default_graph()
     with tf.Session() as sess:
-        model = model_cls(sess=sess, config=config, ner_enc=ner_enc)
+        model = model_cls(sess=sess, config=config, **kwargs)
 
         model.build()
 
@@ -157,3 +159,42 @@ def test_bert_for_nested_ner():
         }
     }
     _test_model(BertForNestedNER, config=config, ner_enc=ner_enc)
+
+
+def test_bert_for_cr_mention_pair():
+    config = common_config.copy()
+    config["model"]["coref"] = {
+        "use_birnn": False,
+        "rnn": {
+            "num_layers": 1,
+            "cell_dim": 256,
+            "dropout": 0.5,
+            "recurrent_dropout": 0.0
+        },
+        "use_attn": True,
+        "attn": {
+            "hidden_dim": 128,
+            "dropout": 0.3,
+            "activation": "relu"
+        },
+        "hoi": {
+            "order": 2,
+            "w_dropout": 0.5,
+            "w_dropout_policy": 0  # 0 - one mask; 1 - different mask
+        },
+        "biaffine": {
+            "num_mlp_layers": 1,
+            "activation": "relu",
+            "head_dim": 128,
+            "dep_dim": 128,
+            "dropout": 0.33,
+            "num_labels": 1,
+            "use_dep_prior": False
+        }
+    }
+    config["valid"] = {
+        "path_true": "/tmp/gold.conll",
+        "path_pred": "/tmp/pred.conll",
+        "scorer_path": "/home/vitaly/reference-coreference-scorers/scorer.pl"
+    }
+    _test_model(BertForCoreferenceResolutionMentionPair, config=config)

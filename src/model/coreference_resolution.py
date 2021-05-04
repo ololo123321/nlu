@@ -10,7 +10,6 @@ from src.data.io import to_conll
 from src.model.base import BaseModel, BaseModelBert, ModeKeys
 from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs, MLP
 from src.model.utils import (
-    get_dense_labels_from_indices,
     upper_triangular,
     get_additive_mask,
     get_padded_coords_3d,
@@ -21,6 +20,9 @@ from src.metrics import get_coreferense_resolution_metrics
 from src.utils import batches_gen, get_connected_components, parse_conll_metrics
 
 
+__all__ = ["BertForCoreferenceResolutionMentionPair", "BertForCoreferenceResolutionMentionRanking"]
+
+
 class BaseModeCoreferenceResolution(BaseModel):
     coref_scope = "coref"
     coref_rel = "COREFERENCE"
@@ -29,7 +31,8 @@ class BaseModeCoreferenceResolution(BaseModel):
         super().__init__(sess=sess, config=config)
 
         # PLACEHOLDERS
-        self.mention_coords_ph = None
+        self.mention_spans_ph = None  # [id_example, start, end]
+        self.labels_ph = None  # [id_example, id_anaphora, id_antecedent]
 
         # LAYERS
         self.birnn = None
@@ -91,12 +94,13 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         super().__init__(sess=sess, config=config)
 
         self.examples_valid_copy = None
+        self.birnn = None
 
     def _build_coref_head(self):
         self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
 
         if self.config["model"]["coref"]["use_birnn"]:
-            self.birnn_re = StackedBiRNN(**self.config["model"]["coref"]["rnn"])
+            self.birnn = StackedBiRNN(**self.config["model"]["coref"]["rnn"])
             emb_dim = self.config["model"]["coref"]["rnn"]["cell_dim"] * 2
         else:
             emb_dim = self.config["model"]["bert"]["dim"]
@@ -203,27 +207,25 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         x = tf.gather_nd(bert_out, self.first_pieces_coords_ph)  # [batch_size, num_tokens, bert_dim]
 
         # birnn
-        if self.birnn_re is not None:
+        if self.birnn is not None:
             sequence_mask = tf.sequence_mask(self.num_tokens_ph)
-            x = self.birnn_re(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
+            x = self.birnn(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
         #     d_model = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
         # else:
         #     d_model = self.config["model"]["bert"]["dim"]
 
         # ner labels
-        num_tokens = tf.reduce_max(self.num_tokens_ph)
-        batch_size = tf.shape(self.num_tokens_ph)[0]
-        shape = tf.constant([batch_size, num_tokens, num_tokens], dtype=tf.int32)
-        no_mention_id = 0
-        ones = tf.ones_like(self.mention_coords_ph[:, :1])
-        indices = tf.concat([self.mention_coords_ph, ones], axis=1)
-        mention_coords_dense = get_dense_labels_from_indices(indices=indices, shape=shape, no_label_id=no_mention_id)
+        x_shape = tf.shape(x)
+        shape = tf.concat([x_shape[:2], x_shape[1:2]], axis=0)  # [3]
+        updates = tf.ones_like(self.mention_spans_ph[:, 0])
+        mention_coords_dense = tf.scatter_nd(indices=self.mention_spans_ph, updates=updates, shape=shape)
 
         # маскирование
-        mask = upper_triangular(num_tokens, dtype=tf.int32)
+        mask = upper_triangular(x_shape[1], dtype=tf.int32)
         mention_coords_dense *= mask[None, :, :]
 
         # векторизация сущностей
+        no_mention_id = 0
         span_mask = tf.not_equal(mention_coords_dense, no_mention_id)  # [batch_size, num_tokens, num_tokens]
         start_coords, end_coords, num_entities = get_padded_coords_3d(mask_3d=span_mask)
         x_start = tf.gather_nd(x, start_coords)  # [N, num_entities, D]
@@ -257,8 +259,8 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
 
     def _set_placeholders(self):
         super()._set_placeholders()
-        # [id_example, id_anaphora, id_antecedent]
-        self.mention_coords_ph = tf.placeholder(tf.int32, shape=[None, 3], name="mention_coords")
+        self.mention_spans_ph = tf.placeholder(tf.int32, shape=[None, 3], name="mention_spans_ph")
+        self.labels_ph = tf.placeholder(tf.int32, shape=[None, 3], name="labels_ph")
 
     def predict(self, examples: List[Example], **kwargs) -> None:
         # TODO: как-то обработать случай отсутствия сущнсоетй
@@ -279,7 +281,7 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
             f"but got {len(id_to_num_sentences)} unique ids among {len(examples)} examples"
 
         head2dep = {}  # (file, head) -> {dep, score}
-        window = self.config["model"]["inference"]["window"]
+        window = self.config["inference"]["window"]
 
         gen = batches_gen(
             examples=chunks,
@@ -371,7 +373,7 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
     def _set_loss(self, *args, **kwargs):
         logits_shape = tf.shape(self.logits_train)
         labels = tf.scatter_nd(
-            indices=self.mention_coords_ph[:, :-1], updates=self.mention_coords_ph[:, -1], shape=logits_shape[:2]
+            indices=self.labels_ph[:, :-1], updates=self.labels_ph[:, -1], shape=logits_shape[:2]
         )  # [batch_size, num_entities]
         per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=labels, logits=self.logits_train
@@ -397,6 +399,7 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
         first_pieces_coords = []
         num_pieces = []
         num_tokens = []
+        mention_spans = []
 
         # re
         re_labels = []
@@ -429,12 +432,22 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
             input_mask_i.append(1)
             segment_ids_i.append(0)
 
+            # mention spans
+            for entity in x.entities:
+                assert entity.label is not None
+                start = entity.tokens[0].index_rel
+                assert start is not None
+                end = entity.tokens[-1].index_rel
+                assert end is not None
+                mention_spans.append((i, start, end))
+
             # coref labels
             if mode != ModeKeys.TEST:
                 id2entity = {entity.id: entity for entity in x.entities}
                 head2dep = {arc.head: id2entity[arc.dep] for arc in x.arcs}
 
                 for entity in x.entities:
+                    assert isinstance(entity.index, int)
                     if entity.id in head2dep.keys():
                         dep_index = head2dep[entity.id].index + 1
                     else:
@@ -462,6 +475,9 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
         if len(re_labels) == 0:
             re_labels.append((0, 0, 0))
 
+        if len(mention_spans) == 0:
+            mention_spans.append((0, 0, 0))
+
         training = mode == ModeKeys.TRAIN
 
         d = {
@@ -469,13 +485,14 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
             self.input_mask_ph: input_mask,
             self.segment_ids_ph: segment_ids,
             self.first_pieces_coords_ph: first_pieces_coords,
+            self.mention_spans_ph: mention_spans,
             self.num_pieces_ph: num_pieces,
             self.num_tokens_ph: num_tokens,
             self.training_ph: training
         }
 
         if mode != ModeKeys.TEST:
-            d[self.mention_coords_ph] = re_labels
+            d[self.labels_ph] = re_labels
 
         return d
 
@@ -499,7 +516,7 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
             f"but got {len(id_to_num_sentences)} unique ids among {len(examples)} examples"
 
         head2dep = {}  # (file, head) -> {dep, score}
-        window = self.config["model"]["inference"]["window"]
+        window = self.config["inference"]["window"]
 
         total_loss = 0.0
         loss_denominator = 0
@@ -642,9 +659,9 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
 
     def _set_loss(self):
         logits_shape = tf.shape(self.logits_train)
-        updates = tf.ones_like(self.mention_coords_ph[:, 0])
+        updates = tf.ones_like(self.labels_ph[:, 0])
         labels = tf.scatter_nd(
-            indices=self.mention_coords_ph, updates=updates, shape=logits_shape
+            indices=self.labels_ph, updates=updates, shape=logits_shape
         )  # [batch_size, num_entities, num_entities + 1]
 
         # предполагается, что логиты уже маскированы по последнему измерению (pad, look-ahead)
@@ -675,6 +692,7 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
         first_pieces_coords = []
         num_pieces = []
         num_tokens = []
+        mention_spans = []
 
         # re
         re_labels = []
@@ -707,9 +725,17 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
             input_mask_i.append(1)
             segment_ids_i.append(0)
 
+            # mention spans
+            for entity in x.entities:
+                assert entity.label is not None
+                start = entity.tokens[0].index_rel
+                assert start is not None
+                end = entity.tokens[-1].index_rel
+                assert end is not None
+                mention_spans.append((i, start, end))
+
             # coref
             if mode != ModeKeys.TEST:
-                # id2entity = {entity.id: entity for entity in x.entities}
                 id2entity = {}
                 chain2entities = defaultdict(set)
 
@@ -751,6 +777,9 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
         if len(re_labels) == 0:
             re_labels.append((0, 0, 0))
 
+        if len(mention_spans) == 0:
+            mention_spans.append((0, 0, 0))
+
         training = mode == ModeKeys.TRAIN
 
         d = {
@@ -758,13 +787,14 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
             self.input_mask_ph: input_mask,
             self.segment_ids_ph: segment_ids,
             self.first_pieces_coords_ph: first_pieces_coords,
+            self.mention_spans_ph: mention_spans,
             self.num_pieces_ph: num_pieces,
             self.num_tokens_ph: num_tokens,
             self.training_ph: training
         }
 
         if mode != ModeKeys.TEST:
-            d[self.mention_coords_ph] = re_labels
+            d[self.labels_ph] = re_labels
 
         return d
 

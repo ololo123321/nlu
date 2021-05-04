@@ -118,6 +118,7 @@ class Entity(ReprMixin):
             is_event_trigger: bool = False,
             attrs: List[Attribute] = None,  # атрибуты сущности
             comment: str = None,
+            index: int = None,
             id_chain: int = None  # для coreference resolution
     ):
         """
@@ -137,9 +138,9 @@ class Entity(ReprMixin):
         self.is_event_trigger = is_event_trigger
         self.attrs = attrs if attrs is not None else []
         self.comment = comment
+        self.index = index
         self.id_chain = id_chain
 
-        self.index = None
         self.label_id = None  # deprecated
 
 

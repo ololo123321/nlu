@@ -225,6 +225,7 @@ def split_example_v2(
                     is_event_trigger=entity.is_event_trigger,
                     attrs=entity.attrs.copy(),
                     comment=entity.comment,
+                    index=entity.index,
                     id_chain=entity.id_chain
                 )
                 entities.append(entity_new)
