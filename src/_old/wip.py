@@ -93,3 +93,16 @@ def train(
             print('=' * 50)
 
             epoch += 1
+
+
+# здесь этот метод не используется, но пусть будет
+def set_train_op_head(self):
+    """
+    [опционально] операция для предобучения только новых слоёв
+    TODO: по-хорошему нужно global_step обновлять до нуля, если хочется продолжать обучение с помощью train_op.
+     иначе learning rate будет считаться не совсем ожидаемо
+    """
+    tvars = [x for x in tf.trainable_variables() if x.name.startswith(f"{self.model_scope}/{self.ner_scope}")]
+    opt = tf.train.AdamOptimizer()
+    grads = tf.gradients(self.loss, tvars)
+    self.train_op_head = opt.apply_gradients(zip(grads, tvars))

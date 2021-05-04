@@ -13,9 +13,9 @@ from src.utils import train_test_split
 
 
 class ModeKeys:
-    TRAIN = "train"
-    VALID = "valid"
-    TEST = "test"
+    TRAIN = "train"  # need labels, dropout on
+    VALID = "valid"  # need labels, dropout off
+    TEST = "test"  # don't need labels, dropout off
 
 
 class BaseModel(ABC):
@@ -54,8 +54,6 @@ class BaseModel(ABC):
     """
 
     model_scope = "model"
-    ner_scope = "ner"
-    re_scope = "re"
 
     def __init__(self, sess: tf.Session = None, config: Dict = None):
         self.sess = sess
@@ -63,6 +61,7 @@ class BaseModel(ABC):
 
         self.loss = None
         self.train_op = None
+        self.training_ph = None
 
     # специфичные для каждой модели методы
 

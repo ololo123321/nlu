@@ -7,8 +7,10 @@ from itertools import chain
 from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 import tensorflow as tf
+import numpy as np
 
 from src.data.base import Example, Entity
+from src.data.postprocessing import get_valid_spans
 from src.model.base import BaseModel, ModeKeys
 from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs
 from src.model.utils import get_dense_labels_from_indices, upper_triangular
@@ -17,6 +19,8 @@ from src.utils import get_entity_spans, batches_gen
 
 
 class BaseModelNER(BaseModel):
+    ner_scope = "ner"
+
     def __init__(self, sess, config: Dict = None, ner_enc: Dict = None):
         super().__init__(sess=sess, config=config)
         self._ner_enc = None
@@ -60,9 +64,17 @@ class BertBaseModelNER(BaseModelNER):
     def __init__(self, sess, config: dict = None, ner_enc: Dict = None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc)
 
+        # PLACEHOLDERS
+        # bert
         self.input_ids_ph = None
         self.input_mask_ph = None
         self.segment_ids_ph = None
+
+        # ner
+        self.first_pieces_coords_ph = None
+        self.num_pieces_ph = None  # для обучаемых с нуля рекуррентных слоёв
+        self.num_tokens_ph = None  # для crf
+        self.ner_labels_ph = None
 
         self.bert_out_train = None
         self.bert_out_pred = None
@@ -195,19 +207,7 @@ class BertForFlatNER(BertBaseModelNER):
         """
         super().__init__(sess=sess, config=config, ner_enc=ner_enc)
 
-        # PLACEHOLDERS
-
-        # ner
-        self.first_pieces_coords_ph = None
-        self.num_pieces_ph = None  # для обучаемых с нуля рекуррентных слоёв
-        self.num_tokens_ph = None  # для crf
-        self.ner_labels_ph = None
-
-        # common
-        self.training_ph = None
-
         # TENSORS
-        self.loss_ner = None
         self.ner_logits_train = None
         self.transition_params = None
         self.ner_preds_inference = None
@@ -216,9 +216,6 @@ class BertForFlatNER(BertBaseModelNER):
         self.bert_dropout = None
         self.birnn_ner = None
         self.dense_ner_labels = None
-
-        # OPS
-        self.train_op_head = None
 
     def _build_ner_head(self):
         self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
@@ -343,18 +340,6 @@ class BertForFlatNER(BertBaseModelNER):
                             tokens=tokens,
                         )
                         example.entities.append(entity)
-
-    # здесь этот метод не используется, но пусть будет
-    def set_train_op_head(self):
-        """
-        [опционально] операция для предобучения только новых слоёв
-        TODO: по-хорошему нужно global_step обновлять до нуля, если хочется продолжать обучение с помощью train_op.
-         иначе learning rate будет считаться не совсем ожидаемо
-        """
-        tvars = [x for x in tf.trainable_variables() if x.name.startswith(f"{self.model_scope}/{self.ner_scope}")]
-        opt = tf.train.AdamOptimizer()
-        grads = tf.gradients(self.loss, tvars)
-        self.train_op_head = opt.apply_gradients(zip(grads, tvars))
 
     def _get_feed_dict(self, examples: List[Example], mode: str):
         assert self.ner_enc is not None
@@ -509,7 +494,9 @@ class BertForFlatNER(BertBaseModelNER):
 class BertForNestedNER(BertBaseModelNER):
     def __init__(self, sess=None, config=None, ner_enc=None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc)
+
         self.tokens_pair_enc = None
+        self.ner_logits_inference = None
 
     def _build_ner_head(self):
         self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
@@ -570,6 +557,166 @@ class BertForNestedNER(BertBaseModelNER):
         num_valid_spans = tf.cast(tf.reduce_sum(mask), tf.float32)
         self.loss = total_loss / num_valid_spans
 
+    def _get_feed_dict(self, examples: List[Example], mode: str):
+        assert self.ner_enc is not None
+
+        # bert
+        input_ids = []
+        input_mask = []
+        segment_ids = []
+
+        # ner
+        first_pieces_coords = []
+        num_pieces = []
+        num_tokens = []
+        ner_labels = []
+
+        # filling
+        for i, x in enumerate(examples):
+            input_ids_i = []
+            input_mask_i = []
+            segment_ids_i = []
+            first_pieces_coords_i = []
+
+            # [CLS]
+            input_ids_i.append(self.config["model"]["bert"]["cls_token_id"])
+            input_mask_i.append(1)
+            segment_ids_i.append(0)
+
+            ptr = 1
+
+            # tokens
+            for t in x.tokens:
+                first_pieces_coords_i.append((i, ptr))
+                num_pieces_ij = len(t.pieces)
+                input_ids_i += t.token_ids
+                input_mask_i += [1] * num_pieces_ij
+                segment_ids_i += [0] * num_pieces_ij
+                ptr += num_pieces_ij
+
+            # [SEP]
+            input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
+            input_mask_i.append(1)
+            segment_ids_i.append(0)
+
+            # ner
+            for entity in x.entities:
+                start = entity.tokens[0].index_rel
+                end = entity.tokens[-1].index_rel
+                id_label = self.ner_enc[entity.label]
+                ner_labels.append((i, start, end, id_label))
+
+            # write
+            num_pieces.append(len(input_ids_i))
+            num_tokens.append(len(x.tokens))
+            input_ids.append(input_ids_i)
+            input_mask.append(input_mask_i)
+            segment_ids.append(segment_ids_i)
+            first_pieces_coords.append(first_pieces_coords_i)
+
+        # padding
+        pad_token_id = self.config["model"]["bert"]["pad_token_id"]
+        num_tokens_max = max(num_tokens)
+        num_pieces_max = max(num_pieces)
+        for i in range(len(examples)):
+            input_ids[i] += [pad_token_id] * (num_pieces_max - num_pieces[i])
+            input_mask[i] += [0] * (num_pieces_max - num_pieces[i])
+            segment_ids[i] += [0] * (num_pieces_max - num_pieces[i])
+            first_pieces_coords[i] += [(i, 0)] * (num_tokens_max - num_tokens[i])
+
+        if len(ner_labels) == 0:
+            ner_labels.append((0, 0, 0, 0))
+
+        training = mode == ModeKeys.TRAIN
+
+        d = {
+            # bert
+            self.input_ids_ph: input_ids,
+            self.input_mask_ph: input_mask,
+            self.segment_ids_ph: segment_ids,
+
+            # ner
+            self.first_pieces_coords_ph: first_pieces_coords,
+            self.num_pieces_ph: num_pieces,
+            self.num_tokens_ph: num_tokens,
+
+            # common
+            self.training_ph: training
+        }
+
+        if mode != ModeKeys.TEST:
+            d[self.ner_labels_ph] = ner_labels
+
+        return d
+
+    # TODO: профилирование!!!
+    def evaluate(self, examples: List[Example], **kwargs) -> Dict:
+        chunks = []
+        for x in examples:
+            assert len(x.chunks) > 0
+            chunks += x.chunks
+
+        y_true_ner = []
+        y_pred_ner = []
+
+        loss = 0.0
+        num_batches = 0
+        no_entity_id = 0  # TODO: брать из конфига
+
+        gen = batches_gen(
+            examples=chunks,
+            max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
+            pieces_level=True
+        )
+        for batch in gen:
+            feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
+            loss_i, ner_logits = self.sess.run([self.loss, self.ner_logits_inference], feed_dict=feed_dict)
+            loss += loss_i
+
+            for i, x in enumerate(batch):
+                # ner
+                num_tokens = len(x.tokens)
+                spans_true = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
+
+                for entity in x.entities:
+                    start = entity.tokens[0].index_rel
+                    end = entity.tokens[-1].index_rel
+                    spans_true[start, end] = entity.label_id
+
+                spans_pred = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
+                ner_logits_i = ner_logits[i, :num_tokens, :num_tokens, :]
+                spans_filtered = get_valid_spans(logits=ner_logits_i,  is_flat_ner=False)
+                for span in spans_filtered:
+                    spans_pred[span.start, span.end] = span.label
+
+                y_true_ner += [self.inv_ner_enc[j] for j in spans_true.flatten()]
+                y_pred_ner += [self.inv_ner_enc[j] for j in spans_pred.flatten()]
+
+            num_batches += 1
+
+        # loss
+        # TODO: учитывать, что последний батч может быть меньше. тогда среднее не совсем корректно так считать
+        loss /= num_batches
+
+        # ner
+        ner_metrics_entity_level = classification_report(y_true=y_true_ner, y_pred=y_pred_ner, trivial_label=no_entity_id)
+
+        score = ner_metrics_entity_level["micro"]["f1"]
+        performance_info = {
+            "loss": loss,
+            "score": score,
+            "metrics": {
+                "entity_level": ner_metrics_entity_level
+            }
+        }
+
+        return performance_info
+
+    # TODO: реалзиовать!
+    def predict(self, examples: List[Example], **kwargs) -> None:
+        pass
+
 
 if __name__ == "__main__":
-    model = BertForFlatNER(sess=None)
+    model = BertForFlatNER()
+    model = BertForNestedNER()
