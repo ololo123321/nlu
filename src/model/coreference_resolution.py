@@ -565,7 +565,11 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
 
                 index_head_to_index_dep = {}
                 for arc in chunk.arcs:
-                    index_head_to_index_dep[entity2index[arc.head]] = entity2index[arc.dep]
+                    idx_head = entity2index[arc.head]
+                    assert idx_head not in index_head_to_index_dep, \
+                        f"[{chunk.id}] entity {arc.head} has more than one antecedent"
+                    idx_dep = entity2index[arc.dep] + 1
+                    index_head_to_index_dep[idx_head] = idx_dep
 
                 for idx_head in range(num_entities_chunk):
                     idx_dep_pred = re_labels_pred[i, idx_head]

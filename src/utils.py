@@ -40,24 +40,24 @@ def train_test_valid_split(
 
 
 # TODO: упразднить truncated; сделать так, чтобы колонки выводились в зависиомости от контента d
-def classification_report_to_string(d: Dict, digits: int = 4, truncated: bool = False) -> str:
+def classification_report_to_string(d: Dict, digits: int = 4) -> str:
     """
     :param d: словарь вида {"label": {"f1": 0.9, ....}, ...}. см. src.metrics.classification_report
     :param digits: до скольки цифр округлять float
-    :param truncated: если True, то выводить только f1, precision, recall
     :return:
     """
-    cols = ["f1", "precision", "recall"]
-    if not truncated:
-        cols += ["support", "tp", "fp", "fn"]
+    all_metrics = ["f1", "precision", "recall", "support", "tp", "fp", "fn"]
 
     # check input
+    assert len(d) > 0, "empty input"
+    input_metrics = list(d.values()).pop().keys()
+    for m in input_metrics:
+        assert m in all_metrics, f"expected metric to be in {all_metrics}, but got {m}"
     for k, v in d.items():
-        assert isinstance(v, dict), f"expected label info to be a dict with keys {cols}, but got {v} for label {k}"
-        for col in cols:
-            assert col in v.keys(), f"label {k} has no key {col}"
+        assert isinstance(v, dict), f"expected label info to be a dict, but got {v} for label {k}"
+        assert v.keys() == input_metrics, f"keys of all labels must be same, but got {v.keys()} != {input_metrics}"
 
-    float_cols = {"f1", "precision", "recall"}
+    float_metrics = {"f1", "precision", "recall"}
     col_dist = 2  # расстояние между столбцами
     micro = "micro"
     # так как значения метрик лежат в промежутке [0.0, 1.0], стоит ровно одна цифра слева от точки
@@ -79,8 +79,10 @@ def classification_report_to_string(d: Dict, digits: int = 4, truncated: bool = 
 
     def build_row(key):
         row = key.ljust(index_length)
-        for metric in cols:
-            if metric in float_cols:
+        for metric in all_metrics:  # цикл по all_metrics для сохранения порядка
+            if metric not in input_metrics:
+                continue
+            if metric in float_metrics:
                 cell = round(d[key][metric], digits)
             else:
                 cell = int(d[key][metric])
