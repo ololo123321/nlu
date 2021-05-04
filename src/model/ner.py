@@ -511,9 +511,8 @@ class BertForNestedNER(BertBaseModelNER):
 
     def _set_placeholders(self):
         super()._set_placeholders()
-        self.ner_labels_ph = tf.placeholder(
-            dtype=tf.int32, shape=[None, 4], name="ner_labels"
-        )  # [id_example, start, end, label]
+        # [id_example, start, end, label]
+        self.ner_labels_ph = tf.placeholder(dtype=tf.int32, shape=[None, 4], name="ner_labels")
 
     def _build_ner_head_fn(self,  bert_out):
         bert_out = self.bert_dropout(bert_out, training=self.training_ph)
@@ -715,8 +714,3 @@ class BertForNestedNER(BertBaseModelNER):
     # TODO: реалзиовать!
     def predict(self, examples: List[Example], **kwargs) -> None:
         pass
-
-
-if __name__ == "__main__":
-    model = BertForFlatNER()
-    model = BertForNestedNER()
