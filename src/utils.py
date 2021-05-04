@@ -68,20 +68,19 @@ def classification_report_to_string(d: Dict, digits: int = 4) -> str:
     index_length = max(map(len, indices))
     index_length += col_dist
 
-    column_length = max(map(len, cols))
+    cols_to_use = [col for col in all_metrics if col in input_metrics]  # для сохранения порядка
+    column_length = max(map(len, cols_to_use))
     column_length = max(column_length, max_float_length)
     column_length += col_dist
 
     report = ' ' * index_length
-    for col in cols:
+    for col in cols_to_use:
         report += col.ljust(column_length)
     report += "\n\n"
 
     def build_row(key):
         row = key.ljust(index_length)
-        for metric in all_metrics:  # цикл по all_metrics для сохранения порядка
-            if metric not in input_metrics:
-                continue
+        for metric in cols_to_use:
             if metric in float_metrics:
                 cell = round(d[key][metric], digits)
             else:
