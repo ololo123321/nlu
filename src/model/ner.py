@@ -126,6 +126,7 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         self.ner_logits_train = None
         self.transition_params = None
         self.ner_preds_inference = None
+        self.per_example_loss = None
 
         # LAYERS
         self.birnn_ner = None
@@ -151,9 +152,7 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
 
         y_true_ner = []
         y_pred_ner = []
-
-        loss = 0.0
-        num_batches = 0
+        loss = []
 
         gen = batches_gen(
             examples=chunks,
@@ -162,8 +161,8 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         )
         for batch in gen:
             feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
-            loss_i, ner_labels_pred = self.sess.run([self.loss, self.ner_preds_inference], feed_dict=feed_dict)
-            loss += loss_i
+            loss_i, ner_labels_pred = self.sess.run([self.per_example_loss, self.ner_preds_inference], feed_dict=feed_dict)
+            loss.append(loss_i.flatten())
 
             for i, x in enumerate(batch):
                 y_true_ner_i = []
@@ -174,11 +173,8 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
                 y_true_ner.append(y_true_ner_i)
                 y_pred_ner.append(y_pred_ner_i)
 
-            num_batches += 1
-
         # loss
-        # TODO: учитывать, что последний батч может быть меньше. тогда среднее не совсем корректно так считать
-        loss /= num_batches
+        loss = np.concatenate(loss).mean()
 
         # ner
         joiner = self.config["model"]["ner"]["prefix_joiner"]
@@ -367,12 +363,13 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
                 sequence_lengths=self.num_tokens_ph,
                 transition_params=self.transition_params
             )
-            self.loss = -tf.reduce_mean(log_likelihood)
+            self.per_example_loss = -log_likelihood
+            self.loss = tf.reduce_mean(self.per_example_loss)
         else:
-            loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            self.per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
                 labels=self.ner_labels_ph, logits=self.ner_logits_train
             )
-            self.loss = tf.reduce_mean(loss)
+            self.loss = tf.reduce_mean(self.per_example_loss)
 
     def _build_ner_head_fn(self,  bert_out):
         """
@@ -421,6 +418,8 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
         # TENSORS
         self.tokens_pair_enc = None
         self.ner_logits_inference = None
+        self.total_loss = None
+        self.loss_denominator = None
 
         # LAYERS
         self.bert_dropout = None
@@ -483,6 +482,8 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
         total_loss = tf.reduce_sum(masked_per_example_loss)
         num_valid_spans = tf.cast(tf.reduce_sum(mask), tf.float32)
         self.loss = total_loss / num_valid_spans
+        self.total_loss = total_loss
+        self.loss_denominator = num_valid_spans
 
     def _get_feed_dict(self, examples: List[Example], mode: str):
         assert len(examples) > 0
@@ -591,8 +592,8 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
         y_true_ner = []
         y_pred_ner = []
 
-        loss = 0.0
-        num_batches = 0
+        total_loss = 0.0
+        loss_denominator = 0
         no_entity_id = 0  # TODO: брать из конфига
 
         gen = batches_gen(
@@ -602,36 +603,34 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
         )
         for batch in gen:
             feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
-            loss_i, ner_logits = self.sess.run([self.loss, self.ner_logits_inference], feed_dict=feed_dict)
-            loss += loss_i
+            total_loss_i, d, ner_logits = self.sess.run([self.total_loss, self.loss_denominator, self.ner_logits_inference], feed_dict=feed_dict)
+            total_loss += total_loss_i
+            loss_denominator += d
 
             for i, x in enumerate(batch):
                 # ner
                 num_tokens = len(x.tokens)
-                spans_true = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
+                labels_true = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
 
                 for entity in x.entities:
                     start = entity.tokens[0].index_rel
                     end = entity.tokens[-1].index_rel
-                    spans_true[start, end] = self.ner_enc[entity.label]
+                    labels_true[start, end] = self.ner_enc[entity.label]
 
-                spans_pred = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
+                labels_pred = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
                 ner_logits_i = ner_logits[i, :num_tokens, :num_tokens, :]
                 spans_filtered = get_valid_spans(logits=ner_logits_i,  is_flat_ner=False)
                 for span in spans_filtered:
-                    spans_pred[span.start, span.end] = span.label
+                    labels_pred[span.start, span.end] = span.label
 
-                y_true_ner += [self.inv_ner_enc[j] for j in spans_true.flatten()]
-                y_pred_ner += [self.inv_ner_enc[j] for j in spans_pred.flatten()]
-
-            num_batches += 1
+                y_true_ner += [self.inv_ner_enc[j] for j in labels_true.flatten()]
+                y_pred_ner += [self.inv_ner_enc[j] for j in labels_pred.flatten()]
 
         # loss
-        # TODO: учитывать, что последний батч может быть меньше. тогда среднее не совсем корректно так считать
-        loss /= num_batches
+        loss = total_loss / loss_denominator
 
         # ner
-        ner_metrics_entity_level = classification_report(y_true=y_true_ner, y_pred=y_pred_ner, trivial_label=no_entity_id)
+        ner_metrics_entity_level = classification_report(y_true=y_true_ner, y_pred=y_pred_ner, trivial_label="O")
 
         score = ner_metrics_entity_level["micro"]["f1"]
         performance_info = {

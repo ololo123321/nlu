@@ -1,20 +1,29 @@
+import copy
 from typing import Dict, List, Tuple
 from abc import abstractmethod
 from collections import defaultdict
 
 import tensorflow as tf
-import numpy as np
 
 from src.data.base import Example, Arc
+from src.data.io import to_conll
 from src.model.base import BaseModel, BaseModelBert, ModeKeys
 from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs, MLP
-from src.model.utils import get_dense_labels_from_indices, upper_triangular, get_additive_mask, get_padded_coords_3d, get_span_indices
-from src.metrics import classification_report
-from src.utils import batches_gen
+from src.model.utils import (
+    get_dense_labels_from_indices,
+    upper_triangular,
+    get_additive_mask,
+    get_padded_coords_3d,
+    get_span_indices,
+    get_sent_pairs_to_predict_for
+)
+from src.metrics import get_coreferense_resolution_metrics
+from src.utils import batches_gen, get_connected_components, parse_conll_metrics
 
 
 class BaseModeCoreferenceResolution(BaseModel):
     coref_scope = "coref"
+    coref_rel = "COREFERENCE"
 
     def __init__(self, sess: tf.Session = None, config: Dict = None):
         super().__init__(sess=sess, config=config)
@@ -28,6 +37,8 @@ class BaseModeCoreferenceResolution(BaseModel):
         # TENSORS
         self.logits_train = None
         self.logits_inference = None
+        self.total_loss = None
+        self.loss_denominator = None
 
     def _build_graph(self):
         self._build_embedder()
@@ -42,6 +53,7 @@ class BaseModeCoreferenceResolution(BaseModel):
 # TODO: span size features
 # TODO: distance features
 # TODO: s(i, eps) = 0
+# TODO: ченкуть реализацию инференса здесь: https://github.com/kentonl/e2e-coref/blob/9d1ee1972f6e34eb5d1dcbb1fd9b9efdf53fc298/coref_model.py#L498
 class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelBert):
     """
     mentions уже известны
@@ -77,6 +89,8 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         :param config:
         """
         super().__init__(sess=sess, config=config)
+
+        self.examples_valid_copy = None
 
     def _build_coref_head(self):
         self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
@@ -246,13 +260,108 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         # [id_example, id_anaphora, id_antecedent]
         self.mention_coords_ph = tf.placeholder(tf.int32, shape=[None, 3], name="mention_coords")
 
-    # TODO: мб вынести в BaseBertForCoreferenceResolution
-    def evaluate(self, examples: List[Example], **kwargs) -> Dict:
-        pass
-
-    # TODO: мб вынести в BaseBertForCoreferenceResolution
     def predict(self, examples: List[Example], **kwargs) -> None:
-        pass
+        # TODO: как-то обработать случай отсутствия сущнсоетй
+
+        # проверка примеров
+        chunks = []
+        id_to_num_sentences = {}
+        for x in examples:
+            assert len(x.arcs) == 0
+            assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
+            for chunk in x.chunks:
+                assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
+                    f"It is not a problem, but must be set for clarity"
+                chunks.append(chunk)
+            id_to_num_sentences[x.id] = x.tokens[-1].id_sent + 1
+
+        assert len(id_to_num_sentences) == len(examples), f"examples must have unique ids, " \
+            f"but got {len(id_to_num_sentences)} unique ids among {len(examples)} examples"
+
+        head2dep = {}  # (file, head) -> {dep, score}
+        window = self.config["model"]["inference"]["window"]
+
+        gen = batches_gen(
+            examples=chunks,
+            max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
+            pieces_level=True
+        )
+        for batch in gen:
+            feed_dict = self._get_feed_dict(batch, mode=ModeKeys.TEST)
+            re_labels_pred, re_logits_pred = self.sess.run(
+                [self.labels_pred, self.logits_inference],
+                feed_dict=feed_dict
+            )
+            # re_labels_pred: np.ndarray, shape [batch_size, num_entities], dtype np.int32
+            # values in range [0, num_ent]; 0 means no dep.
+            # re_logits_pred: np.ndarray, shape [batch_size, num_entities, num_entities + 1], dtype np.float32
+
+            for i in range(len(batch)):
+                chunk = batch[i]
+
+                num_entities_chunk = len(chunk.entities)
+                index2entity = {entity.index: entity for entity in chunk.entities}
+                assert len(index2entity) == num_entities_chunk
+
+                num_sentences = id_to_num_sentences[chunk.parent]
+                end_rel = chunk.tokens[-1].id_sent - chunk.tokens[0].id_sent
+                assert end_rel < window, f"[{chunk.id}] relative end {end_rel} >= window size {window}"
+                is_first = chunk.tokens[0].id_sent == 0
+                is_last = chunk.tokens[-1].id_sent == num_sentences - 1
+                pairs = get_sent_pairs_to_predict_for(end=end_rel, is_first=is_first, is_last=is_last, window=window)
+
+                # предсказанные лейблы, которые можно получить из предиктов для кусочка chunk
+                for id_sent_rel_a, id_sent_rel_b in pairs:
+                    id_sent_abs_a = id_sent_rel_a + chunk.tokens[0].id_sent
+                    id_sent_abs_b = id_sent_rel_b + chunk.tokens[0].id_sent
+                    # for idx_head, idx_dep in enumerate(re_labels_pred_i):
+                    for idx_head in range(num_entities_chunk):
+                        idx_dep = re_labels_pred[i, idx_head]
+                        # нет исходящего ребра или находится дальше по тексту
+                        if idx_dep == 0 or idx_dep >= idx_head + 1:
+                            continue
+                        score = re_logits_pred[i, idx_head, idx_dep]
+                        # это условие акутально только тогда,
+                        # когда реализована оригинальная логика: s(i, eps) = 0
+                        # if score <= 0.0:
+                        #     continue
+                        head = index2entity[idx_head]
+                        dep = index2entity[idx_dep - 1]
+                        id_sent_head = head.tokens[0].id_sent
+                        id_sent_dep = dep.tokens[0].id_sent
+                        if (id_sent_head == id_sent_abs_a and id_sent_dep == id_sent_abs_b) or \
+                                (id_sent_head == id_sent_abs_b and id_sent_dep == id_sent_abs_a):
+                            key_head = chunk.parent, head.id
+                            if key_head in head2dep:
+                                if head2dep[key_head]["score"] < score:
+                                    head2dep[key_head] = {"dep": dep.id, "score": score}
+                                else:
+                                    pass
+                            else:
+                                head2dep[key_head] = {"dep": dep.id, "score": score}
+
+        # присвоение id_chain
+        for x in examples:
+            id2entity = {}
+            g = {}
+            for entity in x.entities:
+                g[entity.id] = set()
+                id2entity[entity.id] = entity
+            for entity in x.entities:
+                key = x.id, entity.id
+                if key in head2dep:
+                    dep = head2dep[key]["dep"]
+                    g[entity.id].add(dep)
+                    id_arc = "R" + str(len(x.arcs))
+                    arc = Arc(id=id_arc, head=entity.id, dep=dep, rel=self.coref_rel)
+                    x.arcs.append(arc)
+
+            # print(g)
+            components = get_connected_components(g)
+
+            for id_chain, comp in enumerate(components):
+                for id_entity in comp:
+                    id2entity[id_entity].id_chain = id_chain
 
 
 class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
@@ -275,6 +384,8 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
         num_pairs = tf.cast(tf.reduce_sum(sequence_mask), tf.float32)
         num_pairs = tf.maximum(num_pairs, 1.0)
         self.loss = total_loss / num_pairs
+        self.total_loss = total_loss
+        self.loss_denominator = num_pairs
 
     def _get_feed_dict(self, examples: List[Example], mode: str):
         # bert
@@ -368,6 +479,162 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
 
         return d
 
+    # TODO: много копипасты из predict
+    def evaluate(self, examples: List[Example], **kwargs) -> Dict:
+        if self.examples_valid_copy is None:
+            self.examples_valid_copy = copy.deepcopy(examples)
+
+        # проверка примеров
+        chunks = []
+        id_to_num_sentences = {}
+        for x in examples:
+            assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
+            for chunk in x.chunks:
+                assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
+                    f"It is not a problem, but must be set for clarity"
+                chunks.append(chunk)
+            id_to_num_sentences[x.id] = x.tokens[-1].id_sent + 1
+
+        assert len(id_to_num_sentences) == len(examples), f"examples must have unique ids, " \
+            f"but got {len(id_to_num_sentences)} unique ids among {len(examples)} examples"
+
+        head2dep = {}  # (file, head) -> {dep, score}
+        window = self.config["model"]["inference"]["window"]
+
+        total_loss = 0.0
+        loss_denominator = 0
+
+        gen = batches_gen(
+            examples=chunks,
+            max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
+            pieces_level=True
+        )
+
+        num_right_preds = 0
+        num_entities_total = 0
+
+        for batch in gen:
+            feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
+            total_loss_i, d, re_labels_pred, re_logits_pred = self.sess.run(
+                [self.total_loss, self.loss_denominator, self.labels_pred, self.logits_inference],
+                feed_dict=feed_dict
+            )
+            total_loss += total_loss_i
+            loss_denominator += d
+            # re_labels_pred: np.ndarray, shape [batch_size, num_entities], dtype np.int32
+            # values in range [0, num_ent]; 0 means no dep.
+            # re_logits_pred: np.ndarray, shape [batch_size, num_entities, num_entities + 1], dtype np.float32
+
+            for i in range(len(batch)):
+                chunk = batch[i]
+
+                num_entities_chunk = len(chunk.entities)
+                index2entity = {}
+                entity2index = {}
+                for entity in chunk.entities:
+                    index2entity[entity.index] = entity
+                    entity2index[entity.id] = entity.index
+                assert len(index2entity) == num_entities_chunk
+                assert len(entity2index) == num_entities_chunk
+
+                num_sentences = id_to_num_sentences[chunk.parent]
+                end_rel = chunk.tokens[-1].id_sent - chunk.tokens[0].id_sent
+                assert end_rel < window, f"[{chunk.id}] relative end {end_rel} >= window size {window}"
+                is_first = chunk.tokens[0].id_sent == 0
+                is_last = chunk.tokens[-1].id_sent == num_sentences - 1
+                pairs = get_sent_pairs_to_predict_for(end=end_rel, is_first=is_first, is_last=is_last, window=window)
+
+                index_head_to_index_dep = {}
+                for arc in chunk.arcs:
+                    index_head_to_index_dep[entity2index[arc.head]] = entity2index[arc.dep]
+
+                for idx_head in range(num_entities_chunk):
+                    idx_dep_pred = re_labels_pred[i, idx_head]
+                    idx_dep_true = index_head_to_index_dep.get(idx_head, 0)
+                    num_right_preds += int(idx_dep_true == idx_dep_pred)
+                    num_entities_total += 1
+
+                # предсказанные лейблы, которые можно получить из предиктов для кусочка chunk
+                for id_sent_rel_a, id_sent_rel_b in pairs:
+                    id_sent_abs_a = id_sent_rel_a + chunk.tokens[0].id_sent
+                    id_sent_abs_b = id_sent_rel_b + chunk.tokens[0].id_sent
+                    # for idx_head, idx_dep in enumerate(re_labels_pred_i):
+                    for idx_head in range(num_entities_chunk):
+                        idx_dep = re_labels_pred[i, idx_head]
+                        # нет исходящего ребра или находится дальше по тексту
+                        if idx_dep == 0 or idx_dep >= idx_head + 1:
+                            continue
+                        score = re_logits_pred[i, idx_head, idx_dep]
+                        # это условие акутально только тогда,
+                        # когда реализована оригинальная логика: s(i, eps) = 0
+                        # if score <= 0.0:
+                        #     continue
+                        head = index2entity[idx_head]
+                        dep = index2entity[idx_dep - 1]
+                        id_sent_head = head.tokens[0].id_sent
+                        id_sent_dep = dep.tokens[0].id_sent
+                        if (id_sent_head == id_sent_abs_a and id_sent_dep == id_sent_abs_b) or \
+                                (id_sent_head == id_sent_abs_b and id_sent_dep == id_sent_abs_a):
+                            key_head = chunk.parent, head.id
+                            if key_head in head2dep:
+                                if head2dep[key_head]["score"] < score:
+                                    head2dep[key_head] = {"dep": dep.id, "score": score}
+                                else:
+                                    pass
+                            else:
+                                head2dep[key_head] = {"dep": dep.id, "score": score}
+
+        # присвоение id_chain
+        support = 0
+        for x in self.examples_valid_copy:
+            id2entity = {}
+            g = {}
+            for entity in x.entities:
+                g[entity.id] = set()
+                id2entity[entity.id] = entity
+                support += 1
+                entity.id_chain = None
+            for entity in x.entities:
+                key = x.id, entity.id
+                if key in head2dep:
+                    dep = head2dep[key]["dep"]
+                    g[entity.id].add(dep)
+
+            # print(g)
+            components = get_connected_components(g)
+
+            for id_chain, comp in enumerate(components):
+                for id_entity in comp:
+                    id2entity[id_entity].id_chain = id_chain
+
+        # compute performance info
+        loss = total_loss / loss_denominator
+
+        to_conll(examples=examples, path=self.config["valid"]["path_true"])
+        to_conll(examples=self.examples_valid_copy, path=self.config["valid"]["path_pred"])
+
+        metrics = {}
+        for metric in ["muc", "bcub", "ceafm", "ceafe", "blanc"]:
+            stdout = get_coreferense_resolution_metrics(
+                path_true=self.config["valid"]["path_true"],
+                path_pred=self.config["valid"]["path_pred"],
+                scorer_path=self.config["valid"]["scorer_path"],
+                metric=metric
+            )
+            is_blanc = metric == "blanc"
+            metrics[metric] = parse_conll_metrics(stdout=stdout, is_blanc=is_blanc)
+            metrics[metric]["support"] = support
+
+        score = (metrics["muc"]["f1"] + metrics["bcub"]["f1"] + metrics["ceafm"]["f1"] + metrics["ceafe"]["f1"]) / 4.0
+        accuracy = num_right_preds / num_entities_total
+        d = {
+            "loss": loss,
+            "score": score,
+            "antecedent_prediction_accuracy": accuracy,
+            "coref_metrics": metrics,
+        }
+        return d
+
 
 class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolution):
     def __init__(self, sess: tf.Session = None, config: Dict = None):
@@ -395,6 +662,8 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
         num_entities_total = tf.cast(tf.reduce_sum(self.num_entities), tf.float32)
         num_entities_total = tf.maximum(num_entities_total, 1.0)
         self.loss = total_loss / num_entities_total
+        self.total_loss = total_loss
+        self.loss_denominator = num_entities_total
 
     def _get_feed_dict(self, examples: List[Example], mode: str):
         # bert
@@ -438,7 +707,7 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
             input_mask_i.append(1)
             segment_ids_i.append(0)
 
-            # ner, re
+            # coref
             if mode != ModeKeys.TEST:
                 # id2entity = {entity.id: entity for entity in x.entities}
                 id2entity = {}
@@ -497,4 +766,143 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
         if mode != ModeKeys.TEST:
             d[self.mention_coords_ph] = re_labels
 
+        return d
+
+    # TODO: много копипасты из predict
+    def evaluate(self, examples: List[Example], **kwargs) -> Dict:
+        if self.examples_valid_copy is None:
+            self.examples_valid_copy = copy.deepcopy(examples)
+
+        # проверка примеров
+        chunks = []
+        id_to_num_sentences = {}
+        for x in examples:
+            assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
+            for chunk in x.chunks:
+                assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
+                    f"It is not a problem, but must be set for clarity"
+                chunks.append(chunk)
+            id_to_num_sentences[x.id] = x.tokens[-1].id_sent + 1
+
+        assert len(id_to_num_sentences) == len(examples), f"examples must have unique ids, " \
+            f"but got {len(id_to_num_sentences)} unique ids among {len(examples)} examples"
+
+        head2dep = {}  # (file, head) -> {dep, score}
+        window = self.config["model"]["inference"]["window"]
+
+        total_loss = 0.0
+        loss_denominator = 0
+
+        gen = batches_gen(
+            examples=chunks,
+            max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
+            pieces_level=True
+        )
+        for batch in gen:
+            feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
+            total_loss_i, d, re_labels_pred, re_logits_pred = self.sess.run(
+                [self.total_loss, self.loss_denominator, self.labels_pred, self.logits_inference],
+                feed_dict=feed_dict
+            )
+            total_loss += total_loss_i
+            loss_denominator += d
+            # re_labels_pred: np.ndarray, shape [batch_size, num_entities], dtype np.int32
+            # values in range [0, num_ent]; 0 means no dep.
+            # re_logits_pred: np.ndarray, shape [batch_size, num_entities, num_entities + 1], dtype np.float32
+
+            for i in range(len(batch)):
+                chunk = batch[i]
+
+                num_entities_chunk = len(chunk.entities)
+                index2entity = {entity.index: entity for entity in chunk.entities}
+                assert len(index2entity) == num_entities_chunk
+
+                num_sentences = id_to_num_sentences[chunk.parent]
+                end_rel = chunk.tokens[-1].id_sent - chunk.tokens[0].id_sent
+                assert end_rel < window, f"[{chunk.id}] relative end {end_rel} >= window size {window}"
+                is_first = chunk.tokens[0].id_sent == 0
+                is_last = chunk.tokens[-1].id_sent == num_sentences - 1
+                pairs = get_sent_pairs_to_predict_for(end=end_rel, is_first=is_first, is_last=is_last, window=window)
+
+                # предсказанные лейблы, которые можно получить из предиктов для кусочка chunk
+                for id_sent_rel_a, id_sent_rel_b in pairs:
+                    id_sent_abs_a = id_sent_rel_a + chunk.tokens[0].id_sent
+                    id_sent_abs_b = id_sent_rel_b + chunk.tokens[0].id_sent
+                    # for idx_head, idx_dep in enumerate(re_labels_pred_i):
+                    for idx_head in range(num_entities_chunk):
+                        idx_dep = re_labels_pred[i, idx_head]
+                        # нет исходящего ребра или находится дальше по тексту
+                        if idx_dep == 0 or idx_dep >= idx_head + 1:
+                            continue
+                        score = re_logits_pred[i, idx_head, idx_dep]
+                        # это условие акутально только тогда,
+                        # когда реализована оригинальная логика: s(i, eps) = 0
+                        # if score <= 0.0:
+                        #     continue
+                        head = index2entity[idx_head]
+                        dep = index2entity[idx_dep - 1]
+                        id_sent_head = head.tokens[0].id_sent
+                        id_sent_dep = dep.tokens[0].id_sent
+                        if (id_sent_head == id_sent_abs_a and id_sent_dep == id_sent_abs_b) or \
+                                (id_sent_head == id_sent_abs_b and id_sent_dep == id_sent_abs_a):
+                            key_head = chunk.parent, head.id
+                            if key_head in head2dep:
+                                if head2dep[key_head]["score"] < score:
+                                    head2dep[key_head] = {"dep": dep.id, "score": score}
+                                else:
+                                    pass
+                            else:
+                                head2dep[key_head] = {"dep": dep.id, "score": score}
+
+        # присвоение id_chain
+        for x in self.examples_valid_copy:
+            id2entity = {}
+            g = {}
+            for entity in x.entities:
+                g[entity.id] = set()
+                id2entity[entity.id] = entity
+                entity.id_chain = None
+            for entity in x.entities:
+                key = x.id, entity.id
+                if key in head2dep:
+                    dep = head2dep[key]["dep"]
+                    g[entity.id].add(dep)
+
+            # print(g)
+            components = get_connected_components(g)
+
+            for id_chain, comp in enumerate(components):
+                for id_entity in comp:
+                    id2entity[id_entity].id_chain = id_chain
+
+        # compute performance info
+        loss = total_loss / loss_denominator
+
+        to_conll(
+            examples=examples,
+            path=self.config["valid"]["path_true"]
+        )
+
+        to_conll(
+            examples=self.examples_valid_copy,
+            path=self.config["valid"]["path_pred"]
+        )
+
+        metrics = {}
+        for metric in ["muc", "bcub", "ceafm", "ceafe", "blanc"]:
+            stdout = get_coreferense_resolution_metrics(
+                path_true=self.config["valid"]["path_true"],
+                path_pred=self.config["valid"]["path_pred"],
+                scorer_path=self.config["valid"]["scorer_path"],
+                metric=metric
+            )
+            is_blanc = metric == "blanc"
+            metrics[metric] = parse_conll_metrics(stdout=stdout, is_blanc=is_blanc)
+
+        score = (metrics["muc"]["f1"] + metrics["bcub"]["f1"] + metrics["ceafm"]["f1"] + metrics["ceafe"]["f1"]) / 4.0
+        d = {
+            "loss": loss,
+            "score": score,
+            "metrics": metrics
+        }
         return d
