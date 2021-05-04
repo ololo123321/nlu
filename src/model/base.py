@@ -115,22 +115,6 @@ class BaseModel(ABC):
         :return:
         """
 
-    @abstractmethod
-    def load_encoders(self, model_dir: str):
-        """
-        Подгрузка маппингов "label -> code"
-        :param model_dir:
-        :return:
-        """
-
-    @abstractmethod
-    def save_encoders(self, model_dir: str):
-        """
-        Сохранение маппингов "label -> code"
-        :param model_dir:
-        :return:
-        """
-
     # общие методы для всех моделей
 
     def build(self):
@@ -353,7 +337,6 @@ class BaseModel(ABC):
             json.dump(self.config, f, indent=4)
 
         self.save_weights(model_dir=model_dir, scope=scope_to_save)
-        self.save_encoders(model_dir=model_dir)
 
     @classmethod
     def load(cls, sess: tf.Session, model_dir: str, scope_to_load: str = None):
@@ -364,7 +347,6 @@ class BaseModel(ABC):
         model = cls(sess=sess, config=config)
         model.build()
         model.restore_weights(model_dir=model_dir, scope=scope_to_load)
-        model.load_encoders(model_dir=model_dir)
         return model
 
     def save_weights(self, model_dir: str,  scope: str = None):

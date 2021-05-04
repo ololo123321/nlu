@@ -213,6 +213,19 @@ def upper_triangular(n: int, dtype):
 #     return x
 
 
+def bucket_distance(distances):
+    """
+    https://github.com/kentonl/e2e-coref/blob/9d1ee1972f6e34eb5d1dcbb1fd9b9efdf53fc298/coref_model.py#L395
+
+    Places the given values (designed for distances) into 10 semi-logscale buckets:
+    [0, 1, 2, 3, 4, 5-7, 8-15, 16-31, 32-63, 64+].
+    """
+    logspace_idx = tf.to_int32(tf.floor(tf.log(tf.to_float(distances))/tf.log(2.0))) + 3
+    use_identity = tf.to_int32(distances <= 4)
+    combined_idx = use_identity * distances + (1 - use_identity) * logspace_idx
+    return tf.clip_by_value(combined_idx, 0, 9)
+
+
 def noam_scheme(init_lr: int, global_step: int, warmup_steps: int = 4000):
     step = tf.cast(global_step + 1, dtype=tf.float32)
     return init_lr * warmup_steps ** 0.5 * tf.minimum(step * warmup_steps ** -1.5, step ** -0.5)

@@ -40,12 +40,26 @@ class BiLinear(tf.keras.layers.Layer):
     bias            [D_out]
     x               [N, T_a, T_b, D_out]
     """
-    def __init__(self, head_dim, dep_dim, output_dim):
+    def __init__(self, head_dim, dep_dim, output_dim, use_dep_prior: bool = True):
+        """
+        для coreference resolution в https://arxiv.org/pdf/1805.04893.pdf
+        предлагается использовать prior на то, что у anaphora (head) есть antecedent (dep).
+        такой реализации соответствует флаг use_dep_prior = False.
+        :param head_dim:
+        :param dep_dim:
+        :param output_dim:
+        :param use_dep_prior:
+        """
         super().__init__()
         self.w = tf.get_variable("w", shape=(output_dim, head_dim, dep_dim), dtype=tf.float32)
         self.u = tf.get_variable("u", shape=(head_dim, output_dim), dtype=tf.float32)
-        self.v = tf.get_variable("v", shape=(dep_dim, output_dim), dtype=tf.float32)
         self.b = tf.get_variable("b", shape=(output_dim,), dtype=tf.float32, initializer=tf.initializers.zeros())
+
+        self.use_dep_prior = use_dep_prior
+        if self.use_dep_prior:
+            self.v = tf.get_variable("v", shape=(dep_dim, output_dim), dtype=tf.float32)
+        else:
+            self.v = None
 
     def call(self, inputs: BiLinearInputs, training=None, mask=None) -> tf.Tensor:
         """
@@ -62,8 +76,9 @@ class BiLinear(tf.keras.layers.Layer):
         head_u = tf.matmul(head, self.u)  # [N, T_head, output_dim]
         x += tf.expand_dims(head_u, 2)  # [N, T_head, T_dep, output_dim]
 
-        dep_v = tf.matmul(dep, self.v)  # [N, T_dep, output_dim]
-        x += tf.expand_dims(dep_v, 1)  # [N, T_head, T_dep, output_dim]
+        if self.use_dep_prior:
+            dep_v = tf.matmul(dep, self.v)  # [N, T_dep, output_dim]
+            x += tf.expand_dims(dep_v, 1)  # [N, T_head, T_dep, output_dim]
 
         x += self.b[None, None, None, :]  # [N, T_head, T_dep, output_dim]
         return x
@@ -142,7 +157,8 @@ class GraphEncoder(tf.keras.layers.Layer):
             dep_dim: int,
             num_labels: int,
             dropout: float = 0.2,
-            activation: str = "relu"
+            activation: str = "relu",
+            use_dep_prior: bool = True
     ):
         super().__init__()
 
@@ -166,7 +182,8 @@ class GraphEncoder(tf.keras.layers.Layer):
         self.bilinear = BiLinear(
             head_dim=head_dim,
             dep_dim=dep_dim,
-            output_dim=num_labels
+            output_dim=num_labels,
+            use_dep_prior=use_dep_prior
         )
 
     def call(self, inputs: GraphEncoderInputs, training: bool = False):
