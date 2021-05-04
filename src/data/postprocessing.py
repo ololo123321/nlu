@@ -3,6 +3,7 @@ import numpy as np
 from .base import SpanExtended
 
 
+# TODO: протестировать!!1!
 def get_valid_spans(logits: np.ndarray, is_flat_ner: bool) -> List[SpanExtended]:
     """
     https://arxiv.org/abs/2005.07150

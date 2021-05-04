@@ -296,6 +296,10 @@ class BaseModel(ABC):
                 examples_train_valid, train_frac=train_frac, seed=228
             )
 
+            print("num train examples:", len(examples_train))
+            print("num valid examples:", len(examples_valid))
+            print("num test examples:", len(examples_test))
+
             # TODO: lr schedule depends on num train steps, which depends on num train sample and batch size.
 
             self.reset_weights()
@@ -316,8 +320,8 @@ class BaseModel(ABC):
             d_test = self.evaluate(examples=examples_test, batch_size=16)
             verbose_fn(d_test)
 
-            scores_valid.append(d_valid["re"]["metrics"]["micro"]["f1"])
-            scores_test.append(d_test["re"]["metrics"]["micro"]["f1"])
+            scores_valid.append(d_valid["score"])
+            scores_test.append(d_test["score"])
 
             print("=" * 80)
 

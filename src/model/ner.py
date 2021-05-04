@@ -207,15 +207,23 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         # проверка примеров
         chunks = []
         for x in examples:
-            assert len(x.arcs) == 0, f"[{x.id}] arcs are already annotated"
             assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
             for t in x.tokens:
                 assert len(t.labels) == 0, f"[{x.id}] tokens are already annotated"
-            chunks += x.chunks
+            for chunk in x.chunks:
+                assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
+                    f"It is not a problem, but must be set for clarity"
+                chunks.append(chunk)
 
         id2example = {x.id: x for x in examples}
+        assert len(id2example) == len(examples), f"examples must have unique ids, " \
+            f"but got {len(id2example)} unique ids among {len(examples)} examples"
 
-        gen = batches_gen(examples=chunks, max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"])
+        gen = batches_gen(
+            examples=chunks,
+            max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
+            pieces_level=True
+        )
         for batch in gen:
             feed_dict = self._get_feed_dict(batch, mode=ModeKeys.TEST)
             ner_labels_pred = self.sess.run(self.ner_preds_inference, feed_dict=feed_dict)
@@ -250,6 +258,7 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
                         example.entities.append(entity)
 
     def _get_feed_dict(self, examples: List[Example], mode: str):
+        assert len(examples) > 0
         assert self.ner_enc is not None
 
         # bert
@@ -285,8 +294,8 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
                 input_ids_i += t.token_ids
                 input_mask_i += [1] * num_pieces_ij
                 segment_ids_i += [0] * num_pieces_ij
-                label = t.labels[0]
                 if mode != ModeKeys.TEST:
+                    label = t.labels[0]
                     id_label = self.ner_enc[label]
                     ner_labels_i.append(id_label)  # ner решается на уровне токенов!
                 ptr += num_pieces_ij
@@ -470,6 +479,7 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
         self.loss = total_loss / num_valid_spans
 
     def _get_feed_dict(self, examples: List[Example], mode: str):
+        assert len(examples) > 0
         assert self.ner_enc is not None
 
         # bert
@@ -628,6 +638,58 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
 
         return performance_info
 
-    # TODO: реалзиовать!
+    # TODO: реалзиовать случай window > 1
+    # TODO: копипаста в начале с BertForFlatNER
     def predict(self, examples: List[Example], **kwargs) -> None:
-        pass
+        """
+        инференс. примеры не должны содержать разметку токенов и пар сущностей!
+        сделано так для того, чтобы не было непредсказуемых результатов.
+
+        ner - запись лейблов в Token.labels
+        re - создание новых инстансов Arc и запись их в Example.arcs
+        """
+        # проверка примеров
+        chunks = []
+        for x in examples:
+            assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
+            for t in x.tokens:
+                assert len(t.labels) == 0, f"[{x.id}] tokens are already annotated"
+            for chunk in x.chunks:
+                assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
+                    f"It is not a problem, but must be set for clarity"
+                chunks.append(chunk)
+
+        id2example = {x.id: x for x in examples}
+        assert len(id2example) == len(examples), f"examples must have unique ids, " \
+            f"but got {len(id2example)} unique ids among {len(examples)} examples"
+
+        gen = batches_gen(
+            examples=chunks,
+            max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
+            pieces_level=True
+        )
+        for batch in gen:
+            feed_dict = self._get_feed_dict(batch, mode=ModeKeys.TEST)
+            ner_logits = self.sess.run(self.ner_logits_inference, feed_dict=feed_dict)
+
+            for i, chunk in enumerate(batch):
+                example = id2example[chunk.parent]
+                num_tokens_i = len(chunk.tokens)
+
+                ner_logits_i = ner_logits[i, :num_tokens_i, :num_tokens_i, :]
+                spans_filtered = get_valid_spans(logits=ner_logits_i, is_flat_ner=False)
+                for span in spans_filtered:
+                    start_abs = chunk.tokens[span.start].index_abs
+                    end_abs = chunk.tokens[span.end].index_abs
+                    tokens = example.tokens[start_abs:end_abs + 1]
+                    t_first = tokens[0]
+                    t_last = tokens[-1]
+                    text = example.text[t_first.span_abs.start:t_last.span_abs.end]
+                    id_entity = 'T' + str(len(example.entities))
+                    entity = Entity(
+                        id=id_entity,
+                        label=span.label,
+                        text=text,
+                        tokens=tokens,
+                    )
+                    example.entities.append(entity)

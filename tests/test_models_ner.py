@@ -1,21 +1,35 @@
+import copy
 import tensorflow as tf
 
 from src.model.ner import BertForFlatNER, BertForNestedNER
-from src.data.base import Example, Entity, Token
+from src.data.base import Example, Entity, Token, Span
 
 
 def build_examples():
     tokens = [
-        Token(text="мама", labels=["B_FOO"], token_ids=[3], index_abs=0, index_rel=0),
-        Token(text="мыла", labels=["I_FOO"], token_ids=[4, 5], index_abs=1, index_rel=1),
-        Token(text="раму", labels=["O"], token_ids=[6], index_abs=2, index_rel=2)
+        Token(text="мама", labels=["B_FOO"], token_ids=[3], index_abs=0, index_rel=0,
+              span_abs=Span(start=0, end=4), span_rel=Span(start=0, end=4)),
+        Token(text="мыла", labels=["I_FOO"], token_ids=[4, 5], index_abs=1, index_rel=1,
+              span_abs=Span(start=5, end=9), span_rel=Span(start=5, end=9)),
+        Token(text="раму", labels=["O"], token_ids=[6], index_abs=2, index_rel=2,
+              span_abs=Span(start=10, end=14), span_rel=Span(start=10, end=14))
     ]
     entities = [
         Entity(text="мама мыла", tokens=tokens[:2], label="FOO")
     ]
-    chunk = Example(id="chunk", tokens=tokens, entities=entities)
-    example = Example(id="0", tokens=tokens, entities=entities, chunks=[chunk])
-    return [example]
+    text = "мама мыла раму"
+    _examples = [
+        Example(id="0", filename="0", text=text, tokens=tokens, entities=entities, chunks=[
+            Example(id="chunk_0", tokens=tokens, entities=entities, parent="0")
+        ]),
+        Example(id="1", filename="1", text=text, tokens=tokens, entities=entities, chunks=[
+            Example(id="chunk_1", tokens=tokens, entities=entities, parent="1")
+        ]),
+        Example(id="2", filename="2", text=text, tokens=tokens, entities=entities, chunks=[
+            Example(id="chunk_2", tokens=tokens, entities=entities, parent="2")
+        ])
+    ]
+    return _examples
 
 
 examples = build_examples()
@@ -52,12 +66,20 @@ common_config = {
     }
 }
 
+folds = [
+    (["0", "1"], ["2"]),
+    (["0", "2"], ["1"]),
+    (["1", "2"], ["0"])
+]
+
 
 def _test_model(model_cls, config, ner_enc):
     tf.reset_default_graph()
     with tf.Session() as sess:
         model = model_cls(sess=sess, config=config, ner_enc=ner_enc)
+
         model.build()
+
         model.train(
             examples_train=examples,
             examples_valid=examples,
@@ -67,6 +89,20 @@ def _test_model(model_cls, config, ner_enc):
             verbose=True,
             verbose_fn=None
         )
+
+        model.cross_validate(
+            examples=examples,
+            folds=folds,
+            valid_frac=0.5,
+            verbose_fn=None
+        )
+
+        examples_test = copy.deepcopy(examples)
+        for x in examples_test:
+            x.entities = []
+            for t in x.tokens:
+                t.labels = []
+        model.predict(examples=examples_test)
 
 
 def test_bert_for_flat_ner():
