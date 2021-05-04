@@ -39,6 +39,7 @@ def train_test_valid_split(
     return train, valid, test
 
 
+# TODO: упразднить truncated; сделать так, чтобы колонки выводились в зависиомости от контента d
 def classification_report_to_string(d: Dict, digits: int = 4, truncated: bool = False) -> str:
     """
     :param d: словарь вида {"label": {"f1": 0.9, ....}, ...}. см. src.metrics.classification_report

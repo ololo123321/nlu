@@ -256,11 +256,13 @@ class BaseModel(ABC):
             print(f"restoring model from {checkpoint_path}")
             saver.restore(self.sess, checkpoint_path)
 
+    # TODO: по итогу обучения не подгружаются веса лушчей версии -> качество на тесте оценивается по последним весам
     def cross_validate(
             self,
             examples: List[Example],
             folds: Iterable,
             valid_frac: float = 0.15,
+            model_dir: str = None,
             verbose: bool = False,
             verbose_fn: Callable = None
     ) -> Tuple[np.ndarray, np.ndarray]:
@@ -269,6 +271,8 @@ class BaseModel(ABC):
         :param examples:
         :param folds:
         :param valid_frac:
+        :param model_dir:
+        :param verbose:
         :param verbose_fn:
         :return:
         """
@@ -279,6 +283,10 @@ class BaseModel(ABC):
         scores_test = []
 
         verbose_fn = verbose_fn if verbose_fn is not None else print
+
+        if model_dir is None:
+            print("[WARNING] model dir is not set => evaluation on test data will be done on last weights, "
+                  "which might differ from best ones")
 
         for i, (train_files, test_files) in enumerate(folds):
             print(f"FOLDS {i}")
@@ -306,7 +314,7 @@ class BaseModel(ABC):
                 examples_train=examples_train,
                 examples_valid=examples_valid,
                 train_op_name="train_op",
-                model_dir=None,
+                model_dir=model_dir,
                 scope_to_save=None,
                 verbose=verbose,
                 verbose_fn=verbose_fn
