@@ -187,7 +187,7 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
             ptr = 2
 
             # tokens
-            for t in x.tokens:
+            for j, t in enumerate(x.tokens):
                 first_pieces_coords_i.append((i, ptr))
                 num_pieces_ij = len(t.pieces)
                 input_ids_i += t.token_ids
@@ -195,19 +195,15 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
                 segment_ids_i += [0] * num_pieces_ij
                 ptr += num_pieces_ij
 
+                if mode != ModeKeys.TEST:
+                    assert isinstance(t.id_head, int)
+                    assert isinstance(t.rel, str)
+                    labels.append((i, j, t.id_head, self.rel_enc[t.rel]))
+
             # [SEP]
             input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
             input_mask_i.append(1)
             segment_ids_i.append(0)
-
-            # parser labels
-            if mode != ModeKeys.TEST:
-                for arc in x.arcs:
-                    assert isinstance(arc.head, int)  # token index
-                    assert isinstance(arc.dep, int)  # token index
-                    assert isinstance(arc.rel, str)
-                    id_rel = self.rel_enc[arc.rel]
-                    labels.append((i, arc.head, arc.dep + 1, id_rel))
 
             # write
             num_pieces.append(len(input_ids_i))
@@ -252,12 +248,13 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         pass
 
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
+        """chunks always sentence-level"""
         chunks = []
         for x in examples:
             assert len(x.chunks) > 0
             chunks += x.chunks
 
-        num_heads_total = 0
+        num_tokens_total = 0
         num_heads_correct = 0
         num_heads_labels_correct = 0
 
@@ -265,8 +262,6 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         loss_denominator_arc = 0
         total_loss_type = 0.0
         loss_denominator_type = 0
-
-        root_label = self.config["model"]["parser"]["root_label"]
 
         gen = batches_gen(
             examples=chunks,
@@ -292,23 +287,20 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
             for i, x in enumerate(batch):
                 num_tokens_i = len(x.tokens)
                 s_arc_i = res[0][i, :num_tokens_i, :num_tokens_i + 1]  # [T, T + 1]
-                root_scores = np.zeros_like(s_arc_i[:1])
+                root_scores = np.zeros_like(s_arc_i[:1, :])
                 root_scores[0] = 1.0
                 s_arc_i = np.concatenate([root_scores, s_arc_i], axis=0)  # [T + 1, T + 1]
-                head_ids, _ = mst(s_arc_i)  # [T + 1]; head_ids[0] = 0, heads[1:] in range [0, num_tokens_i]
-                head_ids = head_ids[1:] - 1  # [T]; elements in range [-1, num_tokens_i); single -1 for root
-                dep2head = {arc.dep: (arc.head, arc.rel) for arc in x.arcs}
-                assert len(dep2head) == num_tokens_i - 1
-                dep_ids = list(range(num_tokens_i))
-                label_ids = res[1][i, dep_ids, head_ids]
-                for idx_dep, idx_head_pred, id_label_pred in zip(dep_ids, head_ids, label_ids):
-                    idx_head_true, label_true = dep2head.get(idx_dep, (-1, root_label))
-                    label_pred = self.inv_rel_enc[id_label_pred]
-                    if idx_head_pred == idx_head_true:
+                head_ids = mst(s_arc_i)  # [T + 1]; head_ids[0] = 0, heads[1:] in range [0, num_tokens_i]
+
+                for j, t in enumerate(x.tokens):
+                    head_pred = head_ids[j + 1] - 1
+                    if head_pred == t.id_head:
                         num_heads_correct += 1
-                        if label_pred == label_true:
+                        id_label_pred = res[1][i, j, head_pred]
+                        if id_label_pred == self.rel_enc[t.rel]:
                             num_heads_labels_correct += 1
-                    num_heads_total += 1
+
+                num_tokens_total += num_tokens_i
 
         # loss
         loss_arc = total_loss_arc / loss_denominator_arc
@@ -316,8 +308,8 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         loss = loss_arc + loss_type
 
         # metrics
-        las = num_heads_correct / num_heads_total
-        uas = num_heads_labels_correct / num_heads_total
+        las = num_heads_correct / num_tokens_total
+        uas = num_heads_labels_correct / num_tokens_total
 
         performance_info = {
             "loss": loss,
