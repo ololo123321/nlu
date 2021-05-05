@@ -3,17 +3,18 @@ import tensorflow as tf
 
 from src.model.ner import BertForFlatNER, BertForNestedNER
 from src.model.coreference_resolution import BertForCoreferenceResolutionMentionPair, BertForCoreferenceResolutionMentionRanking
+from src.model.dependency_parsing import BertForDependencyParsing
 from src.data.base import Example, Entity, Token, Span
 
 
 def build_examples():
     tokens = [
         Token(text="мама", labels=["B_FOO"], token_ids=[3], index_abs=0, index_rel=0, id_sent=0,
-              span_abs=Span(start=0, end=4), span_rel=Span(start=0, end=4)),
+              span_abs=Span(start=0, end=4), span_rel=Span(start=0, end=4), id_head=0, rel="root"),
         Token(text="мыла", labels=["I_FOO"], token_ids=[4, 5], index_abs=1, index_rel=1, id_sent=0,
-              span_abs=Span(start=5, end=9), span_rel=Span(start=5, end=9)),
+              span_abs=Span(start=5, end=9), span_rel=Span(start=5, end=9), id_head=0, rel="foo"),
         Token(text="раму", labels=["O"], token_ids=[6], index_abs=2, index_rel=2, id_sent=0,
-              span_abs=Span(start=10, end=14), span_rel=Span(start=10, end=14))
+              span_abs=Span(start=10, end=14), span_rel=Span(start=10, end=14), id_head=1, rel="bar")
     ]
     entities = [
         Entity(text="мама мыла", tokens=tokens[:2], label="FOO", id_chain=0, index=0)
@@ -49,8 +50,7 @@ common_config = {
             "pad_token_id": 0,
             "cls_token_id": 1,
             "sep_token_id": 2,
-        },
-        "ner": None  # setup
+        }
     },
     "training": {
         "num_epochs": 1,
@@ -130,7 +130,7 @@ def test_bert_for_flat_ner():
         "use_birnn": False,
         "rnn": {
             "num_layers": 1,
-            "cell_dim": 256,
+            "cell_dim": 8,
             "dropout": 0.5,
             "recurrent_dropout": 0.0
         }
@@ -150,15 +150,15 @@ def test_bert_for_nested_ner():
         "use_birnn": False,
         "rnn": {
             "num_layers": 1,
-            "cell_dim": 256,
+            "cell_dim": 8,
             "dropout": 0.5,
             "recurrent_dropout": 0.0
         },
         "biaffine": {
             "num_mlp_layers": 1,
             "activation": "relu",
-            "head_dim": 128,
-            "dep_dim": 128,
+            "head_dim": 8,
+            "dep_dim": 8,
             "dropout": 0.33,
             "num_labels": len(ner_enc),
         }
@@ -172,13 +172,13 @@ def test_bert_for_cr_mention_pair():
         "use_birnn": False,
         "rnn": {
             "num_layers": 1,
-            "cell_dim": 256,
+            "cell_dim": 8,
             "dropout": 0.5,
             "recurrent_dropout": 0.0
         },
         "use_attn": True,
         "attn": {
-            "hidden_dim": 128,
+            "hidden_dim": 8,
             "dropout": 0.3,
             "activation": "relu"
         },
@@ -190,8 +190,8 @@ def test_bert_for_cr_mention_pair():
         "biaffine": {
             "num_mlp_layers": 1,
             "activation": "relu",
-            "head_dim": 128,
-            "dep_dim": 128,
+            "head_dim": 8,
+            "dep_dim": 8,
             "dropout": 0.33,
             "num_labels": 1,
             "use_dep_prior": False
@@ -211,13 +211,13 @@ def test_bert_for_cr_mention_ranking():
         "use_birnn": False,
         "rnn": {
             "num_layers": 1,
-            "cell_dim": 256,
+            "cell_dim": 8,
             "dropout": 0.5,
             "recurrent_dropout": 0.0
         },
         "use_attn": True,
         "attn": {
-            "hidden_dim": 128,
+            "hidden_dim": 8,
             "dropout": 0.3,
             "activation": "relu"
         },
@@ -229,8 +229,8 @@ def test_bert_for_cr_mention_ranking():
         "biaffine": {
             "num_mlp_layers": 1,
             "activation": "relu",
-            "head_dim": 128,
-            "dep_dim": 128,
+            "head_dim": 8,
+            "dep_dim": 8,
             "dropout": 0.33,
             "num_labels": 1,
             "use_dep_prior": False
@@ -242,3 +242,41 @@ def test_bert_for_cr_mention_ranking():
         "scorer_path": "/home/vitaly/reference-coreference-scorers/scorer.pl"
     }
     _test_model(BertForCoreferenceResolutionMentionRanking, config=config)
+
+
+def test_bert_for_dependency_parsing():
+    config = common_config.copy()
+    config["model"]["bert"]["root_token_id"] = 10
+    config["model"]["parser"] = {
+        "use_birnn": False,
+        "rnn": {
+            "num_layers": 1,
+            "cell_dim": 8,
+            "dropout": 0.5,
+            "recurrent_dropout": 0.0
+        },
+        "biaffine_arc": {
+            "num_mlp_layers": 1,
+            "activation": "relu",
+            "head_dim": 8,
+            "dep_dim": 8,
+            "dropout": 0.33,
+            "num_labels": 1,
+        },
+        "biaffine_type": {
+            "num_mlp_layers": 1,
+            "activation": "relu",
+            "head_dim": 8,
+            "dep_dim": 8,
+            "dropout": 0.33,
+            "num_labels": 3,
+        }
+    }
+
+    rel_enc = {
+        "root": 0,
+        "foo": 1,
+        "bar": 2
+    }
+
+    _test_model(BertForDependencyParsing, config=config, rel_enc=rel_enc)

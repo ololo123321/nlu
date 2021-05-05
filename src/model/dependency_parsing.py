@@ -31,12 +31,9 @@ class BaseModeDependencyParsing(BaseModel):
         self.s_arc = None
         self.type_labels_pred = None
         # for debug:
-        self.loss_arc = None
         self.total_loss_arc = None
-        self.loss_denominator_arc = None
-        self.loss_type = None
         self.total_loss_type = None
-        self.loss_denominator_type = None
+        self.total_num_tokens = None
 
         self._rel_enc = None
         self._inv_rel_enc = None
@@ -68,8 +65,8 @@ class BaseModeDependencyParsing(BaseModel):
 
 
 class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
-    def __init__(self, sess: tf.Session = None, config: Dict = None):
-        super().__init__(sess=sess, config=config)
+    def __init__(self, sess: tf.Session = None, config: Dict = None, rel_enc: Dict = None):
+        super().__init__(sess=sess, config=config, rel_enc=rel_enc)
 
     def _build_dependency_parser(self):
         self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
@@ -77,8 +74,10 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         if self.config["model"]["parser"]["use_birnn"]:
             self.birnn = StackedBiRNN(**self.config["model"]["parser"]["rnn"])
 
-        self.arc_enc = GraphEncoder(**self.config["model"]["parser"]["biaffine_arc"])
-        self.type_enc = GraphEncoder(**self.config["model"]["parser"]["biaffine_type"])
+        with tf.variable_scope("arc_encoder"):
+            self.arc_enc = GraphEncoder(**self.config["model"]["parser"]["biaffine_arc"])
+        with tf.variable_scope("type_encoder"):
+            self.type_enc = GraphEncoder(**self.config["model"]["parser"]["biaffine_type"])
 
         self.logits_arc_train, self.logits_type_train = self._build_dependency_parser_fn(bert_out=self.bert_out_train)
         logits_arc_pred, logits_type_pred = self._build_dependency_parser_fn(bert_out=self.bert_out_pred)
@@ -94,23 +93,23 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
 
         # birnn
         if self.birnn is not None:
-            sequence_mask = tf.sequence_mask(self.num_tokens_ph)
+            sequence_mask = tf.sequence_mask(self.num_tokens_ph + 1)
             x = self.birnn(x, training=self.training_ph, mask=sequence_mask)  # [N, T + 1, cell_dim * 2]
 
-        x_tok = x[:, 1:, :]  # [N, T, D]
+        x_wo_root = x[:, 1:, :]  # [N, T, D]
 
         # arc
-        enc_inputs = GraphEncoderInputs(head=x_tok, dep=x)
+        enc_inputs = GraphEncoderInputs(head=x_wo_root, dep=x)
         logits_arc = self.arc_enc(enc_inputs, training=self.training_ph)  # [N, T, T + 1, 1]
         logits_arc = tf.squeeze(logits_arc, axis=-1)  # [N, T, T + 1]
 
         # type
-        enc_inputs = GraphEncoderInputs(head=x_tok, dep=x_tok)
+        enc_inputs = GraphEncoderInputs(head=x_wo_root, dep=x_wo_root)
         logits_type = self.type_enc(enc_inputs, training=self.training_ph)  # [N, T, T, num_relations]
 
         # mask (last dimention only due to softmax)
-        mask = tf.sequence_mask(self.num_tokens_ph, dtype=tf.float32)  # [N, T + 1]
-        logits_arc += get_additive_mask(mask[:, None, :])
+        mask = tf.sequence_mask(self.num_tokens_ph + 1, dtype=tf.float32)  # [N, T + 1]
+        logits_arc += get_additive_mask(mask[:, None, :])  # [N, T, T + 1]
         return logits_arc, logits_type
 
     def _set_placeholders(self):
@@ -119,40 +118,41 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
 
     def _set_loss(self, *args, **kwargs):
         # arc
-        shape = tf.shape(self.logits_arc_train)[:-1]
-        labels_arc = tf.scatter_nd(indices=self.labels_ph[:2], updates=self.labels_ph[2], shape=shape)  # [N, T]
+        labels_arc = tf.scatter_nd(
+            indices=self.labels_ph[:, :2], updates=self.labels_ph[:, 2], shape=tf.shape(self.logits_arc_train)[:2]
+        )  # [N, T]
         per_example_loss_arc = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=labels_arc, logits=self.logits_arc_train
-        )
+        )  # [N, T]
 
         # type
-        shape = tf.shape(self.logits_type_train)[:-1]
-        labels_type = tf.scatter_nd(indices=self.labels_ph[:-1], updates=self.labels_ph[-1], shape=shape)  # [N, T, T]
+        labels_type = tf.scatter_nd(
+            indices=self.labels_ph[:, :3], updates=self.labels_ph[:, 3], shape=tf.shape(self.logits_type_train)[:3]
+        )  # [N, T, T]
         per_example_loss_type = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=labels_type, logits=self.logits_type_train
-        )
+        )  # [N, T, T]
 
         # mask
-        num_tokens_wo_root = self.num_tokens_ph - 1
-        sequence_mask = tf.sequence_mask(num_tokens_wo_root, dtype=tf.float32)  # [N, T]
-        per_example_loss_arc *= sequence_mask
-        per_example_loss_type *= sequence_mask[:, :, None] * sequence_mask[:, None, :]
+        sequence_mask = tf.sequence_mask(self.num_tokens_ph, dtype=tf.float32)  # [N, T]
+        masked_per_example_loss_arc = per_example_loss_arc * sequence_mask
+        masked_per_example_loss_type = per_example_loss_type * sequence_mask[:, :, None] * sequence_mask[:, None, :]
 
         # agg
-        total_loss_arc = tf.reduce_sum(per_example_loss_arc)
-        total_num_tokens = tf.reduce_sum(num_tokens_wo_root)
+        total_loss_arc = tf.reduce_sum(masked_per_example_loss_arc)
+        total_num_tokens = tf.reduce_sum(self.num_tokens_ph)
         loss_arc = tf.cast(total_loss_arc, tf.float32) / tf.cast(total_num_tokens, tf.float32)
 
-        total_loss_type = tf.reduce_sum(per_example_loss_type)
-        num_edges = self.num_tokens_ph - 1
-        total_num_token_edges = tf.reduce_sum(num_edges)
-        loss_type = tf.cast(total_loss_type, tf.float32) / tf.cast(total_num_token_edges, tf.float32)
+        total_loss_type = tf.reduce_sum(masked_per_example_loss_type)
+        # num_edges = num_tokens - 1 (tree cond) + 1 (fake root node) = num_tokens
+        loss_type = tf.cast(total_loss_type, tf.float32) / tf.cast(total_num_tokens, tf.float32)
 
         self.loss = loss_arc + loss_type
 
         # for debug
-        self.loss_arc = loss_arc
-        self.loss_type = loss_type
+        self.total_loss_arc = total_loss_arc
+        self.total_loss_type = total_loss_type
+        self.total_num_tokens = total_num_tokens
 
     def _get_feed_dict(self, examples: List[Example], mode: str):
         # bert
@@ -184,6 +184,8 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
             input_mask_i.append(1)
             segment_ids_i.append(0)
 
+            first_pieces_coords_i.append((i, 1))
+
             ptr = 2
 
             # tokens
@@ -198,7 +200,11 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
                 if mode != ModeKeys.TEST:
                     assert isinstance(t.id_head, int)
                     assert isinstance(t.rel, str)
-                    labels.append((i, j, t.id_head, self.rel_enc[t.rel]))
+                    if t.id_head == -1:  # TODO: учесть специальный индекс для root при парсинге примеров
+                        k = 0
+                    else:
+                        k = t.id_head + 1
+                    labels.append((i, j, k, self.rel_enc[t.rel]))
 
             # [SEP]
             input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
@@ -223,9 +229,6 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
             segment_ids[i] += [0] * (num_pieces_max - num_pieces[i])
             first_pieces_coords[i] += [(i, 0)] * (num_tokens_max - num_tokens[i])
 
-        if len(labels) == 0:
-            labels.append((0, 0, 0, 0))
-
         training = mode == ModeKeys.TRAIN
 
         d = {
@@ -239,6 +242,10 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         }
 
         if mode != ModeKeys.TEST:
+
+            if len(labels) == 0:
+                labels.append((0, 0, 0, 0))
+
             d[self.labels_ph] = labels
 
         return d
@@ -259,9 +266,8 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         num_heads_labels_correct = 0
 
         total_loss_arc = 0.0
-        loss_denominator_arc = 0
         total_loss_type = 0.0
-        loss_denominator_type = 0
+        total_num_tokens = 0
 
         gen = batches_gen(
             examples=chunks,
@@ -272,17 +278,15 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
             self.s_arc,
             self.type_labels_pred,
             self.total_loss_arc,
-            self.loss_denominator_arc,
             self.total_loss_type,
-            self.loss_denominator_type,
+            self.total_num_tokens
         ]
         for batch in gen:
             feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
             res = self.sess.run(tensors_to_get, feed_dict=feed_dict)
             total_loss_arc += res[2]
-            loss_denominator_arc += res[3]
-            total_loss_type += res[4]
-            loss_denominator_type += res[5]
+            total_loss_type += res[3]
+            total_num_tokens += res[4]
 
             for i, x in enumerate(batch):
                 num_tokens_i = len(x.tokens)
@@ -293,6 +297,7 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
                 head_ids = mst(s_arc_i)  # [T + 1]; head_ids[0] = 0, heads[1:] in range [0, num_tokens_i]
 
                 for j, t in enumerate(x.tokens):
+                    num_tokens_total += 1
                     head_pred = head_ids[j + 1] - 1
                     if head_pred == t.id_head:
                         num_heads_correct += 1
@@ -300,16 +305,14 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
                         if id_label_pred == self.rel_enc[t.rel]:
                             num_heads_labels_correct += 1
 
-                num_tokens_total += num_tokens_i
-
         # loss
-        loss_arc = total_loss_arc / loss_denominator_arc
-        loss_type = total_loss_type / loss_denominator_type
+        loss_arc = total_loss_arc / total_num_tokens
+        loss_type = total_loss_type / total_num_tokens
         loss = loss_arc + loss_type
 
         # metrics
-        las = num_heads_correct / num_tokens_total
-        uas = num_heads_labels_correct / num_tokens_total
+        uas = num_heads_correct / num_tokens_total
+        las = num_heads_labels_correct / num_tokens_total
 
         performance_info = {
             "loss": loss,
