@@ -33,7 +33,6 @@ class BaseModeDependencyParsing(BaseModel):
         # for debug:
         self.total_loss_arc = None
         self.total_loss_type = None
-        self.total_num_tokens = None
 
         self._rel_enc = None
         self._inv_rel_enc = None
@@ -152,7 +151,6 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         # for debug
         self.total_loss_arc = total_loss_arc
         self.total_loss_type = total_loss_type
-        self.total_num_tokens = total_num_tokens
 
     def _get_feed_dict(self, examples: List[Example], mode: str):
         # bert
@@ -267,30 +265,24 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
 
         total_loss_arc = 0.0
         total_loss_type = 0.0
-        total_num_tokens = 0
 
         gen = batches_gen(
             examples=chunks,
             max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
             pieces_level=True
         )
-        tensors_to_get = [
-            self.s_arc,
-            self.type_labels_pred,
-            self.total_loss_arc,
-            self.total_loss_type,
-            self.total_num_tokens
-        ]
         for batch in gen:
             feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
-            res = self.sess.run(tensors_to_get, feed_dict=feed_dict)
-            total_loss_arc += res[2]
-            total_loss_type += res[3]
-            total_num_tokens += res[4]
+            s_arc, type_labels_pred, loss_arc_i, loss_type_i = self.sess.run(
+                [self.s_arc, self.type_labels_pred, self.total_loss_arc, self.total_loss_type],
+                feed_dict=feed_dict
+            )
+            total_loss_arc += loss_arc_i
+            total_loss_type += loss_type_i
 
             for i, x in enumerate(batch):
                 num_tokens_i = len(x.tokens)
-                s_arc_i = res[0][i, :num_tokens_i, :num_tokens_i + 1]  # [T, T + 1]
+                s_arc_i = s_arc[i, :num_tokens_i, :num_tokens_i + 1]  # [T, T + 1]
                 root_scores = np.zeros_like(s_arc_i[:1, :])
                 root_scores[0] = 1.0
                 s_arc_i = np.concatenate([root_scores, s_arc_i], axis=0)  # [T + 1, T + 1]
@@ -301,13 +293,13 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
                     head_pred = head_ids[j + 1] - 1
                     if head_pred == t.id_head:
                         num_heads_correct += 1
-                        id_label_pred = res[1][i, j, head_pred]
+                        id_label_pred = type_labels_pred[i, j, head_pred]
                         if id_label_pred == self.rel_enc[t.rel]:
                             num_heads_labels_correct += 1
 
         # loss
-        loss_arc = total_loss_arc / total_num_tokens
-        loss_type = total_loss_type / total_num_tokens
+        loss_arc = total_loss_arc / num_tokens_total
+        loss_type = total_loss_type / num_tokens_total
         loss = loss_arc + loss_type
 
         # metrics
