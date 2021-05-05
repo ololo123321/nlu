@@ -29,6 +29,8 @@ class BaseModelNER(BaseModel):
 
         self.ner_enc = ner_enc
 
+        self.ner_labels_ph = None
+
     def _build_graph(self):
         self._build_embedder()
         with tf.variable_scope(self.ner_scope):

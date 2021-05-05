@@ -34,6 +34,7 @@ def build_examples():
 
 
 examples = build_examples()
+examples_test = copy.deepcopy(examples)
 
 common_config = {
     "model": {
@@ -77,10 +78,12 @@ folds = [
 
 def _test_model(model_cls, config, **kwargs):
     tf.reset_default_graph()
-    with tf.Session() as sess:
-        model = model_cls(sess=sess, config=config, **kwargs)
+    model = model_cls(sess=None, config=config, **kwargs)
+    model.build()
 
-        model.build()
+    with tf.Session() as sess:
+        model.sess = sess
+        model.reset_weights()
 
         model.train(
             examples_train=examples,
@@ -92,19 +95,21 @@ def _test_model(model_cls, config, **kwargs):
             verbose_fn=None
         )
 
-        model.cross_validate(
-            examples=examples,
-            folds=folds,
-            valid_frac=0.5,
-            verbose_fn=None
-        )
-
-        examples_test = copy.deepcopy(examples)
         for x in examples_test:
             x.entities = []
             for t in x.tokens:
                 t.labels = []
         model.predict(examples=examples_test)
+
+    model.sess = None
+    model.cross_validate(
+        examples=examples,
+        folds=folds,
+        valid_frac=0.5,
+        model_dir=None,
+        verbose=False,
+        verbose_fn=None
+    )
 
 
 def test_bert_for_flat_ner():
