@@ -125,7 +125,6 @@ class BaseModel(ABC):
             self._build_graph()
             self._set_loss()
             self._set_train_op()
-        self.reset_weights()
 
     # альтернативная версия данной функции вынесена в src._old.wip
     def train(
@@ -276,6 +275,8 @@ class BaseModel(ABC):
         :param verbose_fn:
         :return:
         """
+        assert self.sess is None
+
         # for x in examples:
         #     assert len(x.chunks) > 0, f"[{x.id}] example didn't split by chunks!"
 
@@ -287,6 +288,9 @@ class BaseModel(ABC):
         if model_dir is None:
             print("[WARNING] model dir is not set => evaluation on test data will be done on last weights, "
                   "which might differ from best ones")
+
+        sess_config = tf.ConfigProto()
+        sess_config.gpu_options.allow_growth = True
 
         for i, (train_files, test_files) in enumerate(folds):
             print(f"FOLDS {i}")
@@ -308,22 +312,22 @@ class BaseModel(ABC):
 
             # TODO: lr schedule depends on num train steps, which depends on num train sample and batch size.
 
-            self.reset_weights()
-
-            self.train(
-                examples_train=examples_train,
-                examples_valid=examples_valid,
-                train_op_name="train_op",
-                model_dir=model_dir,
-                scope_to_save=None,
-                verbose=verbose,
-                verbose_fn=verbose_fn
-            )
-
-            d_valid = self.evaluate(examples=examples_valid)
-            verbose_fn(d_valid)
-            d_test = self.evaluate(examples=examples_test)
-            verbose_fn(d_test)
+            with tf.Session(config=sess_config) as sess:
+                self.sess = sess
+                self.reset_weights()
+                self.train(
+                    examples_train=examples_train,
+                    examples_valid=examples_valid,
+                    train_op_name="train_op",
+                    model_dir=model_dir,
+                    scope_to_save=None,
+                    verbose=verbose,
+                    verbose_fn=verbose_fn
+                )
+                d_valid = self.evaluate(examples=examples_valid)
+                verbose_fn(d_valid)
+                d_test = self.evaluate(examples=examples_test)
+                verbose_fn(d_test)
 
             scores_valid.append(d_valid["score"])
             scores_test.append(d_test["score"])
@@ -393,7 +397,7 @@ class BaseModel(ABC):
 
 
 class BaseModelBert(BaseModel):
-    def __init__(self, sess, config: dict = None):
+    def __init__(self, sess: tf.Session = None, config: dict = None):
         super().__init__(sess=sess, config=config)
 
         # PLACEHOLDERS
