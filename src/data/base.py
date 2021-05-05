@@ -79,7 +79,9 @@ class Token(ReprMixin):
             labels: List[Union[str, int]] = None,
             pieces: List[Union[str, int]] = None,  # TODO: нужно ли?
             token_ids: List[int] = None,
-            id_sent: int = None
+            id_sent: int = None,
+            id_head: int = None,  # for dependency parsing
+            rel: str = None  # for dependency parsing
     ):
         """
 
@@ -103,9 +105,21 @@ class Token(ReprMixin):
         self.pieces = pieces if pieces is not None else []
         self.token_ids = token_ids if token_ids is not None else []
         self.id_sent = id_sent
+        self.id_head = id_head
+        self.rel = rel
 
         self.labels_pieces = []
         self.label_ids = []
+
+    @property
+    def copy(self):
+        t = Token()
+        for attr, value in self.__dict__.items():
+            if isinstance(value, list):
+                setattr(t, attr, value.copy())
+            else:
+                setattr(t, attr, value)
+        return t
 
 
 class Entity(ReprMixin):
@@ -166,8 +180,8 @@ class Arc(ReprMixin):
     def __init__(
             self,
             id: Union[str, int],
-            head: str,
-            dep: str,
+            head: Union[str, int],  # int in case of dependency parsing
+            dep: Union[str, int],  # int in case of dependency parsing
             rel: str,
             comment: str = None,
             score: float = None  # мб пока не нужно

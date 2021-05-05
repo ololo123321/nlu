@@ -574,7 +574,8 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
                 for idx_head in range(num_entities_chunk):
                     idx_dep_pred = re_labels_pred[i, idx_head]
                     idx_dep_true = index_head_to_index_dep.get(idx_head, 0)
-                    num_right_preds += int(idx_dep_true == idx_dep_pred)
+                    if idx_dep_true == idx_dep_pred:
+                        num_right_preds += 1
                     num_entities_total += 1
 
                 # предсказанные лейблы, которые можно получить из предиктов для кусочка chunk

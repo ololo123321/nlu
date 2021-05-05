@@ -128,7 +128,8 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         self.ner_logits_train = None
         self.transition_params = None
         self.ner_preds_inference = None
-        self.per_example_loss = None
+        self.total_loss = None
+        self.loss_denominator = None
 
         # LAYERS
         self.birnn_ner = None
@@ -154,7 +155,8 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
 
         y_true_ner = []
         y_pred_ner = []
-        loss = []
+        total_loss = 0.0
+        loss_denominator = 0
 
         gen = batches_gen(
             examples=chunks,
@@ -163,8 +165,11 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         )
         for batch in gen:
             feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
-            loss_i, ner_labels_pred = self.sess.run([self.per_example_loss, self.ner_preds_inference], feed_dict=feed_dict)
-            loss.append(loss_i.flatten())
+            total_loss_i, d, ner_labels_pred = self.sess.run(
+                [self.total_loss, self.loss_denominator, self.ner_preds_inference], feed_dict=feed_dict
+            )
+            total_loss += total_loss_i
+            loss_denominator += d
 
             for i, x in enumerate(batch):
                 y_true_ner_i = []
@@ -176,7 +181,7 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
                 y_pred_ner.append(y_pred_ner_i)
 
         # loss
-        loss = np.concatenate(loss).mean()
+        loss = total_loss / loss_denominator
 
         # ner
         joiner = self.config["model"]["ner"]["prefix_joiner"]
@@ -365,13 +370,23 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
                 sequence_lengths=self.num_tokens_ph,
                 transition_params=self.transition_params
             )
-            self.per_example_loss = -log_likelihood
-            self.loss = tf.reduce_mean(self.per_example_loss)
+            per_example_loss = -log_likelihood
+            total_loss = tf.reduce_sum(per_example_loss)
+            num_sequences = tf.shape(self.ner_logits_train)[0]
+            self.loss = total_loss / tf.cast(num_sequences, tf.float32)
+            self.total_loss = total_loss
+            self.loss_denominator = num_sequences
         else:
-            self.per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
                 labels=self.ner_labels_ph, logits=self.ner_logits_train
             )
-            self.loss = tf.reduce_mean(self.per_example_loss)
+            mask = tf.sequence_mask(self.num_tokens_ph, dtype=tf.float32)
+            masked_per_example_loss = per_example_loss * mask
+            total_loss = tf.reduce_sum(masked_per_example_loss)
+            total_num_tokens = tf.reduce_sum(self.num_tokens_ph)
+            self.loss = total_loss / tf.cast(total_num_tokens, tf.float32)
+            self.total_loss = total_loss
+            self.loss_denominator = total_num_tokens
 
     def _build_ner_head_fn(self,  bert_out):
         """

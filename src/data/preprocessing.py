@@ -1,4 +1,4 @@
-from copy import deepcopy
+import copy
 from typing import List, Pattern, Tuple, Dict
 from itertools import accumulate
 from rusenttokenize import ru_sent_tokenize
@@ -12,7 +12,6 @@ from src.data.base import (
     NerEncodings,
     NerPrefixJoiners,
     TOKENS_EXPRESSION,
-    Token,
     Span,
 )
 from src.utils import get_connected_components
@@ -76,7 +75,7 @@ def split_example_v1(
         end = pointers[span.end]
 
         # deepcopy - медленная штука
-        example_copy = deepcopy(Example(
+        example_copy = copy.deepcopy(Example(
             filename=example.filename,
             id=f"{example.id}_{i}",
             text=text,
@@ -198,17 +197,21 @@ def split_example_v2(
         offset = example.tokens[start].span_abs.start
         token_assignment_map = {}
         for j, t in enumerate(example.tokens[start:end]):
-            t_copy = Token(
-                text=t.text,
-                span_abs=t.span_abs,
-                span_rel=Span(start=t.span_abs.start - offset, end=t.span_abs.end - offset),
-                index_abs=t.index_abs,
-                index_rel=j,
-                labels=t.labels.copy(),
-                pieces=t.pieces.copy(),
-                token_ids=t.token_ids.copy(),
-                id_sent=t.id_sent
-            )
+            # t_copy = Token(
+            #     text=t.text,
+            #     span_abs=t.span_abs,
+            #     span_rel=Span(start=t.span_abs.start - offset, end=t.span_abs.end - offset),
+            #     index_abs=t.index_abs,
+            #     index_rel=j,
+            #     labels=t.labels.copy(),
+            #     pieces=t.pieces.copy(),
+            #     token_ids=t.token_ids.copy(),
+            #     id_sent=t.id_sent,
+            #     id_head=t.id_head,
+            #     rel=t.rel
+            # )
+            t_copy = t.copy
+            t_copy.span_rel = Span(start=t.span_abs.start - offset, end=t.span_abs.end - offset)
             tokens.append(t_copy)
             token_assignment_map[t] = t_copy
 
@@ -232,10 +235,10 @@ def split_example_v2(
                 entity_ids.add(entity.id)
 
         # events  TODO: сделать без deepcopy
-        events = [deepcopy(event) for event in example.events if event.trigger in entity_ids]
+        events = [copy.deepcopy(event) for event in example.events if event.trigger in entity_ids]
 
         # arcs  TODO: сделать без deepcopy
-        arcs = [deepcopy(arc) for arc in example.arcs if (arc.head in entity_ids) and (arc.dep in entity_ids)]
+        arcs = [copy.deepcopy(arc) for arc in example.arcs if (arc.head in entity_ids) and (arc.dep in entity_ids)]
 
         id_child = f"{example.id}_{span.start}-{span.end}"
         example_copy = Example(
