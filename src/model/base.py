@@ -127,6 +127,7 @@ class BaseModel(ABC):
             self._set_train_op()
 
     # альтернативная версия данной функции вынесена в src._old.wip
+    # TODO: мб объекты группировать в батчи по числу элементарных объектов, на которых считается loss?
     def train(
             self,
             examples_train: List[Example],
@@ -310,7 +311,7 @@ class BaseModel(ABC):
             print("num valid examples:", len(examples_valid))
             print("num test examples:", len(examples_test))
 
-            # TODO: lr schedule depends on num train steps, which depends on num train sample and batch size.
+            # TODO: lr schedule depends on num train steps, which depends on num train samples and batch size.
 
             with tf.Session(config=sess_config) as sess:
                 self.sess = sess
@@ -324,8 +325,10 @@ class BaseModel(ABC):
                     verbose=verbose,
                     verbose_fn=verbose_fn
                 )
+                print("best valid scores:")
                 d_valid = self.evaluate(examples=examples_valid)
                 verbose_fn(d_valid)
+                print("\ntest scores:")
                 d_test = self.evaluate(examples=examples_test)
                 verbose_fn(d_test)
 
