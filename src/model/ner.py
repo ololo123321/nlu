@@ -13,7 +13,7 @@ from src.model.base import BaseModel, BaseModelBert, ModeKeys
 from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs
 from src.model.utils import get_dense_labels_from_indices, upper_triangular
 from src.metrics import classification_report, classification_report_ner
-from src.utils import get_entity_spans, batches_gen
+from src.utils import get_entity_spans, batches_gen, get_filtered_by_length_chunks
 
 
 __all__ = ["BertForFlatNER", "BertForNestedNER"]
@@ -148,10 +148,8 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
 
     # TODO: профилирование!!!
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
-        chunks = []
-        for x in examples:
-            assert len(x.chunks) > 0
-            chunks += x.chunks
+        maxlen = self.config["inference"]["maxlen"]
+        chunks = get_filtered_by_length_chunks(examples=examples, maxlen=maxlen, pieces_level=self._is_bpe_level)
 
         y_true_ner = []
         y_pred_ner = []
@@ -161,7 +159,7 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         gen = batches_gen(
             examples=chunks,
             max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
-            pieces_level=True
+            pieces_level=self._is_bpe_level
         )
         for batch in gen:
             feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
@@ -213,16 +211,15 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         ner - запись лейблов в Token.labels
         re - создание новых инстансов Arc и запись их в Example.arcs
         """
+        maxlen = self.config["inference"]["maxlen"]
+        chunks = get_filtered_by_length_chunks(examples=examples, maxlen=maxlen, pieces_level=self._is_bpe_level)
+
         # проверка примеров
-        chunks = []
-        for x in examples:
-            assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
+        for x in chunks:
+            assert x.parent is not None, f"[{x.id}] parent is not set. " \
+                f"It is not a problem, but must be set for clarity"
             for t in x.tokens:
                 assert len(t.labels) == 0, f"[{x.id}] tokens are already annotated"
-            for chunk in x.chunks:
-                assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
-                    f"It is not a problem, but must be set for clarity"
-                chunks.append(chunk)
 
         id2example = {x.id: x for x in examples}
         assert len(id2example) == len(examples), f"examples must have unique ids, " \
@@ -231,7 +228,7 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         gen = batches_gen(
             examples=chunks,
             max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
-            pieces_level=True
+            pieces_level=self._is_bpe_level
         )
         for batch in gen:
             feed_dict = self._get_feed_dict(batch, mode=ModeKeys.TEST)

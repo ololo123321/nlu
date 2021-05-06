@@ -8,7 +8,7 @@ from src.model.base import BaseModel, BaseModelBert, ModeKeys
 from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs
 from src.model.utils import get_additive_mask
 from src.data.base import Example
-from src.utils import batches_gen, mst
+from src.utils import batches_gen, mst, get_filtered_by_length_chunks
 
 
 class BaseModeDependencyParsing(BaseModel):
@@ -60,7 +60,7 @@ class BaseModeDependencyParsing(BaseModel):
     def rel_enc(self, rel_enc: Dict):
         self._rel_enc = rel_enc
         if rel_enc is not None:
-            self._inv_rel_enc_enc = {v: k for k, v in rel_enc.items()}
+            self._inv_rel_enc = {v: k for k, v in rel_enc.items()}
 
 
 class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
@@ -244,16 +244,40 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
 
         return d
 
-    # TODO: implement
     def predict(self, examples: List[Example], **kwargs) -> None:
-        pass
+        """chunks always sentence-level"""
+        maxlen = self.config["inference"]["maxlen"]
+        chunks = get_filtered_by_length_chunks(examples=examples, maxlen=maxlen, pieces_level=self._is_bpe_level)
+
+        for chunk in chunks:
+            for t in chunk.tokens:
+                assert t.id_head is None
+                assert t.rel is None
+
+        max_tokens_per_batch = self.config["inference"]["max_tokens_per_batch"]
+        gen = batches_gen(examples=chunks, max_tokens_per_batch=max_tokens_per_batch, pieces_level=self._is_bpe_level)
+        for batch in gen:
+            feed_dict = self._get_feed_dict(batch, mode=ModeKeys.TEST)
+            s_arc, type_labels_pred, = self.sess.run([self.s_arc, self.type_labels_pred], feed_dict=feed_dict)
+            for i, x in enumerate(batch):
+                num_tokens_i = len(x.tokens)
+                s_arc_i = s_arc[i, :num_tokens_i, :num_tokens_i + 1]  # [T, T + 1]
+                root_scores = np.zeros_like(s_arc_i[:1, :])
+                root_scores[0] = 1.0
+                s_arc_i = np.concatenate([root_scores, s_arc_i], axis=0)  # [T + 1, T + 1]
+                head_ids = mst(s_arc_i)  # [T + 1]; head_ids[0] = 0, heads[1:] in range [0, num_tokens_i]
+
+                for j, t in enumerate(x.tokens):
+                    head_pred = head_ids[j + 1]
+                    t.id_head = head_pred - 1
+                    id_label_pred = type_labels_pred[i, j, head_pred]
+                    label_pred = self.inv_rel_enc[id_label_pred]
+                    t.rel = label_pred
 
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
         """chunks always sentence-level"""
-        chunks = []
-        for x in examples:
-            assert len(x.chunks) > 0
-            chunks += x.chunks
+        maxlen = self.config["inference"]["maxlen"]
+        chunks = get_filtered_by_length_chunks(examples=examples, maxlen=maxlen, pieces_level=self._is_bpe_level)
 
         num_tokens_total = 0
         num_heads_correct = 0
@@ -262,11 +286,8 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         total_loss_arc = 0.0
         total_loss_type = 0.0
 
-        gen = batches_gen(
-            examples=chunks,
-            max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
-            pieces_level=True
-        )
+        max_tokens_per_batch = self.config["inference"]["max_tokens_per_batch"]
+        gen = batches_gen(examples=chunks, max_tokens_per_batch=max_tokens_per_batch, pieces_level=self._is_bpe_level)
         for batch in gen:
             feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
             s_arc, type_labels_pred, loss_arc_i, loss_type_i = self.sess.run(

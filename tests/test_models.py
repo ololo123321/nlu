@@ -55,6 +55,7 @@ common_config = {
     "training": {
         "num_epochs": 1,
         "batch_size": 16,
+        "maxlen": 128,
         "max_epochs_wo_improvement": 1,
         "num_train_samples": 100,
     },
@@ -64,6 +65,7 @@ common_config = {
     },
     "inference": {
         "max_tokens_per_batch": 100,
+        "maxlen": 128,
         "window": 1
     },
     "valid": {}  # чтоб пайчарм не подчёркивал ниже
@@ -98,7 +100,7 @@ def _test_model(model_cls, config, **kwargs):
         for x in examples_test:
             x.entities = []
             for t in x.tokens:
-                t.labels = []
+                t.reset()
         model.predict(examples=examples_test)
 
     model.sess = None

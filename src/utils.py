@@ -251,6 +251,27 @@ def batches_gen(examples: List[Example], max_tokens_per_batch: int = 10000, piec
     yield batch
 
 
+def get_filtered_by_length_chunks(examples: List[Example], maxlen: int = None, pieces_level: bool = False):
+    res = []
+    ignored_ids = []
+    for x in examples:
+        for chunk in x.chunks:
+            if maxlen is None:
+                res.append(chunk)
+                continue
+            if pieces_level:
+                n = sum(len(t.pieces) for t in chunk.tokens)
+            else:
+                n = len(chunk.tokens)
+            if n <= maxlen:
+                res.append(chunk)
+            else:
+                ignored_ids.append(chunk.id)
+    if len(ignored_ids) > 0:
+        print(f"chunks {ignored_ids} ignored due to their length is greater than {maxlen}")
+    return res
+
+
 # TODO: разобраться и сделать cythonize
 def mst(scores, eps=1e-10):
     """

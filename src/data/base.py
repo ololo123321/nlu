@@ -123,6 +123,14 @@ class Token(ReprMixin):
                 setattr(t, attr, value)
         return t
 
+    def reset(self):
+        self.labels = []
+        self.id_head = None
+        self.rel = None
+        self.pos = None
+        self.labels_pieces = []
+        self.label_ids = []
+
 
 class Entity(ReprMixin):
     def __init__(

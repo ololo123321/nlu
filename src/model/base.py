@@ -13,7 +13,7 @@ from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 
 from src.data.base import Example
-from src.utils import train_test_split
+from src.utils import train_test_split, get_filtered_by_length_chunks
 
 
 class ModeKeys:
@@ -117,6 +117,15 @@ class BaseModel(ABC):
         :return:
         """
 
+    @property
+    @abstractmethod
+    def _is_bpe_level(self) -> bool:
+        """
+        используется ли bpe-токенизация. нужно для корректной фильтрации примеров по длине при обучении/инференсе.
+        реализовано так, потому что надо прокидывать значение в функции train, которая общая для всех моделей.
+        TODO: подумать, мб можно сделать лучше
+        """
+
     # общие методы для всех моделей
 
     def build(self):
@@ -176,19 +185,17 @@ class BaseModel(ABC):
         else:
             saver = None
 
-        # релзиовано так для возможности выбора train_op: обычная или с аккумуляцией градиентов.
-        # TODO: реализовать вторую (уже реализовывал, когда решал dependency parsing, нужно скопипастить сюда)
+        # релзиовано так для возможности выбора train_op:
+        # 1) обнолвять все веса
+        # 2) обновлять только веса головы
+        # *3) аккумуляция градиентов
+        # TODO: реализовать последнюю (уже реализовывал, когда решал dependency parsing, нужно скопипастить сюда)
         train_op = getattr(self, train_op_name)
 
-        chunks_train = []
-        for x in examples_train:
-            # assert len(x.chunks) > 0, f"[{x.id}] example didn't split by chunks!"
-            chunks_train += x.chunks
-
-        chunks_valid = []
-        for x in examples_valid:
-            # assert len(x.chunks) > 0, f"[{x.id}] example didn't split by chunks!"
-            chunks_valid += x.chunks
+        maxlen = self.config["training"]["maxlen"]
+        chunks_train = get_filtered_by_length_chunks(
+            examples=examples_train, maxlen=maxlen, pieces_level=self._is_bpe_level
+        )
 
         batch_size = self.config["training"]["batch_size"]
         num_epoch_steps = math.ceil(len(chunks_train) / batch_size)
@@ -197,17 +204,12 @@ class BaseModel(ABC):
         verbose_fn = verbose_fn if verbose_fn is not None else print
         train_loss = []
 
-        # print("num chunks train:", len(chunks_train))
-
         for epoch in range(self.config["training"]["num_epochs"]):
-            # print("epoch:", epoch)
             for _ in tqdm.trange(num_epoch_steps):
-                # print("step:", _)
                 if len(chunks_train) > batch_size:
                     chunks_batch = random.sample(chunks_train, batch_size)
                 else:
                     chunks_batch = chunks_train
-                # print("num chunks batch:", len(chunks_batch))
                 feed_dict = self._get_feed_dict(chunks_batch, mode=ModeKeys.TRAIN)
                 try:
                     _, loss = self.sess.run([train_op, self.loss], feed_dict=feed_dict)
@@ -487,3 +489,7 @@ class BaseModelBert(BaseModel):
             num_warmup_steps=num_warmup_steps,
             use_tpu=False
         )
+
+    @property
+    def _is_bpe_level(self) -> bool:
+        return True
