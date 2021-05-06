@@ -5,7 +5,7 @@ import tqdm
 from typing import List, Union, Pattern, Callable, IO
 from collections import defaultdict
 
-from .base import (
+from src.data.base import (
     Attribute,
     Arc,
     Entity,
@@ -19,7 +19,7 @@ from .base import (
     Token,
     TOKENS_EXPRESSION
 )
-from .exceptions import (
+from src.data.exceptions import (
     BadLineError,
     EntitySpanError,
     MultiRelationError,
@@ -879,21 +879,21 @@ def get_id(id_arg: Union[int, str], prefix: str) -> str:
         raise ValueError(f"expected type of id_arg is string or integer, but got {type(id_arg)}")
 
 
+# TODO: протестировать!!1!
 def from_conllu(path: str) -> List[Example]:
     examples = []
     expression = re.compile(r'# sent_id = (.+\.xml)_(\d+)')
     num_chunks = 0
     num_chunks_ignored = 0
     num_tokens = 0
+    chunks_i = []
+    tokens_ij = []
+    flag_strange = False
+    filename_doc = None
+    id_sent = None
+    text = None
 
     with open(path) as f:
-        chunks_i = []
-        tokens_ij = []
-        flag_strange = False
-        filename = None
-        id_sent = None
-        filename_curr = None
-        text = None
         for i, line in enumerate(f):
             line = line.strip()
             if len(line) == 0:
@@ -905,31 +905,42 @@ def from_conllu(path: str) -> List[Example]:
                         flag_strange = False
                         num_chunks_ignored += 1
                     else:
-                        if filename is not None:
-                            id_chunk = f"{filename}_{id_sent}"
-                            chunk = Example(
-                                filename=filename,
-                                id=id_chunk,
-                                text=text,
-                                tokens=tokens_ij.copy()
-                            )
-                            chunks_i.append(chunk)
-                            tokens_ij.clear()
-                            num_chunks += 1
+                        if filename_doc is not None:
+                            id_chunk = f"{filename_doc}_{id_sent}"
+                            if len(tokens_ij) > 0:
+                                chunk = Example(
+                                    filename=filename_doc,
+                                    id=id_chunk,
+                                    text=text,
+                                    tokens=tokens_ij.copy()
+                                )
+                                chunks_i.append(chunk)
+                                tokens_ij.clear()
+                                num_chunks += 1
+                            else:
+                                print(f"[{id_chunk}] has no tokens")
 
                     m = expression.match(line)
-                    filename = m.group(1)
+                    filename_chunk = m.group(1)
                     id_sent = int(m.group(2))
 
-                    if (filename is not None) and (filename != filename_curr):
-                        x = Example(filename=filename_curr, chunks=chunks_i.copy())
-                        examples.append(x)
-                        chunks_i.clear()
-                        filename_curr = filename
+                    if filename_doc is None:
+                        filename_doc = filename_chunk
+                    else:
+                        if filename_doc != filename_chunk:
+                            if len(chunks_i) > 0:
+                                x = Example(filename=filename_doc, chunks=chunks_i.copy())
+                                examples.append(x)
+                                chunks_i.clear()
+                            else:
+                                print(f"[{filename_doc}] no valid chunks")
+                            filename_doc = filename_chunk
 
                 elif line.startswith("# text"):
                     text = line[9:]
             else:
+                if flag_strange:
+                    continue
                 features = line.split("\t")
                 token_id = features[0]
                 token = features[1]
@@ -940,16 +951,19 @@ def from_conllu(path: str) -> List[Example]:
                 try:
                     int(token_id)
                 except ValueError as e:
-                    print(f"[{filename}] [{id_sent}] problem with token index")
-                    print(str(e))
+                    print(f"[{filename_doc}] [{id_sent}] strange token index {token_id}")
+                    # print(str(e))
                     flag_strange = True
 
                 try:
                     head = int(head)
                 except ValueError as e:
-                    print(f"[{filename}] [{id_sent}] problem with head index")
-                    print(e)
+                    print(f"[{filename_doc}] [{id_sent}] strange head index {head} for token {token_id} <bos>{token}<eos>")
+                    # print(str(e))
                     flag_strange = True
+
+                if flag_strange:
+                    continue
 
                 if head == 0:
                     head = -1
@@ -964,6 +978,35 @@ def from_conllu(path: str) -> List[Example]:
                 )
                 tokens_ij.append(t)
                 num_tokens += 1
+
+    if flag_strange:
+        num_chunks_ignored += 1
+    else:
+        if filename_doc is not None:
+            id_chunk = f"{filename_doc}_{id_sent}"
+            if len(tokens_ij) > 0:
+                chunk = Example(
+                    filename=filename_doc,
+                    id=id_chunk,
+                    text=text,
+                    tokens=tokens_ij.copy()
+                )
+                chunks_i.append(chunk)
+                tokens_ij.clear()
+                num_chunks += 1
+            else:
+                print(f"[{id_chunk}] has no tokens")
+
+    if len(chunks_i) > 0:
+        x = Example(filename=filename_doc, chunks=chunks_i.copy())
+        examples.append(x)
+    else:
+        print(f"[{filename_doc}] no valid chunks")
+
+    n = sum(len(x.chunks) for x in examples)
+    assert num_chunks == n, f"{num_chunks} != {n}"
+    n = sum(sum(len(chunk.tokens) for chunk in x.chunks) for x in examples)
+    assert num_tokens == n, f"{num_tokens} != {n}"
 
     print("===== DATASET INFO =====")
     print("num documents:", len(examples))
