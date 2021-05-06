@@ -251,9 +251,13 @@ def batches_gen(examples: List[Example], max_tokens_per_batch: int = 10000, piec
     yield batch
 
 
-def get_filtered_by_length_chunks(examples: List[Example], maxlen: int = None, pieces_level: bool = False):
+def get_filtered_by_length_chunks(
+        examples: List[Example],
+        maxlen: int = None,
+        pieces_level: bool = False
+) -> List[Example]:
     res = []
-    ignored_ids = []
+    ignored_ids = {}
     for x in examples:
         for chunk in x.chunks:
             if maxlen is None:
@@ -266,9 +270,15 @@ def get_filtered_by_length_chunks(examples: List[Example], maxlen: int = None, p
             if n <= maxlen:
                 res.append(chunk)
             else:
-                ignored_ids.append(chunk.id)
+                ignored_ids[chunk.id] = n
+    s = "pieces" if pieces_level else "tokens"
     if len(ignored_ids) > 0:
-        print(f"chunks {ignored_ids} ignored due to their length is greater than {maxlen}")
+        print("number of ignored examples:", len(ignored_ids))
+        print(f"following examples are ignored due to their length is > {maxlen} {s}:")
+        for k, v in ignored_ids.items():
+            print(f"{k} => {v}")
+    else:
+        print(f"all examples have length <= {maxlen} {s}")
     return res
 
 
