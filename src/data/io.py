@@ -885,7 +885,8 @@ def from_conllu(path: str, warn: bool = True) -> List[Example]:
     expression = re.compile(r'# sent_id = (.+\.xml)_(\d+)')
     num_chunks = 0
     num_chunks_ignored = 0
-    num_tokens = 0
+    num_tokens_total = 0
+    num_tokens_chunk = 0
     chunks_i = []
     tokens_ij = []
     flag_strange = False
@@ -904,6 +905,8 @@ def from_conllu(path: str, warn: bool = True) -> List[Example]:
                     if flag_strange:
                         flag_strange = False
                         num_chunks_ignored += 1
+                        tokens_ij.clear()
+                        num_tokens_chunk = 0
                     else:
                         if filename_doc is not None:
                             id_chunk = f"{filename_doc}_{id_sent}"
@@ -917,6 +920,8 @@ def from_conllu(path: str, warn: bool = True) -> List[Example]:
                                 chunks_i.append(chunk)
                                 tokens_ij.clear()
                                 num_chunks += 1
+                                num_tokens_total += num_tokens_chunk
+                                num_tokens_chunk = 0
                             else:
                                 print(f"[{id_chunk}] has no tokens")
 
@@ -978,7 +983,7 @@ def from_conllu(path: str, warn: bool = True) -> List[Example]:
                     pos=pos
                 )
                 tokens_ij.append(t)
-                num_tokens += 1
+                num_tokens_chunk += 1
 
     if flag_strange:
         num_chunks_ignored += 1
@@ -995,6 +1000,7 @@ def from_conllu(path: str, warn: bool = True) -> List[Example]:
                 chunks_i.append(chunk)
                 tokens_ij.clear()
                 num_chunks += 1
+                num_tokens_total += num_tokens_chunk
             else:
                 print(f"[{id_chunk}] has no tokens")
 
@@ -1007,12 +1013,12 @@ def from_conllu(path: str, warn: bool = True) -> List[Example]:
     n = sum(len(x.chunks) for x in examples)
     assert num_chunks == n, f"{num_chunks} != {n}"
     n = sum(sum(len(chunk.tokens) for chunk in x.chunks) for x in examples)
-    assert num_tokens == n, f"{num_tokens} != {n}"
+    assert num_tokens_total == n, f"{num_tokens_total} != {n}"
 
     print("===== DATASET INFO =====")
     print("num documents:", len(examples))
     print("num sentences:", num_chunks)
-    print("num tokens:", num_tokens)
+    print("num tokens:", num_tokens_total)
     print("num sentences ignored:", num_chunks_ignored)
 
     return examples
