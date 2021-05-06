@@ -308,7 +308,8 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
             "loss_type": loss_type,
             "score": las,
             "uas": uas,
-            "las": las
+            "las": las,
+            "support": num_tokens_total
         }
 
         return performance_info
