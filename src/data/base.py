@@ -81,7 +81,8 @@ class Token(ReprMixin):
             token_ids: List[int] = None,
             id_sent: int = None,
             id_head: int = None,  # for dependency parsing
-            rel: str = None  # for dependency parsing
+            rel: str = None,  # for dependency parsing
+            pos: str = None  # part of speech, пока не надо
     ):
         """
 
@@ -107,6 +108,7 @@ class Token(ReprMixin):
         self.id_sent = id_sent
         self.id_head = id_head
         self.rel = rel
+        self.pos = pos
 
         self.labels_pieces = []
         self.label_ids = []

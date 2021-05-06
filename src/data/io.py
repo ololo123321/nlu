@@ -877,3 +877,98 @@ def get_id(id_arg: Union[int, str], prefix: str) -> str:
         return prefix + str(id_arg)
     else:
         raise ValueError(f"expected type of id_arg is string or integer, but got {type(id_arg)}")
+
+
+def from_conllu(path: str) -> List[Example]:
+    examples = []
+    expression = re.compile(r'# sent_id = (.+\.xml)_(\d+)')
+    num_chunks = 0
+    num_chunks_ignored = 0
+    num_tokens = 0
+
+    with open(path) as f:
+        chunks_i = []
+        tokens_ij = []
+        flag_strange = False
+        filename = None
+        id_sent = None
+        filename_curr = None
+        text = None
+        for i, line in enumerate(f):
+            line = line.strip()
+            if len(line) == 0:
+                continue
+
+            if line[0] == "#":
+                if line.startswith("# sent_id"):
+                    if flag_strange:
+                        flag_strange = False
+                        num_chunks_ignored += 1
+                    else:
+                        if filename is not None:
+                            id_chunk = f"{filename}_{id_sent}"
+                            chunk = Example(
+                                filename=filename,
+                                id=id_chunk,
+                                text=text,
+                                tokens=tokens_ij.copy()
+                            )
+                            chunks_i.append(chunk)
+                            tokens_ij.clear()
+                            num_chunks += 1
+
+                    m = expression.match(line)
+                    filename = m.group(1)
+                    id_sent = int(m.group(2))
+
+                    if (filename is not None) and (filename != filename_curr):
+                        x = Example(filename=filename_curr, chunks=chunks_i.copy())
+                        examples.append(x)
+                        chunks_i.clear()
+                        filename_curr = filename
+
+                elif line.startswith("# text"):
+                    text = line[9:]
+            else:
+                features = line.split("\t")
+                token_id = features[0]
+                token = features[1]
+                pos = features[3]
+                head = features[6]
+                rel = features[7]
+
+                try:
+                    int(token_id)
+                except ValueError as e:
+                    print(f"[{filename}] [{id_sent}] problem with token index")
+                    print(str(e))
+                    flag_strange = True
+
+                try:
+                    head = int(head)
+                except ValueError as e:
+                    print(f"[{filename}] [{id_sent}] problem with head index")
+                    print(e)
+                    flag_strange = True
+
+                if head == 0:
+                    head = -1
+                else:
+                    head -= 1
+
+                t = Token(
+                    text=token,
+                    id_head=head,
+                    rel=rel,
+                    pos=pos
+                )
+                tokens_ij.append(t)
+                num_tokens += 1
+
+    print("===== DATASET INFO =====")
+    print("num documents:", len(examples))
+    print("num sentences:", num_chunks)
+    print("num tokens:", num_tokens)
+    print("num sentences ignored:", num_chunks_ignored)
+
+    return examples

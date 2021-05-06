@@ -217,11 +217,11 @@ COREF_RESULTS_REGEX_BLANC = re.compile(_coref_pattern.format("BLANC"), re.DOTALL
 
 def parse_conll_metrics(stdout: str, is_blanc: bool) -> Dict:
     expression = COREF_RESULTS_REGEX_BLANC if is_blanc else COREF_RESULTS_REGEX
-    coref_results_match = expression.match(stdout)
+    m = expression.match(stdout)
     d = {
-        "recall": float(coref_results_match.group(1)) * 0.01,
-        "precision": float(coref_results_match.group(2)) * 0.01,
-        "f1": float(coref_results_match.group(3)) * 0.01
+        "recall": float(m.group(1)) * 0.01,
+        "precision": float(m.group(2)) * 0.01,
+        "f1": float(m.group(3)) * 0.01
     }
     return d
 

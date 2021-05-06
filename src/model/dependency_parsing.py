@@ -82,7 +82,7 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         logits_arc_pred, logits_type_pred = self._build_dependency_parser_fn(bert_out=self.bert_out_pred)
 
         self.s_arc = tf.nn.softmax(logits_arc_pred, axis=-1)  # [N, T, T + 1]
-        self.type_labels_pred = tf.argmax(logits_type_pred, axis=-1)  # [N, T, T]
+        self.type_labels_pred = tf.argmax(logits_type_pred, axis=-1)  # [N, T, T + 1]
 
     def _build_dependency_parser_fn(self, bert_out: tf.Tensor):
         bert_out = self.bert_dropout(bert_out, training=self.training_ph)
@@ -103,8 +103,8 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         logits_arc = tf.squeeze(logits_arc, axis=-1)  # [N, T, T + 1]
 
         # type
-        enc_inputs = GraphEncoderInputs(head=x_wo_root, dep=x_wo_root)
-        logits_type = self.type_enc(enc_inputs, training=self.training_ph)  # [N, T, T, num_relations]
+        enc_inputs = GraphEncoderInputs(head=x_wo_root, dep=x)
+        logits_type = self.type_enc(enc_inputs, training=self.training_ph)  # [N, T, T + 1, num_relations]
 
         # mask (last dimention only due to softmax)
         mask = tf.sequence_mask(self.num_tokens_ph + 1, dtype=tf.float32)  # [N, T + 1]
@@ -116,6 +116,8 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         self.labels_ph = tf.placeholder(tf.int32, shape=[None, 4], name="labels")
 
     def _set_loss(self, *args, **kwargs):
+        total_num_tokens = tf.reduce_sum(self.num_tokens_ph)
+
         # arc
         labels_arc = tf.scatter_nd(
             indices=self.labels_ph[:, :2], updates=self.labels_ph[:, 2], shape=tf.shape(self.logits_arc_train)[:2]
@@ -123,28 +125,22 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         per_example_loss_arc = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=labels_arc, logits=self.logits_arc_train
         )  # [N, T]
+        sequence_mask = tf.sequence_mask(self.num_tokens_ph, dtype=tf.float32)  # [N, T]
+        masked_per_example_loss_arc = per_example_loss_arc * sequence_mask
+        total_loss_arc = tf.reduce_sum(masked_per_example_loss_arc)
+        loss_arc = total_loss_arc / tf.cast(total_num_tokens, tf.float32)
 
         # type
         labels_type = tf.scatter_nd(
             indices=self.labels_ph[:, :3], updates=self.labels_ph[:, 3], shape=tf.shape(self.logits_type_train)[:3]
-        )  # [N, T, T]
+        )  # [N, T, T + 1]
         per_example_loss_type = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=labels_type, logits=self.logits_type_train
-        )  # [N, T, T]
-
-        # mask
-        sequence_mask = tf.sequence_mask(self.num_tokens_ph, dtype=tf.float32)  # [N, T]
-        masked_per_example_loss_arc = per_example_loss_arc * sequence_mask
-        masked_per_example_loss_type = per_example_loss_type * sequence_mask[:, :, None] * sequence_mask[:, None, :]
-
-        # agg
-        total_loss_arc = tf.reduce_sum(masked_per_example_loss_arc)
-        total_num_tokens = tf.reduce_sum(self.num_tokens_ph)
-        loss_arc = tf.cast(total_loss_arc, tf.float32) / tf.cast(total_num_tokens, tf.float32)
-
+        )  # [N, T, T + 1]
+        masked_per_example_loss_type = tf.gather_nd(per_example_loss_type, self.labels_ph[:, :3])
         total_loss_type = tf.reduce_sum(masked_per_example_loss_type)
         # num_edges = num_tokens - 1 (tree cond) + 1 (fake root node) = num_tokens
-        loss_type = tf.cast(total_loss_type, tf.float32) / tf.cast(total_num_tokens, tf.float32)
+        loss_type = total_loss_type / tf.cast(total_num_tokens, tf.float32)
 
         self.loss = loss_arc + loss_type
 
@@ -290,8 +286,8 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
 
                 for j, t in enumerate(x.tokens):
                     num_tokens_total += 1
-                    head_pred = head_ids[j + 1] - 1
-                    if head_pred == t.id_head:
+                    head_pred = head_ids[j + 1]
+                    if head_pred == t.id_head + 1:
                         num_heads_correct += 1
                         id_label_pred = type_labels_pred[i, j, head_pred]
                         if id_label_pred == self.rel_enc[t.rel]:
