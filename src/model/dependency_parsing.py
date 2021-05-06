@@ -121,7 +121,7 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         # arc
         labels_arc = tf.scatter_nd(
             indices=self.labels_ph[:, :2], updates=self.labels_ph[:, 2], shape=tf.shape(self.logits_arc_train)[:2]
-        )  # [N, T]
+        )  # [N, T], values in [0, T]
         per_example_loss_arc = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=labels_arc, logits=self.logits_arc_train
         )  # [N, T]
@@ -194,7 +194,7 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
                 if mode != ModeKeys.TEST:
                     assert isinstance(t.id_head, int)
                     assert isinstance(t.rel, str)
-                    if t.id_head == -1:  # TODO: учесть специальный индекс для root при парсинге примеров
+                    if t.id_head == -1:
                         k = 0
                     else:
                         k = t.id_head + 1

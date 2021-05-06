@@ -211,12 +211,7 @@ class BaseModel(ABC):
                 feed_dict = self._get_feed_dict(chunks_batch, mode=ModeKeys.TRAIN)
                 try:
                     _, loss = self.sess.run([train_op, self.loss], feed_dict=feed_dict)
-                    # print("loss:", loss)
-                    # print("feed_dict:", feed_dict)
-                    # print("per_example_loss:", per_example_loss)
-                    # print("labels_dense:", labels_dense)
-                    # print("logits_shape:", logits_shape)
-                    # print("logits_train:", logits_train)
+                    assert not np.isnan(loss), "loss becomes nan"
                     train_loss.append(loss)
                 except Exception as e:
                     print("current batch:", [x.id for x in chunks_batch])

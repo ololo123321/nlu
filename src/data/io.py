@@ -880,7 +880,7 @@ def get_id(id_arg: Union[int, str], prefix: str) -> str:
 
 
 # TODO: протестировать!!1!
-def from_conllu(path: str) -> List[Example]:
+def from_conllu(path: str, warn: bool = True) -> List[Example]:
     examples = []
     expression = re.compile(r'# sent_id = (.+\.xml)_(\d+)')
     num_chunks = 0
@@ -950,16 +950,17 @@ def from_conllu(path: str) -> List[Example]:
 
                 try:
                     int(token_id)
-                except ValueError as e:
-                    print(f"[{filename_doc}] [{id_sent}] strange token index {token_id}")
-                    # print(str(e))
+                except ValueError:
+                    if warn:
+                        print(f"[{filename_doc}] [{id_sent}] strange token index {token_id}")
                     flag_strange = True
 
                 try:
                     head = int(head)
-                except ValueError as e:
-                    print(f"[{filename_doc}] [{id_sent}] strange head index {head} for token {token_id} <bos>{token}<eos>")
-                    # print(str(e))
+                except ValueError:
+                    if warn:
+                        print(f"[{filename_doc}] [{id_sent}] strange head index {head} "
+                              f"for token {token_id} <bos>{token}<eos>")
                     flag_strange = True
 
                 if flag_strange:

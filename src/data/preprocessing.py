@@ -365,6 +365,7 @@ def assign_sent_ids_to_tokens(example: Example, pointers: List[int]):
             t.id_sent = i
 
 
+# TODO: последние два аргумента нужны только для flat ner!!1!
 def apply_bpe(
         example: Example,
         tokenizer,
