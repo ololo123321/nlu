@@ -894,6 +894,29 @@ def from_conllu(path: str, warn: bool = True) -> List[Example]:
     id_sent = None
     text = None
 
+    def remove_spaces(s):
+        return s.replace(' ', '').replace('\xa0', '')
+
+    def append_chunk():
+        id_chunk = f"{filename_doc}_{id_sent}"
+        actual = ''.join(remove_spaces(_t.text) for _t in tokens_ij)
+        expected = remove_spaces(text)
+        if actual != expected:
+            print(id_chunk)
+            print("actual:", actual)
+            print("expected:", expected)
+            print("text:", text)
+            print("tokens:", [_t.text for _t in tokens_ij])
+            raise AssertionError
+        chunk = Example(
+            filename=filename_doc,
+            id=id_chunk,
+            text=text,
+            tokens=tokens_ij.copy()
+        )
+        chunks_i.append(chunk)
+        tokens_ij.clear()
+
     with open(path) as f:
         for i, line in enumerate(f):
             line = line.strip()
@@ -909,21 +932,13 @@ def from_conllu(path: str, warn: bool = True) -> List[Example]:
                         num_tokens_chunk = 0
                     else:
                         if filename_doc is not None:
-                            id_chunk = f"{filename_doc}_{id_sent}"
                             if len(tokens_ij) > 0:
-                                chunk = Example(
-                                    filename=filename_doc,
-                                    id=id_chunk,
-                                    text=text,
-                                    tokens=tokens_ij.copy()
-                                )
-                                chunks_i.append(chunk)
-                                tokens_ij.clear()
+                                append_chunk()
                                 num_chunks += 1
                                 num_tokens_total += num_tokens_chunk
                                 num_tokens_chunk = 0
                             else:
-                                print(f"[{id_chunk}] has no tokens")
+                                print(f"[{filename_doc}] chunk {id_sent} has no tokens")
 
                     m = expression.match(line)
                     filename_chunk = m.group(1)
@@ -989,20 +1004,12 @@ def from_conllu(path: str, warn: bool = True) -> List[Example]:
         num_chunks_ignored += 1
     else:
         if filename_doc is not None:
-            id_chunk = f"{filename_doc}_{id_sent}"
             if len(tokens_ij) > 0:
-                chunk = Example(
-                    filename=filename_doc,
-                    id=id_chunk,
-                    text=text,
-                    tokens=tokens_ij.copy()
-                )
-                chunks_i.append(chunk)
-                tokens_ij.clear()
+                append_chunk()
                 num_chunks += 1
                 num_tokens_total += num_tokens_chunk
             else:
-                print(f"[{id_chunk}] has no tokens")
+                print(f"[{filename_doc}] chunk {id_sent} has no tokens")
 
     if len(chunks_i) > 0:
         x = Example(filename=filename_doc, chunks=chunks_i.copy())
@@ -1022,3 +1029,8 @@ def from_conllu(path: str, warn: bool = True) -> List[Example]:
     print("num sentences ignored:", num_chunks_ignored)
 
     return examples
+
+
+# if __name__ == "__main__":
+#     path = "/home/vitaly/Desktop/ru_syntagrus-ud-dev.conllu"
+#     from_conllu(path, warn=False)
