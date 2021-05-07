@@ -42,14 +42,14 @@ common_config = {
         "bert": {
             "test_mode": True,
             "dir": None,
-            "dim": 16,
-            "attention_probs_dropout_prob": 0.5,  # default 0.1
-            "hidden_dropout_prob": 0.1,
             "dropout": 0.2,
             "scope": "bert",
             "pad_token_id": 0,
             "cls_token_id": 1,
             "sep_token_id": 2,
+            "params": {
+                "hidden_size": 16
+            }
         }
     },
     "training": {

@@ -36,19 +36,17 @@ class BaseModelNER(BaseModel):
         with tf.variable_scope(self.ner_scope):
             self._build_ner_head()
 
-    def save(self, model_dir: str, force: bool = True, scope_to_save: str = None):
-        super().save(model_dir=model_dir, force=force, scope_to_save=scope_to_save)
-
+    def save_config(self, model_dir: str):
+        assert self.ner_enc is not None
+        super().save_config(model_dir=model_dir)
         with open(os.path.join(model_dir, "ner_enc.json"), "w") as f:
             json.dump(self.ner_enc, f, indent=4)
 
     @classmethod
-    def load(cls, sess: tf.Session, model_dir: str, scope_to_load: str = None):
-        model = super().load(sess=sess, model_dir=model_dir, scope_to_load=scope_to_load)
-
+    def load(cls, sess: tf.Session, model_dir: str, scope_to_load: str = None, mode: str = ModeKeys.TEST):
+        model = super().load(sess=sess, model_dir=model_dir, scope_to_load=scope_to_load, mode=mode)
         with open(os.path.join(model_dir, "ner_enc.json")) as f:
             model.ner_enc = json.load(f)
-
         return model
 
     @abstractmethod

@@ -104,7 +104,7 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
             self.birnn = StackedBiRNN(**self.config["model"]["coref"]["rnn"])
             emb_dim = self.config["model"]["coref"]["rnn"]["cell_dim"] * 2
         else:
-            emb_dim = self.config["model"]["bert"]["dim"]
+            emb_dim = self.config["model"]["bert"]["params"]["hidden_size"]
 
         self.entity_pairs_enc = GraphEncoder(**self.config["model"]["coref"]["biaffine"])
         multiple = 2 + int(self.config["model"]["coref"]["use_attn"])

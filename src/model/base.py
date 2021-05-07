@@ -128,12 +128,14 @@ class BaseModel(ABC):
 
     # общие методы для всех моделей
 
-    def build(self):
+    def build(self, mode: str = ModeKeys.TRAIN):
         self._set_placeholders()
         with tf.variable_scope(self.model_scope):
             self._build_graph()
-            self._set_loss()
-            self._set_train_op()
+            if mode != ModeKeys.TEST:
+                self._set_loss()
+            if mode == ModeKeys.TRAIN:
+                self._set_train_op()
 
     # альтернативная версия данной функции вынесена в src._old.wip
     # TODO: мб объекты группировать в батчи по числу элементарных объектов, на которых считается loss?
@@ -346,32 +348,20 @@ class BaseModel(ABC):
 
         return scores_valid, scores_test
 
-    def save(self, model_dir: str, force: bool = True, scope_to_save: str = None):
+    def save_config(self, model_dir: str):
         assert self.config is not None
-        assert self.sess is not None
-
-        if force:
-            if os.path.isdir(model_dir):
-                shutil.rmtree(model_dir)
-        else:
-            assert not os.path.isdir(model_dir), \
-                f'dir {model_dir} already exists. exception raised due to flag "force" was set to "False"'
-
-        os.makedirs(model_dir, exist_ok=True)
-
+        assert os.path.isdir(model_dir)
         with open(os.path.join(model_dir, "config.json"), "w") as f:
             json.dump(self.config, f, indent=4)
 
-        self.save_weights(model_dir=model_dir, scope=scope_to_save)
-
     @classmethod
-    def load(cls, sess: tf.Session, model_dir: str, scope_to_load: str = None):
+    def load(cls, sess: tf.Session, model_dir: str, scope_to_load: str = None, mode: str = ModeKeys.TEST):
 
         with open(os.path.join(model_dir, "config.json")) as f:
             config = json.load(f)
 
         model = cls(sess=sess, config=config)
-        model.build()
+        model.build(mode=mode)
         model.restore_weights(model_dir=model_dir, scope=scope_to_load)
         return model
 
@@ -381,7 +371,7 @@ class BaseModel(ABC):
     def restore_weights(self, model_dir: str,  scope: str = None):
         self._save_or_restore(model_dir=model_dir, save=False, scope=scope)
 
-    def reset_weights(self, scope: str = None):
+    def reset_weights(self, scope: str = None, **kwargs):
         variables = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope)
         init_op = tf.variables_initializer(variables)
         self.sess.run(init_op)
@@ -419,16 +409,14 @@ class BaseModelBert(BaseModel):
     def _build_bert(self, training):
         if self.config["model"]["bert"]["test_mode"]:
             input_shape = tf.shape(self.input_ids_ph)
-            x = tf.random.uniform((input_shape[0], input_shape[1], self.config["model"]["bert"]["dim"]))
+            bert_dim = self.config["model"]["bert"]["params"]["hidden_size"]
+            x = tf.random.uniform((input_shape[0], input_shape[1], bert_dim))
             return x
         else:
-            bert_dir = self.config["model"]["bert"]["dir"]
             bert_scope = self.config["model"]["bert"]["scope"]
             reuse = not training
             with tf.variable_scope(bert_scope, reuse=reuse):
-                bert_config = BertConfig.from_json_file(os.path.join(bert_dir, "bert_config.json"))
-                bert_config.attention_probs_dropout_prob = self.config["model"]["bert"]["attention_probs_dropout_prob"]
-                bert_config.hidden_dropout_prob = self.config["model"]["bert"]["hidden_dropout_prob"]
+                bert_config = BertConfig.from_dict(self.config["model"]["bert"]["params"])
                 model = BertModel(
                     config=bert_config,
                     is_training=training,
@@ -461,17 +449,18 @@ class BaseModelBert(BaseModel):
         # common inputs
         self.training_ph = tf.placeholder(dtype=tf.bool, shape=None, name="training_ph")
 
-    def reset_weights(self, scope: str = None):
+    def reset_weights(self, scope: str = None, **kwargs):
+        """в kwargs должен быть bert_dir!"""
         super().reset_weights(scope=scope)
 
         if not self.config["model"]["bert"]["test_mode"]:
-            bert_dir = self.config["model"]["bert"]["dir"]
             bert_scope = self.config["model"]["bert"]["scope"]
             var_list = {
                 self._actual_name_to_checkpoint_name(x.name): x for x in tf.trainable_variables()
                 if x.name.startswith(f"{self.model_scope}/{bert_scope}")
             }
             saver = tf.train.Saver(var_list)
+            bert_dir = kwargs["bert_dir"]
             checkpoint_path = os.path.join(bert_dir, "bert_model.ckpt")
             saver.restore(self.sess, checkpoint_path)
 

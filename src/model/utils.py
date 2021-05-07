@@ -240,6 +240,13 @@ def get_additive_mask(mask: tf.Tensor) -> tf.Tensor:
     return (1.0 - tf.cast(mask, tf.float32)) * -1e9
 
 
+def get_session() -> tf.Session:
+    sess_config = tf.ConfigProto()
+    sess_config.gpu_options.allow_growth = True
+    sess = tf.Session(config=sess_config)
+    return sess
+
+
 def get_entity_pairs_mask(entity_sent_ids, i, j):
     """
     entity_sent_ids: np.ndarray of shape [num_entities]
