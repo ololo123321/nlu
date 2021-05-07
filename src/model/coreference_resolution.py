@@ -421,8 +421,9 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
 
             # tokens
             for t in x.tokens:
+                assert len(t.token_ids) > 0
                 first_pieces_coords_i.append((i, ptr))
-                num_pieces_ij = len(t.pieces)
+                num_pieces_ij = len(t.token_ids)
                 input_ids_i += t.token_ids
                 input_mask_i += [1] * num_pieces_ij
                 segment_ids_i += [0] * num_pieces_ij
@@ -473,9 +474,6 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
             segment_ids[i] += [0] * (num_pieces_max - num_pieces[i])
             first_pieces_coords[i] += [(i, 0)] * (num_tokens_max - num_tokens[i])
 
-        if len(re_labels) == 0:
-            re_labels.append((0, 0, 0))
-
         if len(mention_spans) == 0:
             mention_spans.append((0, 0, 0))
 
@@ -493,6 +491,10 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
         }
 
         if mode != ModeKeys.TEST:
+
+            if len(re_labels) == 0:
+                re_labels.append((0, 0, 0))
+
             d[self.labels_ph] = re_labels
 
         return d
@@ -723,8 +725,9 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
 
             # tokens
             for t in x.tokens:
+                assert len(t.token_ids) > 0
                 first_pieces_coords_i.append((i, ptr))
-                num_pieces_ij = len(t.pieces)
+                num_pieces_ij = len(t.token_ids)
                 input_ids_i += t.token_ids
                 input_mask_i += [1] * num_pieces_ij
                 segment_ids_i += [0] * num_pieces_ij

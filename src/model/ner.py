@@ -295,6 +295,7 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
 
             # tokens
             for t in x.tokens:
+                assert len(t.token_ids) > 0
                 first_pieces_coords_i.append((i, ptr))
                 num_pieces_ij = len(t.token_ids)
                 input_ids_i += t.token_ids
@@ -544,14 +545,15 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
             segment_ids_i.append(0)
 
             # ner
-            for entity in x.entities:
-                assert entity.label is not None
-                start = entity.tokens[0].index_rel
-                assert start is not None
-                end = entity.tokens[-1].index_rel
-                assert end is not None
-                id_label = self.ner_enc[entity.label]
-                ner_labels.append((i, start, end, id_label))
+            if mode != ModeKeys.TEST:
+                for entity in x.entities:
+                    assert entity.label is not None
+                    start = entity.tokens[0].index_rel
+                    assert start is not None
+                    end = entity.tokens[-1].index_rel
+                    assert end is not None
+                    id_label = self.ner_enc[entity.label]
+                    ner_labels.append((i, start, end, id_label))
 
             # write
             num_pieces.append(len(input_ids_i))
@@ -571,9 +573,6 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
             segment_ids[i] += [0] * (num_pieces_max - num_pieces[i])
             first_pieces_coords[i] += [(i, 0)] * (num_tokens_max - num_tokens[i])
 
-        if len(ner_labels) == 0:
-            ner_labels.append((0, 0, 0, 0))
-
         training = mode == ModeKeys.TRAIN
 
         d = {
@@ -592,6 +591,10 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
         }
 
         if mode != ModeKeys.TEST:
+
+            if len(ner_labels) == 0:
+                ner_labels.append((0, 0, 0, 0))
+
             d[self.ner_labels_ph] = ner_labels
 
         return d

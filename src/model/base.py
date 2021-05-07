@@ -169,21 +169,23 @@ class BaseModel(ABC):
         model.initialize()
         """
         if model_dir is not None:
-            os.makedirs(model_dir, exist_ok=True)
+            if os.path.isdir(model_dir):
+                print(f"model dir {model_dir} exists")
+            else:
+                os.makedirs(model_dir, exist_ok=True)
+                print(f"model dir {model_dir} created")
             checkpoint_path = os.path.join(model_dir, "model.ckpt")
-            print(f"model dir {model_dir} created")
-        else:
-            checkpoint_path = None
-            print("model dir is None, so checkpoints will not be saved")
+            print(f"checkpoint path: {checkpoint_path}")
 
-        if checkpoint_path is not None:
             if scope_to_save is not None:
                 var_list = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope_to_save)
             else:
                 var_list = tf.trainable_variables()
             saver = tf.train.Saver(var_list)
         else:
+            checkpoint_path = None
             saver = None
+            print("model dir is None, so checkpoints will not be saved")
 
         # релзиовано так для возможности выбора train_op:
         # 1) обнолвять все веса
@@ -253,7 +255,6 @@ class BaseModel(ABC):
             print(f"restoring model from {checkpoint_path}")
             saver.restore(self.sess, checkpoint_path)
 
-    # TODO: по итогу обучения не подгружаются веса лушчей версии -> качество на тесте оценивается по последним весам
     def cross_validate(
             self,
             examples: List[Example],

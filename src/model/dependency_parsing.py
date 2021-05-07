@@ -1,3 +1,5 @@
+import os
+import json
 from abc import abstractmethod
 from typing import Dict, List
 
@@ -61,6 +63,21 @@ class BaseModeDependencyParsing(BaseModel):
         self._rel_enc = rel_enc
         if rel_enc is not None:
             self._inv_rel_enc = {v: k for k, v in rel_enc.items()}
+
+    def save(self, model_dir: str, force: bool = True, scope_to_save: str = None):
+        super().save(model_dir=model_dir, force=force, scope_to_save=scope_to_save)
+
+        with open(os.path.join(model_dir, "rel_enc.json"), "w") as f:
+            json.dump(self.rel_enc, f, indent=4)
+
+    @classmethod
+    def load(cls, sess: tf.Session, model_dir: str, scope_to_load: str = None):
+        model = super().load(sess=sess, model_dir=model_dir, scope_to_load=scope_to_load)
+
+        with open(os.path.join(model_dir, "rel_enc.json")) as f:
+            model.ner_enc = json.load(f)
+
+        return model
 
 
 class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
@@ -184,8 +201,9 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
 
             # tokens
             for j, t in enumerate(x.tokens):
+                assert len(t.token_ids) > 0
                 first_pieces_coords_i.append((i, ptr))
-                num_pieces_ij = len(t.pieces)
+                num_pieces_ij = len(t.token_ids)
                 input_ids_i += t.token_ids
                 input_mask_i += [1] * num_pieces_ij
                 segment_ids_i += [0] * num_pieces_ij
