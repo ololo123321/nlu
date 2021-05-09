@@ -1,7 +1,4 @@
-import os
-import json
 from typing import Dict, List
-from abc import abstractmethod
 from itertools import chain
 
 import tensorflow as tf
@@ -9,63 +6,14 @@ import numpy as np
 
 from src.data.base import Example, Entity
 from src.data.postprocessing import get_valid_spans
-from src.model.base import BaseModel, BaseModelBert, ModeKeys
+from src.model.base import BaseModelNER, BaseModelBert, ModeKeys
 from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs
-from src.model.utils import get_dense_labels_from_indices, upper_triangular
+from src.model.utils import upper_triangular
 from src.metrics import classification_report, classification_report_ner
 from src.utils import get_entity_spans, batches_gen, get_filtered_by_length_chunks
 
 
 __all__ = ["BertForFlatNER", "BertForNestedNER"]
-
-
-class BaseModelNER(BaseModel):
-    ner_scope = "ner"
-
-    def __init__(self, sess, config: Dict = None, ner_enc: Dict = None):
-        super().__init__(sess=sess, config=config)
-        self._ner_enc = None
-        self._inv_ner_enc = None
-
-        self.ner_enc = ner_enc
-
-        self.ner_labels_ph = None
-
-    def _build_graph(self):
-        self._build_embedder()
-        with tf.variable_scope(self.ner_scope):
-            self._build_ner_head()
-
-    def save_config(self, model_dir: str):
-        assert self.ner_enc is not None
-        super().save_config(model_dir=model_dir)
-        with open(os.path.join(model_dir, "ner_enc.json"), "w") as f:
-            json.dump(self.ner_enc, f, indent=4)
-
-    @classmethod
-    def load(cls, sess: tf.Session, model_dir: str, scope_to_load: str = None, mode: str = ModeKeys.TEST):
-        model = super().load(sess=sess, model_dir=model_dir, scope_to_load=scope_to_load, mode=mode)
-        with open(os.path.join(model_dir, "ner_enc.json")) as f:
-            model.ner_enc = json.load(f)
-        return model
-
-    @abstractmethod
-    def _build_ner_head(self):
-        pass
-
-    @property
-    def ner_enc(self):
-        return self._ner_enc
-
-    @property
-    def inv_ner_enc(self):
-        return self._inv_ner_enc
-
-    @ner_enc.setter
-    def ner_enc(self, ner_enc: Dict):
-        self._ner_enc = ner_enc
-        if ner_enc is not None:
-            self._inv_ner_enc = {v: k for k, v in ner_enc.items()}
 
 
 class BertForFlatNER(BaseModelNER, BaseModelBert):
@@ -130,14 +78,13 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         self.loss_denominator = None
 
         # LAYERS
-        self.birnn_ner = None
         self.dense_ner_labels = None
 
     def _build_ner_head(self):
         self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
 
         if self.config["model"]["ner"]["use_birnn"]:
-            self.birnn_ner = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
+            self.birnn_bert = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
 
         self.dense_ner_labels = tf.keras.layers.Dense(self.config["model"]["ner"]["num_labels"])
 
@@ -387,27 +334,13 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
     def _build_ner_head_fn(self,  bert_out):
         """
         bert_out -> dropout -> stacked birnn (optional) -> dense(num_labels) -> crf (optional)
-        :param bert_out:
+        :param bert_out: [batch_size, num_pieces, D]
         :return:
         """
         use_crf = self.config["model"]["ner"]["use_crf"]
         num_labels = self.config["model"]["ner"]["num_labels"]
 
-        # dropout
-        if (self.birnn_ner is None) or (self.config["model"]["ner"]["rnn"]["dropout"] == 0.0):
-            x = self.bert_dropout(bert_out, training=self.training_ph)
-        else:
-            x = bert_out
-
-        # birnn
-        if self.birnn_ner is not None:
-            sequence_mask = tf.sequence_mask(self.num_pieces_ph)
-            x = self.birnn_ner(x, training=self.training_ph, mask=sequence_mask)
-
-        # pieces -> tokens
-        # сделано так для того, чтобы в ElmoJointModel не нужно было переопределять данный метод
-        if self.first_pieces_coords_ph is not None:
-            x = tf.gather_nd(x, self.first_pieces_coords_ph)  # [N, num_tokens_tokens, bert_dim or cell_dim * 2]
+        x = self._get_token_level_embeddings(bert_out=bert_out)  # [batch_size, num_tokens, bert_dim or cell_dim * 2]
 
         # label logits
         logits = self.dense_ner_labels(x)
@@ -436,13 +369,12 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
 
         # LAYERS
         self.bert_dropout = None
-        self.birnn_ner = None
 
     def _build_ner_head(self):
         self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
 
         if self.config["model"]["ner"]["use_birnn"]:
-            self.birnn_ner = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
+            self.birnn_bert = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
 
         self.tokens_pair_enc = GraphEncoder(**self.config["model"]["ner"]["biaffine"])
 
@@ -455,16 +387,7 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
         self.ner_labels_ph = tf.placeholder(dtype=tf.int32, shape=[None, 4], name="ner_labels")
 
     def _build_ner_head_fn(self,  bert_out):
-        bert_out = self.bert_dropout(bert_out, training=self.training_ph)
-
-        # pieces -> tokens
-        x = tf.gather_nd(bert_out, self.first_pieces_coords_ph)  # [batch_size, num_tokens, bert_dim]
-
-        if self.birnn_ner is not None:
-            sequence_mask = tf.sequence_mask(self.num_tokens_ph)
-            x = self.birnn_ner(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
-
-        # encoding of pairs
+        x = self._get_token_level_embeddings(bert_out=bert_out)
         inputs = GraphEncoderInputs(head=x, dep=x)
         logits = self.tokens_pair_enc(inputs=inputs, training=self.training_ph)  # [N, num_tok, num_tok, num_entities]
         return logits
@@ -477,10 +400,15 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
         i - start, j - end
         """
         # per example loss
-        no_entity_id = self.config["model"]["ner"]["no_entity_id"]
+        # no_entity_id = self.config["model"]["ner"]["no_entity_id"]
+        assert self.config["model"]["ner"]["no_entity_id"] == 0
         logits_shape = tf.shape(self.ner_logits_train)
-        labels_shape = logits_shape[:3]
-        labels = get_dense_labels_from_indices(indices=self.ner_labels_ph, shape=labels_shape, no_label_id=no_entity_id)
+        # labels_shape = logits_shape[:3]
+        # labels = get_dense_labels_from_indices(indices=self.ner_labels_ph, shape=labels_shape, no_label_id=no_entity_id)
+        # сделано так, чтобы уйти от использования функции get_dense_labels_from_indices
+        labels = tf.scatter_nd(
+            indices=self.ner_labels_ph[:, :-1], updates=self.ner_labels_ph[:, -1], shape=logits_shape[:-1]
+        )  # [batch_size, num_tokens, num_tokens]
         per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
             labels=labels, logits=self.ner_logits_train
         )  # [batch_size, num_tokens, num_tokens]

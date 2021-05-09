@@ -247,6 +247,59 @@ def get_session() -> tf.Session:
     return sess
 
 
+def get_entities_representation(x: tf.Tensor, ner_labels_dense, ff_attn=None) -> Tuple[tf.Tensor, tf.Tensor]:
+    """
+
+    :param x: tf.Tensor of shape [N, T, D]
+    :param ner_labels_dense: tf.Tensor of shape [N, T, T] and type int32
+    :param ff_attn: Callable: ff_attn(x) -> x_new with last dim = 1
+    :return:
+    """
+    # ner labels
+    # x_shape = tf.shape(x)
+    # shape = tf.concat([x_shape[:2], x_shape[1:2]], axis=0)  # [3]
+    # updates = tf.ones_like(self.mention_spans_ph[:, 0])
+    # mention_coords_dense = tf.scatter_nd(indices=self.mention_spans_ph, updates=updates, shape=shape)
+
+    # маскирование
+    mask = upper_triangular(tf.shape(x)[1], dtype=tf.int32)
+    ner_labels_dense_masked = ner_labels_dense * mask[None, :, :]
+
+    # векторизация сущностей
+    no_mention_id = 0
+    span_mask = tf.not_equal(ner_labels_dense_masked, no_mention_id)  # [batch_size, num_tokens, num_tokens]
+    start_coords, end_coords, num_entities = get_padded_coords_3d(mask_3d=span_mask)
+    x_start = tf.gather_nd(x, start_coords)  # [N, num_entities, D]
+    x_end = tf.gather_nd(x, end_coords)  # [N, num_entities, D]
+
+    # attn
+    if ff_attn is not None:
+        grid, sequence_mask_span = get_span_indices(
+            start_ids=start_coords[:, :, 1],
+            end_ids=end_coords[:, :, 1]
+        )  # ([batch_size, num_entities, span_size], [batch_size, num_entities, span_size])
+
+        batch_size = tf.shape(x)[0]
+        x_coord = tf.range(batch_size)[:, None, None, None]  # [batch_size, 1, 1, 1]
+        grid_shape = tf.shape(grid)  # [3]
+        x_coord = tf.tile(x_coord, [1, grid_shape[1], grid_shape[2], 1])  # [batch_size, num_entities, span_size, 1]
+        y_coord = tf.expand_dims(grid, -1)  # [batch_size, num_entities, span_size, 1]
+        coords = tf.concat([x_coord, y_coord], axis=-1)  # [batch_size, num_entities, span_size, 2]
+        x_span = tf.gather_nd(x, coords)  # [batch_size, num_entities, span_size, d_model]
+        w = ff_attn(x_span)  # [batch_size, num_entities, span_size, 1]
+        sequence_mask_span = tf.expand_dims(sequence_mask_span, -1)
+        w += get_additive_mask(sequence_mask_span)  # [batch_size, num_entities, span_size, 1]
+        w = tf.nn.softmax(w, axis=2)  # [batch_size, num_entities, span_size, 1]
+        x_span = tf.reduce_sum(x_span * w, axis=2)  # [batch_size, num_entities, d_model]
+
+        # concat
+        x_entity = tf.concat([x_start, x_end, x_span], axis=-1)  # [batch_size, num_entities, d_model * 3]
+    else:
+        x_entity = tf.concat([x_start, x_end], axis=-1)  # [batch_size, num_entities, d_model * 2]
+
+    return x_entity, num_entities
+
+
 def get_entity_pairs_mask(entity_sent_ids, i, j):
     """
     entity_sent_ids: np.ndarray of shape [num_entities]

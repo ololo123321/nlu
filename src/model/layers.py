@@ -5,13 +5,33 @@ import tensorflow as tf
 class MLP(tf.keras.layers.Layer):
     def __init__(self, num_layers, hidden_dim, activation, dropout):
         super().__init__()
-        self.dense_layers = [tf.keras.layers.Dense(hidden_dim, activation=activation) for _ in range(num_layers)]
+        if isinstance(hidden_dim, int):
+            hidden_dims = [hidden_dim] * num_layers
+        elif isinstance(hidden_dim, list):
+            assert len(hidden_dim) == num_layers
+            hidden_dims = hidden_dim
+        else:
+            raise ValueError(f"expected hidden dims to be int or list, but got {hidden_dim}")
+
+        if isinstance(activation, list):
+            assert len(activation) == num_layers
+            activations = activation
+        else:
+            activations = [activation] * num_layers
+
+        if isinstance(dropout, float):
+            dropouts = [dropout] * num_layers
+        else:
+            dropouts = dropout
+
+        self.dense_layers = []
         self.dropout_layers = []
-        for _ in range(num_layers):
-            if dropout is None or dropout == 0.0:
+        for h, a, d in zip(hidden_dims, activations, dropouts):
+            self.dense_layers.append(tf.keras.layers.Dense(h, activation=a))
+            if d is None or dropout == 0.0:
                 self.dropout_layers.append(None)
             else:
-                self.dropout_layers.append(tf.keras.layers.Dropout(dropout))
+                self.dropout_layers.append(tf.keras.layers.Dropout(d))
 
     def call(self, x: tf.Tensor, training: bool = False):
         for dense, dropout in zip(self.dense_layers, self.dropout_layers):

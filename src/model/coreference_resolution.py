@@ -1,5 +1,5 @@
 import copy
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from abc import abstractmethod
 from collections import defaultdict
 
@@ -10,10 +10,8 @@ from src.data.io import to_conll
 from src.model.base import BaseModel, BaseModelBert, ModeKeys
 from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs, MLP
 from src.model.utils import (
-    upper_triangular,
     get_additive_mask,
-    get_padded_coords_3d,
-    get_span_indices,
+    get_entities_representation,
     get_sent_pairs_to_predict_for
 )
 from src.metrics import get_coreferense_resolution_metrics
@@ -94,8 +92,10 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         """
         super().__init__(sess=sess, config=config)
 
-        self.examples_valid_copy = None
         self.birnn = None
+        self.w = None
+        self.w_dropout = None
+        self.ff_attn = None
 
     def _build_coref_head(self):
         self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
@@ -115,30 +115,45 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
             self.w_dropout = tf.keras.layers.Dropout(self.config["model"]["coref"]["hoi"]["w_dropout"])
 
         if self.config["model"]["coref"]["use_attn"]:
-            self.dense_attn_1 = MLP(num_layers=1, **self.config["model"]["coref"]["attn"])
-            self.dense_attn_2 = MLP(num_layers=1, hidden_dim=1, activation=None, dropout=None)
+            self.ff_attn = MLP(
+                num_layers=2,
+                hidden_dim=[self.config["model"]["coref"]["attn"]["hidden_dim"], 1],
+                activation=[self.config["model"]["coref"]["attn"]["activation"], None],
+                dropout=[self.config["model"]["coref"]["attn"]["dropout"], None]
+            )
 
-        # [batch_size, num_entities, num_entities + 1], [batch_size]
-        self.logits_train, self.num_entities = self._build_coref_head_fn(bert_out=self.bert_out_train)
-        self.logits_inference, _ = self._build_coref_head_fn(bert_out=self.bert_out_pred)
+        x_ent_train, self.num_entities = self._get_entities_representation(bert_out=self.bert_out_train)
+        self.logits_train = self._get_entity_pairs_logits(x_ent_train)
+
+        x_ent_pred, _ = self._get_entities_representation(bert_out=self.bert_out_pred)
+        self.logits_inference = self._get_entity_pairs_logits(x_ent_train)
 
         # argmax
         self.labels_pred = tf.argmax(self.logits_inference, axis=-1)  # [batch_size, num_entities]
 
-    def _build_coref_head_fn(self, bert_out):
-        x, num_entities = self._get_entities_representation(bert_out=bert_out)
+    def _get_entities_representation(self, bert_out: tf.Tensor):
+        x_token = self._get_token_level_embeddings(bert_out=bert_out)
+        x_shape = tf.shape(x_token)
+        shape = tf.concat([x_shape[:2], x_shape[1:2]], axis=0)  # [3]
+        updates = tf.ones_like(self.mention_spans_ph[:, 0])
+        mention_coords_dense = tf.scatter_nd(indices=self.mention_spans_ph, updates=updates, shape=shape)
+        x_entity, num_entities = get_entities_representation(
+            x=x_token, ner_labels_dense=mention_coords_dense, ff_attn=self.ff_attn
+        )
+        return x_entity, num_entities
 
+    def _get_entity_pairs_logits(self, x: tf.Tensor) -> tf.Tensor:
         batch_size = tf.shape(x)[0]
         x_root = tf.tile(self.root_emb, [batch_size, 1])
         x_root = x_root[:, None, :]
 
-        num_entities_inner = num_entities + tf.ones_like(num_entities)
+        num_entities_inner = self.num_entities + tf.ones_like(self.num_entities)
 
         # mask padding
         mask_pad = tf.sequence_mask(num_entities_inner)  # [batch_size, num_entities + 1]
 
         # mask antecedent
-        n = tf.reduce_max(num_entities)
+        n = tf.reduce_max(self.num_entities)
         mask_ant = tf.linalg.band_part(tf.ones((n, n + 1), dtype=tf.bool), -1, 0)  # lower-triangular
 
         mask = tf.logical_and(mask_pad[:, None, :], mask_ant[None, :, :])
@@ -189,74 +204,7 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
 
         _, logits = get_logits(self.entity_pairs_enc, x)
 
-        return logits, num_entities
-
-    def _get_entities_representation(self, bert_out: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-        """
-
-
-        bert_out - [batch_size, num_pieces, bert_dim]
-        ner_labels - [batch_size, num_tokens, num_tokens]
-
-        logits - [batch_size, num_entities_max, bert_bim or cell_dim * 2]
-        num_entities - [batch_size]
-        """
-        # dropout
-        bert_out = self.bert_dropout(bert_out, training=self.training_ph)
-
-        # pieces -> tokens
-        x = tf.gather_nd(bert_out, self.first_pieces_coords_ph)  # [batch_size, num_tokens, bert_dim]
-
-        # birnn
-        if self.birnn is not None:
-            sequence_mask = tf.sequence_mask(self.num_tokens_ph)
-            x = self.birnn(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
-        #     d_model = self.config["model"]["re"]["rnn"]["cell_dim"] * 2
-        # else:
-        #     d_model = self.config["model"]["bert"]["dim"]
-
-        # ner labels
-        x_shape = tf.shape(x)
-        shape = tf.concat([x_shape[:2], x_shape[1:2]], axis=0)  # [3]
-        updates = tf.ones_like(self.mention_spans_ph[:, 0])
-        mention_coords_dense = tf.scatter_nd(indices=self.mention_spans_ph, updates=updates, shape=shape)
-
-        # маскирование
-        mask = upper_triangular(x_shape[1], dtype=tf.int32)
-        mention_coords_dense *= mask[None, :, :]
-
-        # векторизация сущностей
-        no_mention_id = 0
-        span_mask = tf.not_equal(mention_coords_dense, no_mention_id)  # [batch_size, num_tokens, num_tokens]
-        start_coords, end_coords, num_entities = get_padded_coords_3d(mask_3d=span_mask)
-        x_start = tf.gather_nd(x, start_coords)  # [N, num_entities, D]
-        x_end = tf.gather_nd(x, end_coords)  # [N, num_entities, D]
-
-        # attn
-        grid, sequence_mask_span = get_span_indices(
-            start_ids=start_coords[:, :, 1],
-            end_ids=end_coords[:, :, 1]
-        )  # ([batch_size, num_entities, span_size], [batch_size, num_entities, span_size])
-
-        batch_size = tf.shape(x)[0]
-        x_coord = tf.range(batch_size)[:, None, None, None]  # [batch_size, 1, 1, 1]
-        grid_shape = tf.shape(grid)  # [3]
-        x_coord = tf.tile(x_coord, [1, grid_shape[1], grid_shape[2], 1])  # [batch_size, num_entities, span_size, 1]
-        y_coord = tf.expand_dims(grid, -1)  # [batch_size, num_entities, span_size, 1]
-        coords = tf.concat([x_coord, y_coord], axis=-1)  # [batch_size, num_entities, span_size, 2]
-        x_span = tf.gather_nd(x, coords)  # [batch_size, num_entities, span_size, d_model]
-        # print(x_span)
-        w = self.dense_attn_1(x_span)  # [batch_size, num_entities, span_size, H]
-        w = self.dense_attn_2(w)  # [batch_size, num_entities, span_size, 1]
-        sequence_mask_span = tf.expand_dims(sequence_mask_span, -1)
-        w += get_additive_mask(sequence_mask_span)  # [batch_size, num_entities, span_size, 1]
-        w = tf.nn.softmax(w, axis=2)  # [batch_size, num_entities, span_size, 1]
-        x_span = tf.reduce_sum(x_span * w, axis=2)  # [batch_size, num_entities, d_model]
-
-        # concat
-        x_entity = tf.concat([x_start, x_end, x_span], axis=-1)  # [batch_size, num_entities, d_model * 3]
-
-        return x_entity, num_entities
+        return logits
 
     def _set_placeholders(self):
         super()._set_placeholders()
@@ -501,9 +449,7 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
 
     # TODO: много копипасты из predict
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
-        # if self.examples_valid_copy is None:
-        #     self.examples_valid_copy = copy.deepcopy(examples)
-        self.examples_valid_copy = copy.deepcopy(examples)
+        examples_valid_copy = copy.deepcopy(examples)
 
         # проверка примеров
         chunks = []
@@ -612,7 +558,7 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
 
         # присвоение id_chain
         support = 0
-        for x in self.examples_valid_copy:
+        for x in examples_valid_copy:
             id2entity = {}
             g = {}
             for entity in x.entities:
@@ -640,7 +586,7 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
         # print("denominator:", loss_denominator)
 
         to_conll(examples=examples, path=self.config["valid"]["path_true"])
-        to_conll(examples=self.examples_valid_copy, path=self.config["valid"]["path_pred"])
+        to_conll(examples=examples_valid_copy, path=self.config["valid"]["path_pred"])
 
         metrics = {}
         for metric in ["muc", "bcub", "ceafm", "ceafe", "blanc"]:
@@ -813,9 +759,7 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
 
     # TODO: много копипасты из predict
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
-        # if self.examples_valid_copy is None:
-        #     self.examples_valid_copy = copy.deepcopy(examples)
-        self.examples_valid_copy = copy.deepcopy(examples)  # в случае смены примеров логика выше будет неверна
+        examples_valid_copy = copy.deepcopy(examples)  # в случае смены примеров логика выше будет неверна
 
         # проверка примеров
         chunks = []
@@ -899,7 +843,7 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
                                 head2dep[key_head] = {"dep": dep.id, "score": score}
 
         # присвоение id_chain
-        for x in self.examples_valid_copy:
+        for x in examples_valid_copy:
             id2entity = {}
             g = {}
             for entity in x.entities:
@@ -923,7 +867,7 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
         loss = total_loss / loss_denominator
 
         to_conll(examples=examples, path=self.config["valid"]["path_true"])
-        to_conll(examples=self.examples_valid_copy, path=self.config["valid"]["path_pred"])
+        to_conll(examples=examples_valid_copy, path=self.config["valid"]["path_pred"])
 
         metrics = {}
         for metric in ["muc", "bcub", "ceafm", "ceafe", "blanc"]:
