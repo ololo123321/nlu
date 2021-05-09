@@ -88,6 +88,12 @@ def get_padded_coords_3d(mask_3d: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor, tf.T
 
     start_coords = tf.concat([x_coord[:, :, None], y_coord_start[:, :, None]], axis=-1)
     end_coords = tf.concat([x_coord[:, :, None], y_coord_end[:, :, None]], axis=-1)
+
+    # фейковые координаты в случае отсутствия сущностей
+    coords_dummy = tf.zeros([batch_size, 1, 2], dtype=tf.int32)
+    cond = tf.equal(tf.reduce_max(num_entities), 0)
+    start_coords = tf.cond(cond, true_fn=lambda: coords_dummy, false_fn=lambda: start_coords)
+    end_coords = tf.cond(cond, true_fn=lambda: coords_dummy, false_fn=lambda: end_coords)
     return start_coords, end_coords, num_entities
 
 
@@ -247,23 +253,34 @@ def get_session() -> tf.Session:
     return sess
 
 
-def get_entities_representation(x: tf.Tensor, ner_labels_dense, ff_attn=None) -> Tuple[tf.Tensor, tf.Tensor]:
+def get_entities_representation(
+        x: tf.Tensor,
+        ner_labels: tf.Tensor,
+        sparse_labels: bool,
+        ff_attn=None
+) -> Tuple[tf.Tensor, tf.Tensor]:
     """
-
+    векторизация сущностей как конкатенация трёх векторов:
+    * вектор первого токена сущности
+    * вектор последнего токена сущности
+    * взвешенный эмбеддинг всех токенов сущности
     :param x: tf.Tensor of shape [N, T, D]
-    :param ner_labels_dense: tf.Tensor of shape [N, T, T] and type int32
+    :param ner_labels: if sparse_labels: [num_entities_total, 4] and type int32, else: tf.Tensor of shape [N, T, T] and type int32
+    :param sparse_labels
     :param ff_attn: Callable: ff_attn(x) -> x_new with last dim = 1
     :return:
     """
-    # ner labels
-    # x_shape = tf.shape(x)
-    # shape = tf.concat([x_shape[:2], x_shape[1:2]], axis=0)  # [3]
-    # updates = tf.ones_like(self.mention_spans_ph[:, 0])
-    # mention_coords_dense = tf.scatter_nd(indices=self.mention_spans_ph, updates=updates, shape=shape)
+
+    if sparse_labels:
+        indices = ner_labels[:, :-1]
+        updates = ner_labels[:, -1]
+        x_shape = tf.shape(x)
+        labels_shape = tf.concat([x_shape[:2], x_shape[1:2]], axis=0)  # [3], N, T, T
+        ner_labels = tf.scatter_nd(indices=indices, updates=updates, shape=labels_shape)
 
     # маскирование
     mask = upper_triangular(tf.shape(x)[1], dtype=tf.int32)
-    ner_labels_dense_masked = ner_labels_dense * mask[None, :, :]
+    ner_labels_dense_masked = ner_labels * mask[None, :, :]
 
     # векторизация сущностей
     no_mention_id = 0

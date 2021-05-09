@@ -1,3 +1,4 @@
+from typing import Tuple
 from collections import namedtuple
 import tensorflow as tf
 

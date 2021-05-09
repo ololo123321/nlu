@@ -436,8 +436,8 @@ class BaseModelBert(BaseModel):
 
     def _set_layers(self):
         self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
-        if self.config["model"]["ner"]["use_birnn"]:
-            self.birnn_bert = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
+        if self.config["model"]["birnn"]["use"]:
+            self.birnn_bert = StackedBiRNN(**self.config["model"]["birnn"]["params"])
 
     def _actual_name_to_checkpoint_name(self, name: str) -> str:
         bert_scope = self.config["model"]["bert"]["scope"]
@@ -559,17 +559,21 @@ class BaseModelNER(BaseModel):
             self._inv_ner_enc = {v: k for k, v in ner_enc.items()}
 
 
-class BaseModelRelationExtraction(BaseModel):
+class BaseModelRelationExtraction(BaseModelNER):
     """
     сущности уже известны. требуется найти отношения между ними
+    наследуется от BaseModelNER, потому что ner_enc тоже нужен для возмонжости использовать в модели лейблы сущностей
     """
     re_scope = "re"
 
-    def __init__(self, sess, config: Dict = None, re_enc: Dict = None):
+    def __init__(self, sess, config: Dict = None, ner_enc: Dict = None, re_enc: Dict = None):
         super().__init__(sess=sess, config=config)
+        self._ner_enc = None
+        self._inv_ner_enc = None
+        self.ner_enc = ner_enc
+
         self._re_enc = None
         self._inv_re_enc = None
-
         self.re_enc = re_enc
 
         self.ner_labels_ph = None
@@ -580,14 +584,19 @@ class BaseModelRelationExtraction(BaseModel):
             self._build_re_head()
 
     def save_config(self, model_dir: str):
+        assert self.ner_enc is not None
         assert self.re_enc is not None
         super().save_config(model_dir=model_dir)
+        with open(os.path.join(model_dir, "ner_enc.json"), "w") as f:
+            json.dump(self.ner_enc, f, indent=4)
         with open(os.path.join(model_dir, "re_enc.json"), "w") as f:
             json.dump(self.re_enc, f, indent=4)
 
     @classmethod
     def load(cls, sess: tf.Session, model_dir: str, scope_to_load: str = None, mode: str = ModeKeys.TEST):
         model = super().load(sess=sess, model_dir=model_dir, scope_to_load=scope_to_load, mode=mode)
+        with open(os.path.join(model_dir, "ner_enc.json")) as f:
+            model.ner_enc = json.load(f)
         with open(os.path.join(model_dir, "re_enc.json")) as f:
             model.re_enc = json.load(f)
         return model
@@ -614,14 +623,12 @@ class BaseModelRelationExtraction(BaseModel):
 # лучше делать отдельный класс под joint модели (ner + re, mentions + coreference),
 # потому что тогда будет единообразная логика инференса:
 # например, для инференса модели re нужны истинные ner-лейблы, а для инференса модели ner + re - нет.
-class BaseModelRelationExtractionEnd2End(BaseModelNER, BaseModelRelationExtraction):
+class BaseModelRelationExtractionEnd2End(BaseModelRelationExtraction):
     """
     требуется найти сущности и отношения между ними
     """
     def __init__(self, sess, config: Dict = None, ner_enc: Dict = None, re_enc: Dict = None):
-        super().__init__(sess=sess, config=config)
-        self.ner_enc = ner_enc
-        self.re_enc = re_enc
+        super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
 
     def _build_graph(self):
         self._build_embedder()
@@ -629,23 +636,6 @@ class BaseModelRelationExtractionEnd2End(BaseModelNER, BaseModelRelationExtracti
             self._build_ner_head()
         with tf.variable_scope(self.re_scope):
             self._build_re_head()
-
-    def save_config(self, model_dir: str):
-        assert self.re_enc is not None
-        super().save_config(model_dir=model_dir)
-        with open(os.path.join(model_dir, "ner_enc.json"), "w") as f:
-            json.dump(self.ner_enc, f, indent=4)
-        with open(os.path.join(model_dir, "re_enc.json"), "w") as f:
-            json.dump(self.re_enc, f, indent=4)
-
-    @classmethod
-    def load(cls, sess: tf.Session, model_dir: str, scope_to_load: str = None, mode: str = ModeKeys.TEST):
-        model = super().load(sess=sess, model_dir=model_dir, scope_to_load=scope_to_load, mode=mode)
-        with open(os.path.join(model_dir, "ner_enc.json")) as f:
-            model.ner_enc = json.load(f)
-        with open(os.path.join(model_dir, "re_enc.json")) as f:
-            model.re_enc = json.load(f)
-        return model
 
 
 class BaseModeDependencyParsing(BaseModel):

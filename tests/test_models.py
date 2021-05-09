@@ -50,6 +50,10 @@ common_config = {
             "params": {
                 "hidden_size": 16
             }
+        },
+        "birnn": {
+            "use": False,
+            "params": {}
         }
     },
     "training": {

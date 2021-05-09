@@ -130,12 +130,10 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
 
     def _get_entities_representation(self, bert_out: tf.Tensor):
         x_token = self._get_token_level_embeddings(bert_out=bert_out)
-        x_shape = tf.shape(x_token)
-        shape = tf.concat([x_shape[:2], x_shape[1:2]], axis=0)  # [3]
-        updates = tf.ones_like(self.mention_spans_ph[:, 0])
-        mention_coords_dense = tf.scatter_nd(indices=self.mention_spans_ph, updates=updates, shape=shape)
+        updates = tf.ones_like(self.mention_spans_ph[:, :1])
+        ner_labels = tf.concat([self.mention_spans_ph, updates], axis=1)
         x_entity, num_entities = get_entities_representation(
-            x=x_token, ner_labels_dense=mention_coords_dense, ff_attn=self.ff_attn
+            x=x_token, ner_labels=ner_labels, sparse_labels=True, ff_attn=self.ff_attn
         )
         return x_entity, num_entities
 
