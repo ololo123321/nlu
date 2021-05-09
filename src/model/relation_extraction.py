@@ -77,6 +77,11 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
         x, num_entities = get_entities_representation(
             x=x, ner_labels=self.ner_labels_ph, sparse_labels=True, ff_attn=None
         )  # [batch_size, num_ent, D * 3]
+
+        # TODO: merge ent_emb here. try two options:
+        #  1. add
+        #  2. concat (с меньшей размерностью. аналогия с векторизацией в корефе (lee et.al))
+
         inputs = GraphEncoderInputs(head=x, dep=x)
         logits = self.entity_pairs_enc(inputs, training=self.training_ph)  # [batch_size, num_ent, num_ent, num_rel]
         return logits, num_entities
@@ -210,3 +215,26 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
     # TODO
     def predict(self, examples: List[Example], **kwargs) -> None:
         pass
+
+
+class BertForRelationExtractionDroppedEntities:
+    """
+    векторизация сущностей: entity_label_emb
+    """
+    pass
+
+
+class BertForNerAsSequenceLabelingAndRelationExtraction:
+    """
+    требуется найти и сущности, и отношения между ними.
+    векторизация сущностей: start + entity_label_emb
+    """
+    pass
+
+
+class BertForNerAsDependencyParsingAndRelationExtraction:
+    """
+    требуется найти и сущности, и отношения между ними.
+    векторизация сущностей: [start, end, attn]
+    """
+    pass

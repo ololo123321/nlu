@@ -583,6 +583,10 @@ class BaseModelRelationExtraction(BaseModelNER):
         with tf.variable_scope(self.re_scope):
             self._build_re_head()
 
+    # TODO: костыль
+    def _build_ner_head(self):
+        pass
+
     def save_config(self, model_dir: str):
         assert self.ner_enc is not None
         assert self.re_enc is not None
