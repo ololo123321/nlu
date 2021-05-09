@@ -347,7 +347,7 @@ pairs_5_3 = list(zip(*np.where(grid_5 == 3)))
 
 # TODO: протестировать!
 def get_sent_pairs_to_predict_for(end: int, is_first: bool, is_last: bool, window: int) -> List[Tuple]:
-    assert 0 <= end < window, end
+    assert 0 <= end < window, f"end: {end}, window: {window}, is_first: {is_first}, is_last: {is_last}"
 
     if window == 1:
         return [(0, 0)]

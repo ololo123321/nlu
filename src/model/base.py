@@ -13,6 +13,7 @@ from bert.optimization import create_optimizer
 
 from src.data.base import Example
 from src.utils import train_test_split, get_filtered_by_length_chunks
+from src.model.layers import StackedBiRNN
 
 
 class ModeKeys:
@@ -85,6 +86,10 @@ class BaseModel(ABC):
         pass
 
     @abstractmethod
+    def _set_layers(self):
+        pass
+
+    @abstractmethod
     def _set_loss(self, *args, **kwargs):
         pass
 
@@ -130,6 +135,7 @@ class BaseModel(ABC):
     def build(self, mode: str = ModeKeys.TRAIN):
         self._set_placeholders()
         with tf.variable_scope(self.model_scope):
+            self._set_layers()
             self._build_graph()
             if mode != ModeKeys.TEST:
                 self._set_loss()
@@ -428,6 +434,11 @@ class BaseModelBert(BaseModel):
                 x = model.get_sequence_output()
             return x
 
+    def _set_layers(self):
+        self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
+        if self.config["model"]["ner"]["use_birnn"]:
+            self.birnn_bert = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
+
     def _actual_name_to_checkpoint_name(self, name: str) -> str:
         bert_scope = self.config["model"]["bert"]["scope"]
         prefix = f"{self.model_scope}/{bert_scope}/"
@@ -634,4 +645,69 @@ class BaseModelRelationExtractionEnd2End(BaseModelNER, BaseModelRelationExtracti
             model.ner_enc = json.load(f)
         with open(os.path.join(model_dir, "re_enc.json")) as f:
             model.re_enc = json.load(f)
+        return model
+
+
+class BaseModeDependencyParsing(BaseModel):
+    dep_scope = "dependency_parser"
+
+    def __init__(self, sess: tf.Session = None, config: Dict = None, rel_enc: Dict = None):
+        super().__init__(sess=sess, config=config)
+
+        # PLACEHOLDERS
+        self.labels_ph = None  # [id_example, id_head, id_dep, id_rel]
+
+        # LAYERS
+        self.birnn = None
+        self.arc_enc = None
+        self.type_enc = None
+
+        # TENSORS
+        self.logits_arc_train = None
+        self.logits_type_train = None
+        self.s_arc = None
+        self.type_labels_pred = None
+        # for debug:
+        self.total_loss_arc = None
+        self.total_loss_type = None
+
+        self._rel_enc = None
+        self._inv_rel_enc = None
+
+        self.rel_enc = rel_enc
+
+    def _build_graph(self):
+        self._build_embedder()
+        with tf.variable_scope(self.dep_scope):
+            self._build_dependency_parser()
+
+    @abstractmethod
+    def _build_dependency_parser(self):
+        pass
+
+    @property
+    def rel_enc(self):
+        return self._rel_enc
+
+    @property
+    def inv_rel_enc(self):
+        return self._inv_rel_enc
+
+    @rel_enc.setter
+    def rel_enc(self, rel_enc: Dict):
+        self._rel_enc = rel_enc
+        if rel_enc is not None:
+            self._inv_rel_enc = {v: k for k, v in rel_enc.items()}
+
+    def save_config(self, model_dir: str):
+        assert self.rel_enc is not None
+        super().save_config(model_dir=model_dir)
+        with open(os.path.join(model_dir, "rel_enc.json"), "w") as f:
+            json.dump(self.rel_enc, f, indent=4)
+
+    @classmethod
+    def load(cls, sess: tf.Session, model_dir: str, scope_to_load: str = None, mode: str = ModeKeys.TEST):
+        model = super().load(sess=sess, model_dir=model_dir, scope_to_load=scope_to_load, mode=mode)
+        with open(os.path.join(model_dir, "rel_enc.json")) as f:
+            model.rel_enc = json.load(f)
         return model

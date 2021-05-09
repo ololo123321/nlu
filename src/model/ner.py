@@ -7,13 +7,10 @@ import numpy as np
 from src.data.base import Example, Entity
 from src.data.postprocessing import get_valid_spans
 from src.model.base import BaseModelNER, BaseModelBert, ModeKeys
-from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs
+from src.model.layers import GraphEncoder, GraphEncoderInputs
 from src.model.utils import upper_triangular
 from src.metrics import classification_report, classification_report_ner
 from src.utils import get_entity_spans, batches_gen, get_filtered_by_length_chunks
-
-
-__all__ = ["BertForFlatNER", "BertForNestedNER"]
 
 
 class BertForFlatNER(BaseModelNER, BaseModelBert):
@@ -81,15 +78,12 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         self.dense_ner_labels = None
 
     def _build_ner_head(self):
-        self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
-
-        if self.config["model"]["ner"]["use_birnn"]:
-            self.birnn_bert = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
-
-        self.dense_ner_labels = tf.keras.layers.Dense(self.config["model"]["ner"]["num_labels"])
-
         self.ner_logits_train, _, self.transition_params = self._build_ner_head_fn(bert_out=self.bert_out_train)
         _, self.ner_preds_inference, _ = self._build_ner_head_fn(bert_out=self.bert_out_pred)
+
+    def _set_layers(self):
+        super()._set_layers()
+        self.dense_ner_labels = tf.keras.layers.Dense(self.config["model"]["ner"]["num_labels"])
 
     # TODO: профилирование!!!
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
@@ -371,13 +365,6 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
         self.bert_dropout = None
 
     def _build_ner_head(self):
-        self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
-
-        if self.config["model"]["ner"]["use_birnn"]:
-            self.birnn_bert = StackedBiRNN(**self.config["model"]["ner"]["rnn"])
-
-        self.tokens_pair_enc = GraphEncoder(**self.config["model"]["ner"]["biaffine"])
-
         self.ner_logits_train = self._build_ner_head_fn(bert_out=self.bert_out_train)
         self.ner_logits_inference = self._build_ner_head_fn(bert_out=self.bert_out_pred)
 
@@ -385,6 +372,10 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
         super()._set_placeholders()
         # [id_example, start, end, label]
         self.ner_labels_ph = tf.placeholder(dtype=tf.int32, shape=[None, 4], name="ner_labels")
+
+    def _set_layers(self):
+        super()._set_layers()
+        self.tokens_pair_enc = GraphEncoder(**self.config["model"]["ner"]["biaffine"])
 
     def _build_ner_head_fn(self,  bert_out):
         x = self._get_token_level_embeddings(bert_out=bert_out)

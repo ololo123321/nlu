@@ -1,81 +1,13 @@
-import os
-import json
-from abc import abstractmethod
 from typing import Dict, List
 
 import tensorflow as tf
 import numpy as np
 
-from src.model.base import BaseModel, BaseModelBert, ModeKeys
-from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs
+from src.model.base import BaseModeDependencyParsing, BaseModelBert, ModeKeys
+from src.model.layers import GraphEncoder, GraphEncoderInputs
 from src.model.utils import get_additive_mask
 from src.data.base import Example
 from src.utils import batches_gen, mst, get_filtered_by_length_chunks
-
-
-class BaseModeDependencyParsing(BaseModel):
-    dep_scope = "dependency_parser"
-
-    def __init__(self, sess: tf.Session = None, config: Dict = None, rel_enc: Dict = None):
-        super().__init__(sess=sess, config=config)
-
-        # PLACEHOLDERS
-        self.labels_ph = None  # [id_example, id_head, id_dep, id_rel]
-
-        # LAYERS
-        self.birnn = None
-        self.arc_enc = None
-        self.type_enc = None
-
-        # TENSORS
-        self.logits_arc_train = None
-        self.logits_type_train = None
-        self.s_arc = None
-        self.type_labels_pred = None
-        # for debug:
-        self.total_loss_arc = None
-        self.total_loss_type = None
-
-        self._rel_enc = None
-        self._inv_rel_enc = None
-
-        self.rel_enc = rel_enc
-
-    def _build_graph(self):
-        self._build_embedder()
-        with tf.variable_scope(self.dep_scope):
-            self._build_dependency_parser()
-
-    @abstractmethod
-    def _build_dependency_parser(self):
-        pass
-
-    @property
-    def rel_enc(self):
-        return self._rel_enc
-
-    @property
-    def inv_rel_enc(self):
-        return self._inv_rel_enc
-
-    @rel_enc.setter
-    def rel_enc(self, rel_enc: Dict):
-        self._rel_enc = rel_enc
-        if rel_enc is not None:
-            self._inv_rel_enc = {v: k for k, v in rel_enc.items()}
-
-    def save_config(self, model_dir: str):
-        assert self.rel_enc is not None
-        super().save_config(model_dir=model_dir)
-        with open(os.path.join(model_dir, "rel_enc.json"), "w") as f:
-            json.dump(self.rel_enc, f, indent=4)
-
-    @classmethod
-    def load(cls, sess: tf.Session, model_dir: str, scope_to_load: str = None, mode: str = ModeKeys.TEST):
-        model = super().load(sess=sess, model_dir=model_dir, scope_to_load=scope_to_load, mode=mode)
-        with open(os.path.join(model_dir, "rel_enc.json")) as f:
-            model.rel_enc = json.load(f)
-        return model
 
 
 class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
@@ -83,21 +15,19 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         super().__init__(sess=sess, config=config, rel_enc=rel_enc)
 
     def _build_dependency_parser(self):
-        self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
-
-        if self.config["model"]["parser"]["use_birnn"]:
-            self.birnn = StackedBiRNN(**self.config["model"]["parser"]["rnn"])
-
-        with tf.variable_scope("arc_encoder"):
-            self.arc_enc = GraphEncoder(**self.config["model"]["parser"]["biaffine_arc"])
-        with tf.variable_scope("type_encoder"):
-            self.type_enc = GraphEncoder(**self.config["model"]["parser"]["biaffine_type"])
-
         self.logits_arc_train, self.logits_type_train = self._build_dependency_parser_fn(bert_out=self.bert_out_train)
         logits_arc_pred, logits_type_pred = self._build_dependency_parser_fn(bert_out=self.bert_out_pred)
 
         self.s_arc = tf.nn.softmax(logits_arc_pred, axis=-1)  # [N, T, T + 1]
         self.type_labels_pred = tf.argmax(logits_type_pred, axis=-1)  # [N, T, T + 1]
+
+    def _set_layers(self):
+        super()._set_layers()
+
+        with tf.variable_scope("arc_encoder"):
+            self.arc_enc = GraphEncoder(**self.config["model"]["parser"]["biaffine_arc"])
+        with tf.variable_scope("type_encoder"):
+            self.type_enc = GraphEncoder(**self.config["model"]["parser"]["biaffine_type"])
 
     def _build_dependency_parser_fn(self, bert_out: tf.Tensor):
         bert_out = self.bert_dropout(bert_out, training=self.training_ph)

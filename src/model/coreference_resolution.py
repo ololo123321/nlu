@@ -8,7 +8,7 @@ import tensorflow as tf
 from src.data.base import Example, Arc
 from src.data.io import to_conll
 from src.model.base import BaseModel, BaseModelBert, ModeKeys
-from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs, MLP
+from src.model.layers import GraphEncoder, GraphEncoderInputs, MLP
 from src.model.utils import (
     get_additive_mask,
     get_entities_representation,
@@ -98,10 +98,16 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         self.ff_attn = None
 
     def _build_coref_head(self):
-        self.bert_dropout = tf.keras.layers.Dropout(self.config["model"]["bert"]["dropout"])
+        x_ent_train, self.num_entities = self._get_entities_representation(bert_out=self.bert_out_train)
+        self.logits_train = self._get_entity_pairs_logits(x_ent_train)
+        x_ent_pred, _ = self._get_entities_representation(bert_out=self.bert_out_pred)
+        self.logits_inference = self._get_entity_pairs_logits(x_ent_train)
+        self.labels_pred = tf.argmax(self.logits_inference, axis=-1)  # [batch_size, num_entities]
+
+    def _set_layers(self):
+        super()._set_layers()
 
         if self.config["model"]["coref"]["use_birnn"]:
-            self.birnn = StackedBiRNN(**self.config["model"]["coref"]["rnn"])
             emb_dim = self.config["model"]["coref"]["rnn"]["cell_dim"] * 2
         else:
             emb_dim = self.config["model"]["bert"]["params"]["hidden_size"]
@@ -121,15 +127,6 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
                 activation=[self.config["model"]["coref"]["attn"]["activation"], None],
                 dropout=[self.config["model"]["coref"]["attn"]["dropout"], None]
             )
-
-        x_ent_train, self.num_entities = self._get_entities_representation(bert_out=self.bert_out_train)
-        self.logits_train = self._get_entity_pairs_logits(x_ent_train)
-
-        x_ent_pred, _ = self._get_entities_representation(bert_out=self.bert_out_pred)
-        self.logits_inference = self._get_entity_pairs_logits(x_ent_train)
-
-        # argmax
-        self.labels_pred = tf.argmax(self.logits_inference, axis=-1)  # [batch_size, num_entities]
 
     def _get_entities_representation(self, bert_out: tf.Tensor):
         x_token = self._get_token_level_embeddings(bert_out=bert_out)
