@@ -2,6 +2,9 @@ from src.data.base import Example
 
 
 def check_tokens(example: Example):
+    for i, t in enumerate(example.tokens):
+        assert t.index_rel == i, f"[{example.id}] token ids rel: {[t.index_rel for t in example.tokens]}"
+
     # число токенов сущности больше нуля
     entity_ids = set()
     for entity in example.entities:

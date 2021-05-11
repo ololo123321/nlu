@@ -75,7 +75,7 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
             self.entity_emb_dropout = tf.keras.layers.Dropout(params["dropout"])
 
     def _build_re_head_fn(self,  bert_out):
-        x = self._get_token_level_embeddings(bert_out=bert_out)  # [batch_size, num_tokens, D]
+        x = self._get_token_level_embeddings(bert_out=bert_out)  # [batch_size, num_tokens, d_bert]
 
         # entity embeddings
         x, num_entities = get_entities_representation(
@@ -87,6 +87,7 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
         return logits, num_entities
 
     def _entity_emb_fn(self, x):
+        assert self.entity_emb is not None
         x = self.entity_emb(x)
         x = self.entity_emb_dropout(x, training=self.training_ph)
         return x

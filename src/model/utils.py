@@ -300,17 +300,17 @@ def get_entities_representation(
     :param entity_emb_layer: Callable: entity_emb_layer(x) -> y; x - [N, T], int32; y - [N, T, D], float32
     :return:
     """
+    x_shape = tf.shape(x)
 
     if sparse_labels:
         indices = ner_labels[:, :-1]
         updates = ner_labels[:, -1]
-        x_shape = tf.shape(x)
         labels_shape = tf.concat([x_shape[:2], x_shape[1:2]], axis=0)  # [3], N, T, T
         ner_labels = tf.scatter_nd(indices=indices, updates=updates, shape=labels_shape)  # [N, T, T]
 
     # маскирование
-    mask = upper_triangular(tf.shape(x)[1], dtype=tf.int32)  # [N, T]
-    ner_labels_dense_masked = ner_labels * mask[None, :, :]
+    mask = upper_triangular(x_shape[1], dtype=tf.int32)  # [T, T]
+    ner_labels_dense_masked = ner_labels * mask[None, :, :]  # [N, T, T]
 
     # векторизация сущностей
     features = []
@@ -331,8 +331,7 @@ def get_entities_representation(
             end_ids=end_coords[:, :, 1]
         )  # ([batch_size, num_entities, span_size], [batch_size, num_entities, span_size])
 
-        batch_size = tf.shape(x)[0]
-        x_coord = tf.range(batch_size)[:, None, None, None]  # [batch_size, 1, 1, 1]
+        x_coord = tf.range(x_shape[0])[:, None, None, None]  # [batch_size, 1, 1, 1]
         grid_shape = tf.shape(grid)  # [3]
         x_coord = tf.tile(x_coord, [1, grid_shape[1], grid_shape[2], 1])  # [batch_size, num_entities, span_size, 1]
         y_coord = tf.expand_dims(grid, -1)  # [batch_size, num_entities, span_size, 1]
@@ -347,7 +346,7 @@ def get_entities_representation(
 
     # meta
     if entity_emb_layer is not None:
-        entity_coords = tf.concat([start_coords, end_coords[:, :, -1:]], axis=-1)  # [batch_size, num_entities, 2]
+        entity_coords = tf.concat([start_coords, end_coords[:, :, -1:]], axis=-1)  # [batch_size, num_entities, 3]
         ner_labels_2d = tf.gather_nd(ner_labels, entity_coords)  # [batch_size, num_entities]
         ner_labels_2d *= tf.sequence_mask(num_entities, dtype=tf.int32)  # [batch_size, num_entities]
         x_emb = entity_emb_layer(ner_labels_2d)  # [batch_size, num_entities, d_emb]

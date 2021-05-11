@@ -212,6 +212,7 @@ def split_example_v2(
             # )
             t_copy = t.copy
             t_copy.span_rel = Span(start=t.span_abs.start - offset, end=t.span_abs.end - offset)
+            t_copy.index_rel = j
             tokens.append(t_copy)
             token_assignment_map[t] = t_copy
 
