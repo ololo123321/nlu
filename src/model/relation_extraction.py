@@ -20,22 +20,13 @@ from src.utils import get_entity_spans, batches_gen, get_filtered_by_length_chun
 # [start, end, attn]
 # start + entity_label_emb
 
-# if self.config["model"]["re"]["use_entity_emb"]:
-#     num_labels = self.config["model"]["re"]["num_labels"]
-#     if self.config["model"]["birnn"]["use"]:
-#         emb_dim = self.config["model"]["birnn"]["params"]["cell_dim"] * 2
-#     else:
-#         emb_dim = self.config["model"]["bert"]["params"]["hidden_size"]
-#     self.entity_emb = tf.keras.layers.Embedding(num_labels, emb_dim * 3)
-#     if self.config["model"]["re"]["use_entity_emb_layer_norm"]:
-#         self.ner_emb_layer_norm = tf.keras.layers.LayerNormalization()
-#     self.entity_emb_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["entity_emb_dropout"])
-
 
 class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
     """
     сущности известны в виде [start, end, label]
-    TODO: entity embeddings (code above)
+    так как сущности уже известны, они подаются в модель в виде четвёрок (i, start, end, label),
+    где i - номер примера.
+    TODO: использовать лейблы сущностей при векторизации.
     """
     def __init__(self, sess: tf.Session = None, config: Dict = None, ner_enc: Dict = None, re_enc: Dict = None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
@@ -67,20 +58,36 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
         self.re_labels_ph = tf.placeholder(tf.int32, shape=[None, 4], name="re_labels")  # [i, id_head, id_dep, label]
 
     def _set_layers(self):
+        """
+        {
+            "entity_emb": {
+                "use": True,
+                "params": {
+                    "dim": 16,  # в lee et. al. использовали размерность 20: https://github.com/kentonl/e2e-coref/blob/9d1ee1972f6e34eb5d1dcbb1fd9b9efdf53fc298/experiments.conf#L42
+                    "num_labels": 10,
+                    "merge_mode": "concat"  # {"add", "concat"},
+                    "dropout": 0.3
+                }
+            }
+        }
+        :return:
+        """
         super()._set_layers()
         self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
+
+        if self.config["model"]["re"]["entity_emb"]["use"]:
+            num_labels = self.config["model"]["re"]["entity_emb"]["params"]["num_labels"]
+            emb_dim = self.config["model"]["re"]["entity_emb"]["params"]["dim"]
+            self.entity_emb = tf.keras.layers.Embedding(num_labels, emb_dim)
+            self.entity_emb_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["entity_emb"]["params"]["dropout"])
 
     def _build_re_head_fn(self,  bert_out):
         x = self._get_token_level_embeddings(bert_out=bert_out)  # [batch_size, num_tokens, D]
 
         # entity embeddings
         x, num_entities = get_entities_representation(
-            x=x, ner_labels=self.ner_labels_ph, sparse_labels=True, ff_attn=None
+            x=x, ner_labels=self.ner_labels_ph, sparse_labels=True, ff_attn=None, entity_emb_layer=self.entity_emb
         )  # [batch_size, num_ent, D * 3]
-
-        # TODO: merge ent_emb here. try two options:
-        #  1. add
-        #  2. concat (с меньшей размерностью. аналогия с векторизацией в корефе (lee et.al))
 
         inputs = GraphEncoderInputs(head=x, dep=x)
         logits = self.entity_pairs_enc(inputs, training=self.training_ph)  # [batch_size, num_ent, num_ent, num_rel]
