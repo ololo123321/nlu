@@ -1,13 +1,12 @@
 import copy
 from typing import Dict, List
-from abc import abstractmethod
 from collections import defaultdict
 
 import tensorflow as tf
 
 from src.data.base import Example, Arc
 from src.data.io import to_conll
-from src.model.base import BaseModel, BaseModelBert, ModeKeys
+from src.model.base import BaseModeCoreferenceResolution, BaseModelBert, ModeKeys
 from src.model.layers import GraphEncoder, GraphEncoderInputs, MLP
 from src.model.utils import (
     get_additive_mask,
@@ -19,36 +18,6 @@ from src.utils import batches_gen, get_connected_components, parse_conll_metrics
 
 
 __all__ = ["BertForCoreferenceResolutionMentionPair", "BertForCoreferenceResolutionMentionRanking"]
-
-
-class BaseModeCoreferenceResolution(BaseModel):
-    coref_scope = "coref"
-    coref_rel = "COREFERENCE"
-
-    def __init__(self, sess: tf.Session = None, config: Dict = None):
-        super().__init__(sess=sess, config=config)
-
-        # PLACEHOLDERS
-        self.mention_spans_ph = None  # [id_example, start, end]
-        self.labels_ph = None  # [id_example, id_anaphora, id_antecedent]
-
-        # LAYERS
-        self.birnn = None
-
-        # TENSORS
-        self.logits_train = None
-        self.logits_inference = None
-        self.total_loss = None
-        self.loss_denominator = None
-
-    def _build_graph(self):
-        self._build_embedder()
-        with tf.variable_scope(self.coref_scope):
-            self._build_coref_head()
-
-    @abstractmethod
-    def _build_coref_head(self):
-        pass
 
 
 # TODO: span size features

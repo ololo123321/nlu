@@ -1,24 +1,15 @@
 from typing import Dict, List
-from itertools import chain
 
 import tensorflow as tf
 import numpy as np
 
-from src.data.base import Example, Entity
+from src.data.base import Example, Entity, Arc
 from src.data.postprocessing import get_valid_spans
 from src.model.base import BaseModelRelationExtraction, BaseModelBert, ModeKeys
 from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs
-from src.model.utils import upper_triangular, get_entities_representation
+from src.model.utils import upper_triangular, get_entities_representation, get_sent_pairs_to_predict_for
 from src.metrics import classification_report, classification_report_ner
 from src.utils import get_entity_spans, batches_gen, get_filtered_by_length_chunks
-
-
-# TODO: реализовать src.utils.get_entity_spans как тф-операцию, чтоб можно было за один форвард пасс
-#  выводить спаны найденных сущностей
-
-# вариенты векторизации сущностей:
-# [start, end, attn]
-# start + entity_label_emb
 
 
 class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
@@ -26,7 +17,8 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
     сущности известны в виде [start, end, label]
     так как сущности уже известны, они подаются в модель в виде четвёрок (i, start, end, label),
     где i - номер примера.
-    TODO: использовать лейблы сущностей при векторизации.
+
+    векторизация сущностей: [start, end, label_emb]
     """
     def __init__(self, sess: tf.Session = None, config: Dict = None, ner_enc: Dict = None, re_enc: Dict = None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc, re_enc=re_enc)
@@ -40,7 +32,7 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
         self.logits_pred = None
         self.num_entities = None
         self.total_loss = None
-        self.loss_denominator = None
+        self.labels_pred = None
 
         # LAYERS
         self.entity_emb = None
@@ -51,6 +43,7 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
     def _build_re_head(self):
         self.logits_train, self.num_entities = self._build_re_head_fn(bert_out=self.bert_out_train)
         self.logits_pred, _ = self._build_re_head_fn(bert_out=self.bert_out_pred)
+        self.labels_pred = tf.argmax(self.logits_pred, axis=-1)
 
     def _set_placeholders(self):
         super()._set_placeholders()
@@ -76,22 +69,27 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
         self.entity_pairs_enc = GraphEncoder(**self.config["model"]["re"]["biaffine"])
 
         if self.config["model"]["re"]["entity_emb"]["use"]:
-            num_labels = self.config["model"]["re"]["entity_emb"]["params"]["num_labels"]
-            emb_dim = self.config["model"]["re"]["entity_emb"]["params"]["dim"]
-            self.entity_emb = tf.keras.layers.Embedding(num_labels, emb_dim)
-            self.entity_emb_dropout = tf.keras.layers.Dropout(self.config["model"]["re"]["entity_emb"]["params"]["dropout"])
+            params = self.config["model"]["re"]["entity_emb"]["params"]
+            assert params["merge_mode"] == "concat"
+            self.entity_emb = tf.keras.layers.Embedding(params["num_labels"], params["dim"])
+            self.entity_emb_dropout = tf.keras.layers.Dropout(params["dropout"])
 
     def _build_re_head_fn(self,  bert_out):
         x = self._get_token_level_embeddings(bert_out=bert_out)  # [batch_size, num_tokens, D]
 
         # entity embeddings
         x, num_entities = get_entities_representation(
-            x=x, ner_labels=self.ner_labels_ph, sparse_labels=True, ff_attn=None, entity_emb_layer=self.entity_emb
+            x=x, ner_labels=self.ner_labels_ph, sparse_labels=True, ff_attn=None, entity_emb_layer=self._entity_emb_fn
         )  # [batch_size, num_ent, D * 3]
 
         inputs = GraphEncoderInputs(head=x, dep=x)
         logits = self.entity_pairs_enc(inputs, training=self.training_ph)  # [batch_size, num_ent, num_ent, num_rel]
         return logits, num_entities
+
+    def _entity_emb_fn(self, x):
+        x = self.entity_emb(x)
+        x = self.entity_emb_dropout(x, training=self.training_ph)
+        return x
 
     def _set_loss(self, *args, **kwargs):
         assert self.config["model"]["re"]["no_relation_id"] == 0
@@ -111,6 +109,7 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
         num_pairs = tf.cast(tf.reduce_sum(self.num_entities ** 2), tf.float32)
         num_pairs = tf.maximum(num_pairs, 1.0)
         self.loss = total_loss / num_pairs
+        self.total_loss = total_loss
 
     def _get_feed_dict(self, examples: List[Example], mode: str) -> Dict:
         assert self.ner_enc is not None
@@ -163,7 +162,7 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
             for entity in x.entities:
                 start = entity.tokens[0].index_rel
                 end = entity.tokens[-1].index_rel
-                label = self.re_enc[entity.label]
+                label = self.ner_enc[entity.label]
                 ner_labels.append((i, start, end, label))
 
             # relations
@@ -192,6 +191,9 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
             segment_ids[i] += [0] * (num_pieces_max - num_pieces[i])
             first_pieces_coords[i] += [(i, 0)] * (num_tokens_max - num_tokens[i])
 
+        if len(ner_labels) == 0:
+            ner_labels.append((0, 0, 0, 0))
+
         training = mode == ModeKeys.TRAIN
 
         d = {
@@ -201,31 +203,159 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
             self.first_pieces_coords_ph: first_pieces_coords,
             self.num_pieces_ph: num_pieces,
             self.num_tokens_ph: num_tokens,
-            self.training_ph: training
+            self.training_ph: training,
+            self.ner_labels_ph: ner_labels
         }
 
         if mode != ModeKeys.TEST:
-            if len(ner_labels) == 0:
-                ner_labels.append((0, 0, 0, 0))
             if len(re_labels) == 0:
                 re_labels.append((0, 0, 0, 0))
 
-            d[self.ner_labels_ph] = ner_labels
             d[self.re_labels_ph] = re_labels
 
         return d
 
-    # TODO
-    def evaluate(self, examples: List[Example], **kwargs) -> Dict:
-        pass
+    def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
+        # проверка примеров
+        chunks = []
+        id_to_num_sentences = {}
+        id2example = {}
+        for x in examples:
+            # assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
+            for chunk in x.chunks:
+                assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
+                    f"It is not a problem, but must be set for clarity"
+                chunks.append(chunk)
+            id_to_num_sentences[x.id] = x.tokens[-1].id_sent + 1
+            id2example[x.id] = x
 
-    # TODO
+        assert len(id2example) == len(examples), f"examples must have unique ids, " \
+            f"but got {len(id2example)} unique ids among {len(examples)} examples"
+
+        y_true = []
+        y_pred = []
+
+        no_rel_id = self.config["model"]["re"]["no_relation_id"]
+        assert no_rel_id == 0
+        no_rel = "O"  # TODO: вынести в конфиг
+
+        loss = 0.0
+        loss_denominator = 0
+
+        gen = batches_gen(
+            examples=chunks,
+            max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
+            pieces_level=True
+        )
+        for batch in gen:
+            feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
+            loss_i, labels_pred = self.sess.run([self.total_loss, self.labels_pred], feed_dict=feed_dict)
+            loss += loss_i
+
+            for i, x in enumerate(batch):
+                num_entities_i = len(x.entities)
+                num_entities_i_squared = num_entities_i ** 2
+                loss_denominator += num_entities_i_squared
+                y_true_i = [no_rel] * num_entities_i_squared
+
+                for arc in x.arcs:
+                    assert arc.head_index is not None
+                    assert arc.dep_index is not None
+                    y_true_i[num_entities_i * arc.head_index + arc.dep_index] = arc.rel
+                y_true += y_true_i
+
+                labels_pred_i = labels_pred[i, :num_entities_i, :num_entities_i]
+                assert labels_pred_i.shape[0] == num_entities_i, f"{labels_pred_i.shape[0]} != {num_entities_i}"
+                assert labels_pred_i.shape[1] == num_entities_i, f"{labels_pred_i.shape[1]} != {num_entities_i}"
+
+                y_pred_i = [no_rel] * num_entities_i_squared
+                for head_index, dep_index in zip(*np.where(labels_pred_i != no_rel_id)):
+                    id_label = labels_pred_i[head_index, dep_index]
+                    y_pred_i[num_entities_i * head_index + dep_index] = self.inv_re_enc[id_label]
+                y_pred += y_pred_i
+
+        loss /= loss_denominator
+        re_metrics = classification_report(y_true=y_true, y_pred=y_pred, trivial_label=no_rel)
+
+        # total
+        performance_info = {
+            "loss": loss,
+            "metrics": re_metrics,
+            "score": re_metrics["micro"]["f1"]
+        }
+        return performance_info
+
     def predict(self, examples: List[Example], **kwargs) -> None:
-        pass
+        # TODO: как-то обработать случай отсутствия сущнсоетй
+
+        # проверка примеров
+        chunks = []
+        id_to_num_sentences = {}
+        id2example = {}
+        for x in examples:
+            assert len(x.arcs) == 0
+            # assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
+            for chunk in x.chunks:
+                assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
+                    f"It is not a problem, but must be set for clarity"
+                chunks.append(chunk)
+            id_to_num_sentences[x.id] = x.tokens[-1].id_sent + 1
+            id2example[x.id] = x
+
+        assert len(id2example) == len(examples), f"examples must have unique ids, " \
+            f"but got {len(id2example)} unique ids among {len(examples)} examples"
+
+        window = self.config["inference"]["window"]
+        no_rel_id = self.config["model"]["re"]["no_relation_id"]
+        assert no_rel_id == 0
+
+        gen = batches_gen(
+            examples=chunks,
+            max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
+            pieces_level=True
+        )
+        for batch in gen:
+            feed_dict = self._get_feed_dict(batch, mode=ModeKeys.TEST)
+            re_labels_pred = self.sess.run(self.labels_pred, feed_dict=feed_dict)  # [N, E, E]
+
+            for i in range(len(batch)):
+                chunk = batch[i]
+                parent = id2example[chunk.parent]
+
+                num_sentences = id_to_num_sentences[chunk.parent]
+                end_rel = chunk.tokens[-1].id_sent - chunk.tokens[0].id_sent
+                assert end_rel < window, f"[{chunk.id}] relative end {end_rel} >= window size {window}"
+                is_first = chunk.tokens[0].id_sent == 0
+                is_last = chunk.tokens[-1].id_sent == num_sentences - 1
+                pairs = get_sent_pairs_to_predict_for(end=end_rel, is_first=is_first, is_last=is_last, window=window)
+
+                num_entities_i = len(chunk.entities)
+                arcs_pred = re_labels_pred[i, :num_entities_i, :num_entities_i]
+                index2entity = {entity.index: entity for entity in chunk.entities}
+                assert len(index2entity) == num_entities_i
+
+                # предсказанные лейблы, которые можно получить из предиктов для кусочка chunk
+                for id_sent_rel_a, id_sent_rel_b in pairs:
+                    id_sent_abs_a = id_sent_rel_a + chunk.tokens[0].id_sent
+                    id_sent_abs_b = id_sent_rel_b + chunk.tokens[0].id_sent
+                    for idx_head, idx_dep in zip(*np.where(arcs_pred != no_rel_id)):
+                        head = index2entity[idx_head]
+                        dep = index2entity[idx_dep]
+                        id_sent_head = head.tokens[0].id_sent
+                        id_sent_dep = dep.tokens[0].id_sent
+                        if (id_sent_head == id_sent_abs_a and id_sent_dep == id_sent_abs_b) or \
+                                (id_sent_head == id_sent_abs_b and id_sent_dep == id_sent_abs_a):
+                            id_arc = "R" + str(len(parent.arcs))
+                            id_label = arcs_pred[idx_head, idx_dep]
+                            rel = self.inv_re_enc[id_label]
+                            arc = Arc(id=id_arc, head=head.id, dep=dep.id, rel=rel)
+                            parent.arcs.append(arc)
 
 
 class BertForRelationExtractionDroppedEntities:
     """
+    https://arxiv.org/abs/1907.10529, секция Relation Extraction
+
     векторизация сущностей: entity_label_emb
     """
     pass
@@ -234,7 +364,12 @@ class BertForRelationExtractionDroppedEntities:
 class BertForNerAsSequenceLabelingAndRelationExtraction:
     """
     требуется найти и сущности, и отношения между ними.
-    векторизация сущностей: start + entity_label_emb
+    https://arxiv.org/abs/1812.11275
+    TODO: реализовать src.utils.get_entity_spans как tf.Operation (https://www.tensorflow.org/guide/create_op).
+     тогда можно и в случае sequence labeling можно при векторизации учитывать вектор последнего токена сущности
+
+    векторизация сущностей: start + label_emb, потому что по построению нет гарантии наличия лейбла L_<ENTITY>
+    для соответствующего лейбла B-<ENTITY>.
     """
     pass
 
@@ -242,6 +377,7 @@ class BertForNerAsSequenceLabelingAndRelationExtraction:
 class BertForNerAsDependencyParsingAndRelationExtraction:
     """
     требуется найти и сущности, и отношения между ними.
-    векторизация сущностей: [start, end, attn]
+
+    векторизация сущностей: [start, end, attn, label_emb]
     """
     pass

@@ -2,9 +2,13 @@ import copy
 import tensorflow as tf
 
 from src.model.ner import BertForFlatNER, BertForNestedNER
-from src.model.coreference_resolution import BertForCoreferenceResolutionMentionPair, BertForCoreferenceResolutionMentionRanking
+from src.model.coreference_resolution import (
+    BertForCoreferenceResolutionMentionPair,
+    BertForCoreferenceResolutionMentionRanking
+)
 from src.model.dependency_parsing import BertForDependencyParsing
-from src.data.base import Example, Entity, Token, Span
+from src.model.relation_extraction import BertForRelationExtraction
+from src.data.base import Example, Entity, Token, Span, Arc
 
 
 def build_examples():
@@ -13,22 +17,26 @@ def build_examples():
               span_abs=Span(start=0, end=4), span_rel=Span(start=0, end=4), id_head=0, rel="root"),
         Token(text="мыла", labels=["I_FOO"], token_ids=[4, 5], index_abs=1, index_rel=1, id_sent=0,
               span_abs=Span(start=5, end=9), span_rel=Span(start=5, end=9), id_head=0, rel="foo"),
-        Token(text="раму", labels=["O"], token_ids=[6], index_abs=2, index_rel=2, id_sent=0,
+        Token(text="раму", labels=["B_BAR"], token_ids=[6], index_abs=2, index_rel=2, id_sent=0,
               span_abs=Span(start=10, end=14), span_rel=Span(start=10, end=14), id_head=1, rel="bar")
     ]
     entities = [
-        Entity(text="мама мыла", tokens=tokens[:2], label="FOO", id_chain=0, index=0)
+        Entity(id="T0", text="мама мыла", tokens=tokens[:2], label="FOO", id_chain=0, index=0),
+        Entity(id="T1", text="раму", tokens=tokens[2:3], label="BAR", id_chain=1, index=1)
+    ]
+    arcs = [
+        Arc(id="R0", head="T0", dep="T1", rel="BAZ", head_index=0, dep_index=1)
     ]
     text = "мама мыла раму"
     _examples = [
-        Example(id="0", filename="0", text=text, tokens=tokens, entities=entities, chunks=[
-            Example(id="chunk_0", tokens=tokens, entities=entities, parent="0")
+        Example(id="0", filename="0", text=text, tokens=tokens, entities=entities, arcs=arcs, chunks=[
+            Example(id="chunk_0", tokens=tokens, entities=entities, arcs=arcs, parent="0")
         ]),
-        Example(id="1", filename="1", text=text, tokens=tokens, entities=entities, chunks=[
-            Example(id="chunk_1", tokens=tokens, entities=entities, parent="1")
+        Example(id="1", filename="1", text=text, tokens=tokens, entities=entities, arcs=arcs, chunks=[
+            Example(id="chunk_1", tokens=tokens, entities=entities, arcs=arcs, parent="1")
         ]),
-        Example(id="2", filename="2", text=text, tokens=tokens, entities=entities, chunks=[
-            Example(id="chunk_2", tokens=tokens, entities=entities, parent="2")
+        Example(id="2", filename="2", text=text, tokens=tokens, entities=entities, arcs=arcs, chunks=[
+            Example(id="chunk_2", tokens=tokens, entities=entities, arcs=arcs, parent="2")
         ])
     ]
     return _examples
@@ -103,6 +111,7 @@ def _test_model(model_cls, config, **kwargs):
 
         for x in examples_test:
             x.entities = []
+            x.arcs = []
             for t in x.tokens:
                 t.reset()
         model.predict(examples=examples_test)
@@ -286,3 +295,38 @@ def test_bert_for_dependency_parsing():
     }
 
     _test_model(BertForDependencyParsing, config=config, rel_enc=rel_enc)
+
+
+def test_bert_for_relation_extraction():
+    ner_enc = {
+        "O": 0,
+        "FOO": 1,
+        "BAR": 2
+    }
+    re_enc = {
+        "O": 0,
+        "BAZ": 1,
+    }
+    config = common_config.copy()
+    config["model"]["re"] = {
+        "no_relation_id": 0,
+        "entity_emb": {
+            "use": True,
+            "params": {
+                "dim": 16,
+                "num_labels": len(ner_enc),
+                "merge_mode": "concat",
+                "dropout": 0.3
+            }
+        },
+        "biaffine": {
+            "num_mlp_layers": 1,
+            "activation": "relu",
+            "head_dim": 8,
+            "dep_dim": 8,
+            "dropout": 0.33,
+            "num_labels": len(re_enc),
+        }
+    }
+
+    _test_model(BertForRelationExtraction, config=config, ner_enc=ner_enc, re_enc=re_enc)

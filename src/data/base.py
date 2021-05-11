@@ -193,6 +193,8 @@ class Arc(ReprMixin):
             head: Union[str, int],  # int in case of dependency parsing
             dep: Union[str, int],  # int in case of dependency parsing
             rel: str,
+            head_index: int = None,
+            dep_index: int = None,
             comment: str = None,
             score: float = None  # мб пока не нужно
     ):
@@ -203,9 +205,9 @@ class Arc(ReprMixin):
         self.comment = comment
         self.score = score
 
-        self.rel_id = None
-        self.head_index = None
-        self.dep_index = None
+        self.rel_id = None   # deprecated
+        self.head_index = head_index
+        self.dep_index = dep_index
 
 
 class Example(ReprMixin):
