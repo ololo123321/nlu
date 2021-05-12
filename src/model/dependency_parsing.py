@@ -94,6 +94,13 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
         self.total_loss_type = total_loss_type
 
     def _get_feed_dict(self, examples: List[Example], mode: str):
+        """
+        копипаста из BaseModelBert. _get_bert_input_for_feed_dict связана
+        с добавлением айдишника специального токена под ROOT
+        :param examples:
+        :param mode:
+        :return:
+        """
         # bert
         input_ids = []
         input_mask = []

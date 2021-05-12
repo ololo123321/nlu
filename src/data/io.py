@@ -209,8 +209,6 @@ def parse_example(
     read_fn = read_fn if read_fn is not None else read_file_v1
     with open(os.path.join(data_dir, f'{filename}.txt')) as f:
         text = read_fn(f)
-        # символ \xad имеет длину 1, невидим, и не разбивается на токены FullTokenizer'ом
-        text = text.replace('\xad', '')
 
     # токенизация
     tokens = []
@@ -232,7 +230,7 @@ def parse_example(
             span_rel=span,
             index_abs=i,
             index_rel=i,
-            labels=no_labels
+            labels=no_labels.copy()
         )
         tokens.append(token)
         span2token[span] = token

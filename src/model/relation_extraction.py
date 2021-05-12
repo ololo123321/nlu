@@ -116,49 +116,13 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
         assert self.ner_enc is not None
         assert self.re_enc is not None
 
-        # bert
-        input_ids = []
-        input_mask = []
-        segment_ids = []
+        bert_inputs = self._get_bert_input_for_feed_dict(examples)
 
-        # ner
-        first_pieces_coords = []
-        num_pieces = []
-        num_tokens = []
         ner_labels = []
-
-        # re
         re_labels = []
 
         # filling
         for i, x in enumerate(examples):
-            input_ids_i = []
-            input_mask_i = []
-            segment_ids_i = []
-            first_pieces_coords_i = []
-
-            # [CLS]
-            input_ids_i.append(self.config["model"]["bert"]["cls_token_id"])
-            input_mask_i.append(1)
-            segment_ids_i.append(0)
-
-            ptr = 1
-
-            # tokens
-            for t in x.tokens:
-                assert len(t.token_ids) > 0
-                first_pieces_coords_i.append((i, ptr))
-                num_pieces_ij = len(t.token_ids)
-                input_ids_i += t.token_ids
-                input_mask_i += [1] * num_pieces_ij
-                segment_ids_i += [0] * num_pieces_ij
-                ptr += num_pieces_ij
-
-            # [SEP]
-            input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
-            input_mask_i.append(1)
-            segment_ids_i.append(0)
-
             # entities
             for entity in x.entities:
                 start = entity.tokens[0].index_rel
@@ -174,37 +138,17 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
                     id_rel = self.re_enc[arc.rel]
                     re_labels.append((i, arc.head_index, arc.dep_index, id_rel))
 
-            # write
-            num_pieces.append(len(input_ids_i))
-            num_tokens.append(len(x.tokens))
-            input_ids.append(input_ids_i)
-            input_mask.append(input_mask_i)
-            segment_ids.append(segment_ids_i)
-            first_pieces_coords.append(first_pieces_coords_i)
-
-        # padding
-        pad_token_id = self.config["model"]["bert"]["pad_token_id"]
-        num_tokens_max = max(num_tokens)
-        num_pieces_max = max(num_pieces)
-        for i in range(len(examples)):
-            input_ids[i] += [pad_token_id] * (num_pieces_max - num_pieces[i])
-            input_mask[i] += [0] * (num_pieces_max - num_pieces[i])
-            segment_ids[i] += [0] * (num_pieces_max - num_pieces[i])
-            first_pieces_coords[i] += [(i, 0)] * (num_tokens_max - num_tokens[i])
-
         if len(ner_labels) == 0:
             ner_labels.append((0, 0, 0, 0))
 
-        training = mode == ModeKeys.TRAIN
-
         d = {
-            self.input_ids_ph: input_ids,
-            self.input_mask_ph: input_mask,
-            self.segment_ids_ph: segment_ids,
-            self.first_pieces_coords_ph: first_pieces_coords,
-            self.num_pieces_ph: num_pieces,
-            self.num_tokens_ph: num_tokens,
-            self.training_ph: training,
+            self.input_ids_ph: bert_inputs.input_ids,
+            self.input_mask_ph: bert_inputs.input_mask,
+            self.segment_ids_ph: bert_inputs.segment_ids,
+            self.first_pieces_coords_ph: bert_inputs.first_pieces_coords,
+            self.num_pieces_ph: bert_inputs.num_pieces,
+            self.num_tokens_ph: bert_inputs.num_tokens,
+            self.training_ph: mode == ModeKeys.TRAIN,
             self.ner_labels_ph: ner_labels
         }
 

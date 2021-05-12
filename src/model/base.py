@@ -4,6 +4,7 @@ import json
 import math
 from typing import Dict, List, Callable, Tuple, Iterable
 from abc import ABC, abstractmethod
+from collections import namedtuple
 
 import tensorflow as tf
 import numpy as np
@@ -20,6 +21,12 @@ class ModeKeys:
     TRAIN = "train"  # need labels, dropout on
     VALID = "valid"  # need labels, dropout off
     TEST = "test"  # don't need labels, dropout off
+
+
+BertInputs = namedtuple(
+    "BertInputs",
+    ["input_ids", "input_mask", "segment_ids", "first_pieces_coords", "num_tokens", "num_pieces"]
+)
 
 
 class BaseModel(ABC):
@@ -510,6 +517,70 @@ class BaseModelBert(BaseModel):
             sequence_mask = tf.sequence_mask(self.num_tokens_ph)
             x = self.birnn_bert(x, training=self.training_ph, mask=sequence_mask)  # [N, num_tokens, cell_dim * 2]
         return x
+
+    def _get_bert_input_for_feed_dict(self, examples: List[Example]) -> BertInputs:
+        input_ids = []
+        input_mask = []
+        segment_ids = []
+        first_pieces_coords = []
+        num_tokens = []
+        num_pieces = []
+
+        for i, x in enumerate(examples):
+            input_ids_i = []
+            input_mask_i = []
+            segment_ids_i = []
+            first_pieces_coords_i = []
+
+            # [CLS]
+            input_ids_i.append(self.config["model"]["bert"]["cls_token_id"])
+            input_mask_i.append(1)
+            segment_ids_i.append(0)
+
+            for t in x.tokens:
+                n = len(t.token_ids)
+                if n == 0:
+                    print(f"[{x.id}] [WARNING] token <bos>{t.text}<eos> could not be split by pieces")
+                    print(f"num chars: {len(t.text)}")
+                    if len(t.text) == 1:
+                        print(f"unicode code point: {ord(t.text)}")
+                    # без continue в first_pieces_coords_i запишется дубликат
+                    continue
+                first_pieces_coords_i.append((i, len(input_ids_i)))
+                input_ids_i += t.token_ids
+                input_mask_i += [1] * n
+                segment_ids_i += [0] * n
+
+            # [SEP]
+            input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
+            input_mask_i.append(1)
+            segment_ids_i.append(0)
+
+            input_ids.append(input_ids_i)
+            input_mask.append(input_mask_i)
+            segment_ids.append(segment_ids_i)
+            first_pieces_coords.append(first_pieces_coords_i)
+            num_tokens.append(len(x.tokens))
+            num_pieces.append(len(input_ids_i))
+
+        # padding
+        pad_token_id = self.config["model"]["bert"]["pad_token_id"]
+        num_tokens_max = max(num_tokens)
+        num_pieces_max = max(num_pieces)
+        for i in range(len(examples)):
+            input_ids[i] += [pad_token_id] * (num_pieces_max - num_pieces[i])
+            input_mask[i] += [0] * (num_pieces_max - num_pieces[i])
+            segment_ids[i] += [0] * (num_pieces_max - num_pieces[i])
+            first_pieces_coords[i] += [(i, 0)] * (num_tokens_max - num_tokens[i])
+
+        return BertInputs(
+            input_ids=input_ids,
+            input_mask=input_mask,
+            segment_ids=segment_ids,
+            first_pieces_coords=first_pieces_coords,
+            num_tokens=num_tokens,
+            num_pieces=num_pieces
+        )
 
 
 class BaseModelNER(BaseModel):
