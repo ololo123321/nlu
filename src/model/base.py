@@ -697,10 +697,11 @@ class BaseModelRelationExtraction(BaseModelNER):
             self._inv_re_enc = {v: k for k, v in re_enc.items()}
 
 
-# лучше делать отдельный класс под joint модели (ner + re, mentions + coreference),
-# потому что тогда будет единообразная логика инференса:
-# например, для инференса модели re нужны истинные ner-лейблы, а для инференса модели ner + re - нет.
-class BaseModelRelationExtractionEnd2End(BaseModelRelationExtraction):
+# лучше делать отдельный класс под joint модели (ner + re, mentions + coreference):
+# * для ner + re в конфиге нужна секция model.ner, а в re - нет
+# * для ner + re нужно создавать слои под ner, а для re - нет
+# * для инференса модели re нужны истинные ner-лейблы, а для инференса модели ner + re - нет.
+class BaseModelNerAndRelationExtracion(BaseModelRelationExtraction):
     """
     требуется найти сущности и отношения между ними
     """

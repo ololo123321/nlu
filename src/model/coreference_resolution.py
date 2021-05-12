@@ -175,8 +175,9 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         self.mention_spans_ph = tf.placeholder(tf.int32, shape=[None, 3], name="mention_spans_ph")
         self.labels_ph = tf.placeholder(tf.int32, shape=[None, 3], name="labels_ph")
 
+    # TODO: сделать возможность сохранять рёбра таким образом, чтобы они образовывали цепь
     @log
-    def predict(self, examples: List[Example], **kwargs) -> None:
+    def predict(self, examples: List[Example], flat_chains: bool = True, **kwargs) -> None:
         # TODO: как-то обработать случай отсутствия сущнсоетй
 
         # проверка примеров
@@ -266,18 +267,30 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
             for entity in x.entities:
                 key = x.id, entity.id
                 if key in head2dep:
-                    dep = head2dep[key]["dep"]
-                    g[entity.id].add(dep)
-                    id_arc = "R" + str(len(x.arcs))
-                    arc = Arc(id=id_arc, head=entity.id, dep=dep, rel=self.coref_rel)
-                    x.arcs.append(arc)
+                    id_dep = head2dep[key]["dep"]
+                    g[entity.id].add(id_dep)
+                    if not flat_chains:
+                        id_arc = "R" + str(len(x.arcs))
+                        arc = Arc(id=id_arc, head=entity.id, dep=id_dep, rel=self.coref_rel)
+                        x.arcs.append(arc)
 
             # print(g)
             components = get_connected_components(g)
 
             for id_chain, comp in enumerate(components):
+                entities_comp = []
                 for id_entity in comp:
-                    id2entity[id_entity].id_chain = id_chain
+                    entity = id2entity[id_entity]
+                    entity.id_chain = id_chain
+                    entities_comp.append(entity)
+                    if flat_chains:
+                        entities_comp_sorted = sorted(entities_comp, key=lambda e: (e.tokens[0].start_index, e.tokens[-1].start_index))
+                        for i in range(len(comp) - 1):
+                            dep = entities_comp_sorted[i]
+                            head = entities_comp_sorted[i + 1]
+                            id_arc = "R" + str(len(x.arcs))
+                            arc = Arc(id=id_arc, head=head.id, dep=dep.id, rel=self.coref_rel)
+                            x.arcs.append(arc)
 
 
 class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
