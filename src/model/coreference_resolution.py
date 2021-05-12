@@ -283,14 +283,14 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
                     entity = id2entity[id_entity]
                     entity.id_chain = id_chain
                     entities_comp.append(entity)
-                    if flat_chains:
-                        entities_comp_sorted = sorted(entities_comp, key=lambda e: (e.tokens[0].start_index, e.tokens[-1].start_index))
-                        for i in range(len(comp) - 1):
-                            dep = entities_comp_sorted[i]
-                            head = entities_comp_sorted[i + 1]
-                            id_arc = "R" + str(len(x.arcs))
-                            arc = Arc(id=id_arc, head=head.id, dep=dep.id, rel=self.coref_rel)
-                            x.arcs.append(arc)
+                if flat_chains and len(comp) > 1:
+                    entities_comp_sorted = sorted(entities_comp, key=lambda e: (e.tokens[0].index_abs, e.tokens[-1].index_abs))
+                    for i in range(len(comp) - 1):
+                        dep = entities_comp_sorted[i]
+                        head = entities_comp_sorted[i + 1]
+                        id_arc = "R" + str(len(x.arcs))
+                        arc = Arc(id=id_arc, head=head.id, dep=dep.id, rel=self.coref_rel)
+                        x.arcs.append(arc)
 
 
 class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
