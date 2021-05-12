@@ -14,7 +14,7 @@ from src.model.utils import (
     get_sent_pairs_to_predict_for
 )
 from src.metrics import get_coreferense_resolution_metrics
-from src.utils import batches_gen, get_connected_components, parse_conll_metrics
+from src.utils import batches_gen, get_connected_components, parse_conll_metrics, log
 
 
 __all__ = ["BertForCoreferenceResolutionMentionPair", "BertForCoreferenceResolutionMentionRanking"]
@@ -175,6 +175,7 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         self.mention_spans_ph = tf.placeholder(tf.int32, shape=[None, 3], name="mention_spans_ph")
         self.labels_ph = tf.placeholder(tf.int32, shape=[None, 3], name="labels_ph")
 
+    @log
     def predict(self, examples: List[Example], **kwargs) -> None:
         # TODO: как-то обработать случай отсутствия сущнсоетй
 
@@ -412,6 +413,7 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
         return d
 
     # TODO: много копипасты из predict
+    @log
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
         examples_valid_copy = copy.deepcopy(examples)
 
@@ -722,6 +724,7 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
         return d
 
     # TODO: много копипасты из predict
+    @log
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
         examples_valid_copy = copy.deepcopy(examples)  # в случае смены примеров логика выше будет неверна
 

@@ -1,8 +1,6 @@
 from typing import Dict, List
-from itertools import chain
 
 import tensorflow as tf
-import numpy as np
 
 from src.data.base import Example, Entity
 from src.data.postprocessing import get_valid_spans
@@ -10,7 +8,7 @@ from src.model.base import BaseModelNER, BaseModelBert, ModeKeys
 from src.model.layers import GraphEncoder, GraphEncoderInputs
 from src.model.utils import upper_triangular
 from src.metrics import classification_report, classification_report_ner
-from src.utils import get_entity_spans, batches_gen, get_filtered_by_length_chunks
+from src.utils import get_entity_spans, batches_gen, get_filtered_by_length_chunks, log
 
 
 class BertForFlatNER(BaseModelNER, BaseModelBert):
@@ -85,13 +83,15 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         super()._set_layers()
         self.dense_ner_labels = tf.keras.layers.Dense(self.config["model"]["ner"]["num_labels"])
 
-    # TODO: профилирование!!!
+    @log
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
         maxlen = self.config["inference"]["maxlen"]
         chunks = get_filtered_by_length_chunks(examples=examples, maxlen=maxlen, pieces_level=self._is_bpe_level)
 
-        y_true_ner = []
-        y_pred_ner = []
+        y_true = []
+        y_true_flat = []
+        y_pred = []
+        y_pred_flat = []
         total_loss = 0.0
         loss_denominator = 0
 
@@ -109,24 +109,25 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
             loss_denominator += d
 
             for i, x in enumerate(batch):
-                y_true_ner_i = []
-                y_pred_ner_i = []
+                y_true_i = []
+                y_pred_i = []
                 for j, t in enumerate(x.tokens):
-                    y_true_ner_i.append(t.labels[0])
-                    y_pred_ner_i.append(self.inv_ner_enc[ner_labels_pred[i, j]])
-                y_true_ner.append(y_true_ner_i)
-                y_pred_ner.append(y_pred_ner_i)
+                    y_true_i.append(t.labels[0])
+                    y_pred_i.append(self.inv_ner_enc[ner_labels_pred[i, j]])
+                y_true.append(y_true_i)
+                y_true_flat += y_true_i
+                y_pred.append(y_pred_i)
+                y_pred_flat += y_pred_i
 
         # loss
         loss = total_loss / loss_denominator
 
         # ner
-        joiner = self.config["model"]["ner"]["prefix_joiner"]
-        ner_metrics_entity_level = classification_report_ner(y_true=y_true_ner, y_pred=y_pred_ner, joiner=joiner)
-        y_true_ner_flat = list(chain(*y_true_ner))
-        y_pred_ner_flat = list(chain(*y_pred_ner))
+        ner_metrics_entity_level = classification_report_ner(
+            y_true=y_true, y_pred=y_pred, joiner=self.config["model"]["ner"]["prefix_joiner"]
+        )
         ner_metrics_token_level = classification_report(
-            y_true=y_true_ner_flat, y_pred=y_pred_ner_flat, trivial_label="O"
+            y_true=y_true_flat, y_pred=y_pred_flat, trivial_label="O"
         )
 
         score = ner_metrics_entity_level["micro"]["f1"]
@@ -142,6 +143,7 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         return performance_info
 
     # TODO: реалзиовать случай window > 1
+    @log
     def predict(self, examples: List[Example], **kwargs) -> None:
         """
         инференс. примеры не должны содержать разметку токенов и пар сущностей!
@@ -516,19 +518,19 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
 
         return d
 
-    # TODO: профилирование!!!
+    @log
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
         chunks = []
         for x in examples:
             assert len(x.chunks) > 0
             chunks += x.chunks
 
-        y_true_ner = []
-        y_pred_ner = []
+        y_true = []
+        y_pred = []
 
         total_loss = 0.0
         loss_denominator = 0
-        no_entity_id = 0  # TODO: брать из конфига
+        no_entity_label = "O"  # TODO: брать из конфига
 
         gen = batches_gen(
             examples=chunks,
@@ -542,37 +544,30 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
             loss_denominator += d
 
             for i, x in enumerate(batch):
-                # ner
                 num_tokens = len(x.tokens)
-                labels_true = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
+                num_tokens_squared = num_tokens ** 2
 
+                y_true_i = [no_entity_label] * num_tokens_squared
                 for entity in x.entities:
                     start = entity.tokens[0].index_rel
                     end = entity.tokens[-1].index_rel
-                    labels_true[start, end] = self.ner_enc[entity.label]
+                    y_true_i[num_tokens * start + end] = entity.label
+                y_true += y_true_i
 
-                labels_pred = np.full((num_tokens, num_tokens), no_entity_id, dtype=np.int32)
+                y_pred_i = [no_entity_label] * num_tokens_squared
                 ner_logits_i = ner_logits[i, :num_tokens, :num_tokens, :]
                 spans_filtered = get_valid_spans(logits=ner_logits_i,  is_flat_ner=False)
                 for span in spans_filtered:
-                    labels_pred[span.start, span.end] = span.label
+                    y_pred_i[num_tokens * span.start + span.end] = self.inv_ner_enc[span.label]
+                y_pred += y_pred_i
 
-                y_true_ner += [self.inv_ner_enc[j] for j in labels_true.flatten()]
-                y_pred_ner += [self.inv_ner_enc[j] for j in labels_pred.flatten()]
-
-        # loss
         loss = total_loss / loss_denominator
-
-        # ner
-        ner_metrics_entity_level = classification_report(y_true=y_true_ner, y_pred=y_pred_ner, trivial_label="O")
-
+        ner_metrics_entity_level = classification_report(y_true=y_true, y_pred=y_pred, trivial_label=no_entity_label)
         score = ner_metrics_entity_level["micro"]["f1"]
         performance_info = {
             "loss": loss,
             "score": score,
-            "metrics": {
-                "entity_level": ner_metrics_entity_level
-            }
+            "metrics": ner_metrics_entity_level
         }
 
         return performance_info

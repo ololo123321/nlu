@@ -1,6 +1,8 @@
 import random
 import re
+from datetime import datetime
 from collections import defaultdict
+from functools import wraps
 from typing import List, Dict, Set
 
 import numpy as np
@@ -280,6 +282,19 @@ def get_filtered_by_length_chunks(
     else:
         print(f"all examples have length <= {maxlen} {s}")
     return res
+
+
+def log(func):
+    """данный декоратор вешается только на методы классов!"""
+    @wraps(func)
+    def logged(self, *args, **kwargs):
+        print(f"{func.__name__} started.")
+        t0 = datetime.now()
+        res = func(self, *args, **kwargs)
+        time_elapsed = datetime.now() - t0
+        print(f"{func.__name__} finished. Time elapsed: {time_elapsed}")
+        return res
+    return logged
 
 
 # TODO: разобраться и сделать cythonize

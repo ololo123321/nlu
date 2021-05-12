@@ -9,7 +9,7 @@ from src.model.base import BaseModelRelationExtraction, BaseModelBert, ModeKeys
 from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs
 from src.model.utils import upper_triangular, get_entities_representation, get_sent_pairs_to_predict_for
 from src.metrics import classification_report, classification_report_ner
-from src.utils import get_entity_spans, batches_gen, get_filtered_by_length_chunks
+from src.utils import get_entity_spans, batches_gen, get_filtered_by_length_chunks, log
 
 
 class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
@@ -216,6 +216,7 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
 
         return d
 
+    @log
     def evaluate(self, examples: List[Example], batch_size: int = 16) -> Dict:
         # проверка примеров
         chunks = []
@@ -286,6 +287,7 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
         }
         return performance_info
 
+    @log
     def predict(self, examples: List[Example], **kwargs) -> None:
         # TODO: как-то обработать случай отсутствия сущнсоетй
 

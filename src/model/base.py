@@ -12,7 +12,7 @@ from bert.modeling import BertModel, BertConfig
 from bert.optimization import create_optimizer
 
 from src.data.base import Example
-from src.utils import train_test_split, get_filtered_by_length_chunks
+from src.utils import train_test_split, get_filtered_by_length_chunks, log
 from src.model.layers import StackedBiRNN
 
 
@@ -144,6 +144,7 @@ class BaseModel(ABC):
 
     # альтернативная версия данной функции вынесена в src._old.wip
     # TODO: мб объекты группировать в батчи по числу элементарных объектов, на которых считается loss?
+    @log
     def train(
             self,
             examples_train: List[Example],
@@ -262,6 +263,7 @@ class BaseModel(ABC):
             print(f"restoring model from {checkpoint_path}")
             saver.restore(self.sess, checkpoint_path)
 
+    @log
     def cross_validate(
             self,
             examples: List[Example],

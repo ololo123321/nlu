@@ -7,7 +7,7 @@ from src.model.base import BaseModeDependencyParsing, BaseModelBert, ModeKeys
 from src.model.layers import GraphEncoder, GraphEncoderInputs
 from src.model.utils import get_additive_mask
 from src.data.base import Example
-from src.utils import batches_gen, mst, get_filtered_by_length_chunks
+from src.utils import batches_gen, mst, get_filtered_by_length_chunks, log
 
 
 class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
@@ -190,6 +190,7 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
 
         return d
 
+    @log
     def predict(self, examples: List[Example], **kwargs) -> None:
         """chunks always sentence-level"""
         maxlen = self.config["inference"]["maxlen"]
@@ -220,6 +221,7 @@ class BertForDependencyParsing(BaseModeDependencyParsing, BaseModelBert):
                     label_pred = self.inv_rel_enc[id_label_pred]
                     t.rel = label_pred
 
+    @log
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
         """chunks always sentence-level"""
         maxlen = self.config["inference"]["maxlen"]
