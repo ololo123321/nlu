@@ -35,7 +35,6 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
                     "use_crf": True,
                     "num_labels": 7,
                     "no_entity_id": 0,
-                    "start_ids": [1, 2, 3],  # id лейблов первых токенов сущностей. нужно для векторизации сущностей
                     "prefix_joiner": "-",
                     "loss_coef": 1.0,
                     "use_birnn": True,

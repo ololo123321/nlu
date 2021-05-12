@@ -140,7 +140,6 @@ def test_bert_for_flat_ner():
         "use_crf": True,
         "num_labels": len(ner_enc),
         "no_entity_id": 0,
-        "start_ids": [v for k, v in ner_enc.items() if k[0] == "B"],
         "prefix_joiner": "-",
         "use_birnn": False,
         "rnn": {
