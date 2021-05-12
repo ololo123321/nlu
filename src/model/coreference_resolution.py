@@ -417,16 +417,30 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
         examples_valid_copy = copy.deepcopy(examples)
 
-        # проверка примеров
         chunks = []
         id_to_num_sentences = {}
+        num_entities_total_example_level = 0
+        num_entities_total_chunk_level = 0
+        num_chains_true = 0
+        total_loss = 0.0
+        loss_denominator = 0
+        num_right_preds = 0
+        num_chains_pred = 0
+
+        # проверка примеров
         for x in examples:
             # assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
             for chunk in x.chunks:
                 assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
                     f"It is not a problem, but must be set for clarity"
                 chunks.append(chunk)
+            chain_ids = set()
+            for entity in x.entities:
+                assert entity.id_chain is not None, f"[{x.id}] entity {entity.id} has no id_chain"
+                num_entities_total_example_level += 1
+                chain_ids.add(entity.id_chain)
             id_to_num_sentences[x.id] = x.tokens[-1].id_sent + 1
+            num_chains_true += len(chain_ids)
 
         assert len(id_to_num_sentences) == len(examples), f"examples must have unique ids, " \
             f"but got {len(id_to_num_sentences)} unique ids among {len(examples)} examples"
@@ -434,17 +448,11 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
         head2dep = {}  # (file, head) -> {dep, score}
         window = self.config["inference"]["window"]
 
-        total_loss = 0.0
-        loss_denominator = 0
-
         gen = batches_gen(
             examples=chunks,
             max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
             pieces_level=True
         )
-
-        num_right_preds = 0
-        num_entities_total = 0
 
         for batch in gen:
             feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
@@ -462,6 +470,7 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
                 chunk = batch[i]
 
                 num_entities_chunk = len(chunk.entities)
+                num_entities_total_chunk_level += num_entities_chunk
                 index2entity = {}
                 entity2index = {}
                 for entity in chunk.entities:
@@ -490,7 +499,6 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
                     idx_dep_true = index_head_to_index_dep.get(idx_head, 0)
                     if idx_dep_true == idx_dep_pred:
                         num_right_preds += 1
-                    num_entities_total += 1
 
                 # предсказанные лейблы, которые можно получить из предиктов для кусочка chunk
                 for id_sent_rel_a, id_sent_rel_b in pairs:
@@ -523,14 +531,12 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
                                 head2dep[key_head] = {"dep": dep.id, "score": score}
 
         # присвоение id_chain
-        support = 0
         for x in examples_valid_copy:
             id2entity = {}
             g = {}
             for entity in x.entities:
                 g[entity.id] = set()
                 id2entity[entity.id] = entity
-                support += 1
                 entity.id_chain = None
             for entity in x.entities:
                 key = x.id, entity.id
@@ -542,6 +548,7 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
             components = get_connected_components(g)
 
             for id_chain, comp in enumerate(components):
+                num_chains_pred += 1
                 for id_entity in comp:
                     id2entity[id_entity].id_chain = id_chain
 
@@ -564,15 +571,17 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
             )
             is_blanc = metric == "blanc"
             metrics[metric] = parse_conll_metrics(stdout=stdout, is_blanc=is_blanc)
-            metrics[metric]["support"] = support
 
         score = (metrics["muc"]["f1"] + metrics["bcub"]["f1"] + metrics["ceafm"]["f1"] + metrics["ceafe"]["f1"]) / 4.0
-        accuracy = num_right_preds / num_entities_total
+        accuracy = num_right_preds / num_entities_total_chunk_level
         d = {
             "loss": loss,
             "score": score,
+            "metrics": metrics,
             "antecedent_prediction_accuracy": accuracy,
-            "coref_metrics": metrics,
+            "num_entities": num_entities_total_example_level,
+            "num_chains_true": num_chains_true,
+            "num_chains_pred": num_chains_pred
         }
         return d
 
@@ -728,25 +737,34 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
         examples_valid_copy = copy.deepcopy(examples)  # в случае смены примеров логика выше будет неверна
 
-        # проверка примеров
         chunks = []
         id_to_num_sentences = {}
+        num_entities_total_example_level = 0
+        num_chains_true = 0
+        num_chains_pred = 0
+        total_loss = 0.0
+        loss_denominator = 0
+
+        # проверка примеров
         for x in examples:
             # assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
             for chunk in x.chunks:
                 assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
                     f"It is not a problem, but must be set for clarity"
                 chunks.append(chunk)
+            chain_ids = set()
+            for entity in x.entities:
+                assert entity.id_chain is not None, f"[{x.id}] entity {entity.id} has no id_chain"
+                num_entities_total_example_level += 1
+                chain_ids.add(entity.id_chain)
             id_to_num_sentences[x.id] = x.tokens[-1].id_sent + 1
+            num_chains_true += len(chain_ids)
 
         assert len(id_to_num_sentences) == len(examples), f"examples must have unique ids, " \
             f"but got {len(id_to_num_sentences)} unique ids among {len(examples)} examples"
 
         head2dep = {}  # (file, head) -> {dep, score}
         window = self.config["inference"]["window"]
-
-        total_loss = 0.0
-        loss_denominator = 0
 
         gen = batches_gen(
             examples=chunks,
@@ -827,6 +845,7 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
             components = get_connected_components(g)
 
             for id_chain, comp in enumerate(components):
+                num_chains_pred += 1
                 for id_entity in comp:
                     id2entity[id_entity].id_chain = id_chain
 
@@ -851,6 +870,9 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
         d = {
             "loss": loss,
             "score": score,
-            "metrics": metrics
+            "metrics": metrics,
+            "num_entities": num_entities_total_example_level,
+            "num_chains_true": num_chains_true,
+            "num_chains_pred": num_chains_pred
         }
         return d

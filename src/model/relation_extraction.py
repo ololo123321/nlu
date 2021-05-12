@@ -369,7 +369,7 @@ class BertForNerAsSequenceLabelingAndRelationExtraction:
     требуется найти и сущности, и отношения между ними.
     https://arxiv.org/abs/1812.11275
     TODO: реализовать src.utils.get_entity_spans как tf.Operation (https://www.tensorflow.org/guide/create_op).
-     тогда можно и в случае sequence labeling можно при векторизации учитывать вектор последнего токена сущности
+     тогда и в случае sequence labeling можно при векторизации учитывать вектор последнего токена сущности
 
     векторизация сущностей: start + label_emb, потому что по построению нет гарантии наличия лейбла L_<ENTITY>
     для соответствующего лейбла B-<ENTITY>.
