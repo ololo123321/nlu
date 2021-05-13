@@ -531,6 +531,7 @@ class BaseModelBert(BaseModel):
             input_mask_i = []
             segment_ids_i = []
             first_pieces_coords_i = []
+            num_tokens_i = 0
 
             # [CLS]
             input_ids_i.append(self.config["model"]["bert"]["cls_token_id"])
@@ -550,6 +551,7 @@ class BaseModelBert(BaseModel):
                 input_ids_i += t.token_ids
                 input_mask_i += [1] * n
                 segment_ids_i += [0] * n
+                num_tokens_i += 1
 
             # [SEP]
             input_ids_i.append(self.config["model"]["bert"]["sep_token_id"])
@@ -560,7 +562,7 @@ class BaseModelBert(BaseModel):
             input_mask.append(input_mask_i)
             segment_ids.append(segment_ids_i)
             first_pieces_coords.append(first_pieces_coords_i)
-            num_tokens.append(len(x.tokens))
+            num_tokens.append(num_tokens_i)
             num_pieces.append(len(input_ids_i))
 
         # padding
