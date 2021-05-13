@@ -809,6 +809,7 @@ class BertForCoreferenceResolutionMentionRankingNewInference(BertForCoreferenceR
         self.entity_emb_ph = tf.placeholder(tf.float32, shape=[None, None, bert_dim * multiple], name="entity_emb_ph")
         self.num_entities_ph = tf.placeholder(tf.int32, shape=[None], name="num_entities_ph")
 
+    @log
     def predict(self, examples: List[Example], flat_chains: bool = True, **kwargs) -> None:
         batch_size = 16
         window = self.config["inference"]["window"]
@@ -842,15 +843,17 @@ class BertForCoreferenceResolutionMentionRankingNewInference(BertForCoreferenceR
                         entity = index2entity[j]
                         id_sent_abs = entity.tokens[0].id_sent
                         id_sent_rel = id_sent_abs - chunk.tokens[0].id_sent
+                        assert 0 <= id_sent_rel < window, f"rel: {id_sent_rel}, abs: {id_sent_abs}"
                         if id_sent_rel in sent_ids:
                             span = entity.tokens[0].index_abs, entity.tokens[-1].index_abs
+                            assert span not in id2embeddings[chunk.parent]
                             id2embeddings[chunk.parent][span] = x_ent_pred[i, j, :]
 
             num_entities = []
             for x in examples_batch:
                 actual = len(id2embeddings[x.id])
                 expected = len(x.entities)
-                assert actual == expected, f"{actual} != {expected}"
+                assert actual == expected, f"[{x.id}] {actual} != {expected}"
                 num_entities.append(len(x.entities))
 
             entities_emb = self._agg_embeddings(id2embeddings, example_ids)
@@ -866,7 +869,7 @@ class BertForCoreferenceResolutionMentionRankingNewInference(BertForCoreferenceR
             for i, x in enumerate(examples_batch):
                 head2dep = {}
                 index2entity = {}
-                for j, entity in enumerate(sorted(x.entities, key=lambda e: (e.tokens[0].index_rel, e.tokens[-1].index_rel))):
+                for j, entity in enumerate(sorted(x.entities, key=lambda e: (e.tokens[0].index_abs, e.tokens[-1].index_abs))):
                     index2entity[j] = entity
                 for idx_head in range(len(x.entities)):
                     idx_dep = re_labels_pred[i, idx_head]

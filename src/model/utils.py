@@ -441,14 +441,14 @@ def get_sent_ids_to_predict_for(is_first, is_last, window):
         return {0}
     elif window == 3:
         if is_first:
-            return {0, 1},
+            return {0, 1}
         elif is_last:
             return {1, 2}
         else:
             return {1}
     elif window == 5:
         if is_first:
-            return {0, 1, 2},
+            return {0, 1, 2}
         elif is_last:
             return {2, 3, 4}
         else:
