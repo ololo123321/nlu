@@ -142,6 +142,9 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         return performance_info
 
     # TODO: реалзиовать случай window > 1
+    # TODO: bug: при текущей логике обработки токенов, которые не удаётся разбить на кусочки
+    #  теряется отображение "один к одному" между chunk.tokens и ner_labels_i,
+    #  что влечёт поехавшие предикты. аналогичная проблема в evaluate
     @log
     def predict(self, examples: List[Example], **kwargs) -> None:
         """
@@ -225,15 +228,6 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
                 ner_labels_i = []
                 for t in x.tokens:
                     label = t.labels[0]
-                    if len(t.token_ids) == 0:
-                        if label[0] == "B":
-                            # в такой ситуации нужно на этапе препроцессинга сдеать следующее:
-                            # label(t) = O
-                            # label(t + 1) = B-*
-                            raise ValueError(f"token could not be split by pieces and has label {label}, "
-                                             f"which can't be ignored")
-                        else:
-                            continue
                     id_label = self.ner_enc[label]
                     ner_labels_i.append(id_label)  # ner решается на уровне токенов!
                 ner_labels.append(ner_labels_i)

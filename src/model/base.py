@@ -540,15 +540,16 @@ class BaseModelBert(BaseModel):
 
             for t in x.tokens:
                 n = len(t.token_ids)
-                if n == 0:
-                    print(f"[{x.id}] [WARNING] token <bos>{t.text}<eos> "
-                          f"(span_abs: {t.span_abs}, span_rel: {t.span_rel}, "
-                          f"index_abs: {t.index_abs}, index_rel: {t.index_rel}) could not be split by pieces")
-                    print(f"num chars: {len(t.text)}")
-                    if len(t.text) == 1:
-                        print(f"unicode code point: {ord(t.text)}")
-                    # без continue в first_pieces_coords_i запишется дубликат
-                    continue
+                # if n == 0:
+                #     print(f"[{x.id}] [WARNING] token <bos>{t.text}<eos> "
+                #           f"(span_abs: {t.span_abs}, span_rel: {t.span_rel}, "
+                #           f"index_abs: {t.index_abs}, index_rel: {t.index_rel}) could not be split by pieces")
+                #     print(f"num chars: {len(t.text)}")
+                #     if len(t.text) == 1:
+                #         print(f"unicode code point: {ord(t.text)}")
+                #     # без continue в first_pieces_coords_i запишется дубликат
+                #     continue
+                assert n != 0, f"[{x.id}] token {t} could not be split by pieces! code points: {[ord(c) for c in t.text]}"
                 first_pieces_coords_i.append((i, len(input_ids_i)))
                 input_ids_i += t.token_ids
                 input_mask_i += [1] * n

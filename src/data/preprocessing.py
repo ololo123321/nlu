@@ -476,18 +476,18 @@ def apply_encodings(
     print("unk_re_labels:", unk_re_labels)
 
 
-def show_diff(reference: List[Example], proposed: List[Example]):
-    r = sum(len(x.entities) for x in reference)
-    p = sum(len(x.entities) for x in proposed)
-    print("num entities reference:", r)
-    print("num entities proposed:", p)
-    print("percent change:", round((p / r - 1.0) * 100, 4), "%")
-
-    r = sum(len(x.arcs) for x in reference)
-    p = sum(len(x.arcs) for x in proposed)
-    print("num relations reference:", r)
-    print("num relations proposed:", p)
-    print("percent change:", round((p / r - 1.0) * 100, 4), "%")
+# def show_diff(reference: List[Example], proposed: List[Example]):
+#     r = sum(len(x.entities) for x in reference)
+#     p = sum(len(x.entities) for x in proposed)
+#     print("num entities reference:", r)
+#     print("num entities proposed:", p)
+#     print("percent change:", round((p / r - 1.0) * 100, 4), "%")
+#
+#     r = sum(len(x.arcs) for x in reference)
+#     p = sum(len(x.arcs) for x in proposed)
+#     print("num relations reference:", r)
+#     print("num relations proposed:", p)
+#     print("percent change:", round((p / r - 1.0) * 100, 4), "%")
 
 
 def assign_id_chain(examples: List[Example]):
@@ -505,3 +505,68 @@ def assign_id_chain(examples: List[Example]):
         for id_chain, comp in enumerate(components):
             for id_entity in comp:
                 id2entity[id_entity].id_chain = id_chain
+
+
+def drop_bad_tokens(x: Example):
+    """
+    оставить только те токены, которые удалось разбить на кусочки.
+    :param x:
+    :return:
+    """
+
+    """
+            self.text = text
+        self.span_abs = span_abs
+        self.span_rel = span_rel
+        - self.index_abs = index_abs
+        - self.index_rel = index_rel  # пока не нужно
+        self.labels = labels if labels is not None else []
+        self.pieces = pieces if pieces is not None else []
+        self.token_ids = token_ids if token_ids is not None else []
+        self.id_sent = id_sent
+        self.id_head = id_head
+        self.rel = rel
+        self.pos = pos
+    """
+    tokens_new = []
+    tokens_bad = set()
+    idx = 0
+    for t in x.tokens:
+        if len(t.pieces) > 0:
+            t.index_abs = idx
+            t.index_rel = idx
+            tokens_new.append(t)
+            idx += 1
+        else:
+            assert t.id_head is None
+            if len(t.labels) > 0:
+                label = t.labels[0]
+                if label == "B":
+                    label = "I" + label[1:]
+                    t.labels = [label]
+            tokens_bad.add(t)
+    x.tokens = tokens_new
+    for entity in x.entities:
+        entity_tokens_new = []
+        for t in entity.tokens:
+            if t not in tokens_bad:
+                entity_tokens_new.append(t)
+        if len(entity_tokens_new) == 0:
+            raise
+        else:
+            t_first = entity_tokens_new[0]
+            label = t_first.labels[0]
+            if label[0] != "B":
+                label = "B" + label[1:]
+                t_first.labels = [label]
+        entity.tokens = entity_tokens_new
+    return x
+
+
+def preprocess_for_flat_ner(x: Example):
+    """
+    1. удалить токены, которые
+    :param x:
+    :return:
+    """
+    pass
