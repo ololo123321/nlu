@@ -433,3 +433,25 @@ def get_sent_pairs_to_predict_for(end: int, is_first: bool, is_last: bool, windo
             return res
     else:
         raise NotImplementedError(f"expected window in {{1, 3, 5}}, but got {window}")
+
+
+def get_sent_ids_to_predict_for(is_first, is_last, window):
+    assert window in {1, 3, 5}
+    if window == 1:
+        return {0}
+    elif window == 3:
+        if is_first:
+            return {0, 1},
+        elif is_last:
+            return {1, 2}
+        else:
+            return {1}
+    elif window == 5:
+        if is_first:
+            return {0, 1, 2},
+        elif is_last:
+            return {2, 3, 4}
+        else:
+            return {2}
+    else:
+        raise NotImplementedError

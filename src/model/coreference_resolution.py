@@ -3,6 +3,7 @@ from typing import Dict, List
 from collections import defaultdict
 
 import tensorflow as tf
+import numpy as np
 
 from src.data.base import Example, Arc
 from src.data.io import to_conll
@@ -11,7 +12,8 @@ from src.model.layers import GraphEncoder, GraphEncoderInputs, MLP
 from src.model.utils import (
     get_additive_mask,
     get_entities_representation,
-    get_sent_pairs_to_predict_for
+    get_sent_pairs_to_predict_for,
+    get_sent_ids_to_predict_for
 )
 from src.metrics import get_coreferense_resolution_metrics
 from src.utils import batches_gen, get_connected_components, parse_conll_metrics, log
@@ -70,7 +72,7 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         x_ent_train, self.num_entities = self._get_entities_representation(bert_out=self.bert_out_train)
         self.logits_train = self._get_entity_pairs_logits(x_ent_train)
         x_ent_pred, _ = self._get_entities_representation(bert_out=self.bert_out_pred)
-        self.logits_inference = self._get_entity_pairs_logits(x_ent_train)
+        self.logits_inference = self._get_entity_pairs_logits(x_ent_pred)
         self.labels_pred = tf.argmax(self.logits_inference, axis=-1)  # [batch_size, num_entities]
 
     def _set_layers(self):
@@ -175,7 +177,6 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         self.mention_spans_ph = tf.placeholder(tf.int32, shape=[None, 3], name="mention_spans_ph")
         self.labels_ph = tf.placeholder(tf.int32, shape=[None, 3], name="labels_ph")
 
-    # TODO: сделать возможность сохранять рёбра таким образом, чтобы они образовывали цепь
     @log
     def predict(self, examples: List[Example], flat_chains: bool = True, **kwargs) -> None:
         # TODO: как-то обработать случай отсутствия сущнсоетй
@@ -775,3 +776,147 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
             "num_chains_pred": num_chains_pred
         }
         return d
+
+
+class BertForCoreferenceResolutionMentionRankingNewInference(BertForCoreferenceResolutionMentionRanking):
+    def __init__(self, sess: tf.Session = None, config: Dict = None):
+        super().__init__(sess=sess, config=config)
+
+        self.x_ent_pred = None
+        self.entity_emb_ph = None
+
+    def _build_coref_head(self):
+        x_ent_train, self.num_entities = self._get_entities_representation(bert_out=self.bert_out_train)
+        self.logits_train = self._get_entity_pairs_logits(x_ent_train)
+        self.x_ent_pred, _ = self._get_entities_representation(bert_out=self.bert_out_pred)
+        self.logits_inference = self._get_entity_pairs_logits(self.x_ent_pred)
+        self.labels_pred = tf.argmax(self.logits_inference, axis=-1)  # [batch_size, num_entities]
+
+    def _set_placeholders(self):
+        super()._set_placeholders()
+        bert_dim = self.config["model"]["bert"]["params"]["hidden_size"]
+        multiple = 2 + int(self.config["model"]["coref"]["use_attn"])
+        self.entity_emb_ph = tf.placeholder(tf.float32, shape=[None, None, bert_dim * multiple])
+
+    def predict(self, examples: List[Example], flat_chains: bool = True, **kwargs) -> None:
+        batch_size = 16
+        window = self.config["inference"]["window"]
+        for start in range(0, len(examples), batch_size):
+            end = start + batch_size
+            examples_batch = examples[start:end]
+            chunks_batch = []
+            id2embeddings = {}
+            id_to_num_sentences = {}
+            example_ids = []
+            for x in examples_batch:
+                chunks_batch += x.chunks
+                id2embeddings[x.id] = {}  # (start, end) -> np.array размерности D
+                example_ids.append(x.id)
+            gen = batches_gen(examples=chunks_batch, max_tokens_per_batch=10000, pieces_level=True)
+            for batch in gen:
+                feed_dict = self._get_feed_dict(batch, mode=ModeKeys.TEST)
+                x_ent_pred = self.sess.run(self.x_ent_pred, feed_dict=feed_dict)  # [num_chunks, E, D]
+                for i in range(len(batch)):
+                    chunk = batch[i]
+                    num_sentences = id_to_num_sentences[chunk.parent]
+                    end_rel = chunk.tokens[-1].id_sent - chunk.tokens[0].id_sent
+                    assert end_rel < window, f"[{chunk.id}] relative end {end_rel} >= window size {window}"
+                    is_first = chunk.tokens[0].id_sent == 0
+                    is_last = chunk.tokens[-1].id_sent == num_sentences - 1
+                    sent_ids = get_sent_ids_to_predict_for(is_first=is_first, is_last=is_last, window=window)
+
+                    index2entity = {entity.index: entity for entity in chunk.entities}
+                    for j in range(len(chunk.entities)):
+                        entity = index2entity[j]
+                        id_sent_abs = entity.tokens[0].id_sent
+                        id_sent_rel = id_sent_abs - chunk.tokens[0].id_sent
+                        if id_sent_rel in sent_ids:
+                            span = entity.tokens[0].index_abs, entity.tokens[-1].index_abs
+                            id2embeddings[chunk.parent][span] = x_ent_pred[i, j, :]
+
+            entities_emb = self._agg_embeddings(id2embeddings, example_ids)
+            re_labels_pred, re_logits_pred = self.sess.run(
+                [self.labels_pred, self.logits_inference],
+                feed_dict={self.entity_emb_ph: entities_emb}
+            )
+
+            for i, x in enumerate(examples_batch):
+                head2dep = {}
+                index2entity = {}
+                for j, entity in enumerate(sorted(x.entities, key=lambda e: (e.tokens[0].index_rel, e.tokens[-1].index_rel))):
+                    index2entity[j] = entity
+                for idx_head in range(len(x.entities)):
+                    idx_dep = re_labels_pred[i, idx_head]
+                    # нет исходящего ребра или находится дальше по тексту
+                    if idx_dep == 0 or idx_dep >= idx_head + 1:
+                        continue
+                    score = re_logits_pred[i, idx_head, idx_dep]
+                    # это условие акутально только тогда,
+                    # когда реализована оригинальная логика: s(i, eps) = 0
+                    # if score <= 0.0:
+                    #     continue
+                    head = index2entity[idx_head]
+                    dep = index2entity[idx_dep - 1]
+                    key_head = x.id, head.id
+                    if key_head in head2dep:
+                        if head2dep[key_head]["score"] < score:
+                            head2dep[key_head] = {"dep": dep.id, "score": score}
+                        else:
+                            pass
+                    else:
+                        head2dep[key_head] = {"dep": dep.id, "score": score}
+
+                # присовение id_chain
+                id2entity = {}
+                g = {}
+                for entity in x.entities:
+                    g[entity.id] = set()
+                    id2entity[entity.id] = entity
+                for entity in x.entities:
+                    key = x.id, entity.id
+                    if key in head2dep:
+                        id_dep = head2dep[key]["dep"]
+                        g[entity.id].add(id_dep)
+                        if not flat_chains:
+                            id_arc = "R" + str(len(x.arcs))
+                            arc = Arc(id=id_arc, head=entity.id, dep=id_dep, rel=self.coref_rel)
+                            x.arcs.append(arc)
+
+                components = get_connected_components(g)
+
+                for id_chain, comp in enumerate(components):
+                    entities_comp = []
+                    for id_entity in comp:
+                        entity = id2entity[id_entity]
+                        entity.id_chain = id_chain
+                        entities_comp.append(entity)
+                    if flat_chains and len(comp) > 1:
+                        entities_comp_sorted = sorted(entities_comp,
+                                                      key=lambda e: (e.tokens[0].index_abs, e.tokens[-1].index_abs))
+                        for i in range(len(comp) - 1):
+                            dep = entities_comp_sorted[i]
+                            head = entities_comp_sorted[i + 1]
+                            id_arc = "R" + str(len(x.arcs))
+                            arc = Arc(id=id_arc, head=head.id, dep=dep.id, rel=self.coref_rel)
+                            x.arcs.append(arc)
+
+    def _agg_embeddings(self, id2embeddings, example_ids):
+        num_entities = {}
+        for i in example_ids:
+            num_entities[i] = len(id2embeddings[i])
+        m = max(num_entities.values())
+        bert_dim = self.config["model"]["bert"]["params"]["hidden_size"]
+        multiple = 2 + int(self.config["model"]["coref"]["use_attn"])
+        d = bert_dim * multiple
+        zeros = np.zeros(d, dtype=np.float32)
+        res = []
+        for i in example_ids:
+            res_i = []
+            for _, v in sorted(id2embeddings[i].items(), key=lambda x: x[0]):
+                res_i.append(v[None])
+            for _ in range(m - num_entities[i]):
+                res_i.append(zeros[None])
+            res_i = np.concatenate(res_i, axis=0)  # [num_entities_max, d]
+            res.append(res_i[None, :, :])
+        res = np.concatenate(res, axis=0)  # [batch_size, num_entities_max, d]
+        return res
