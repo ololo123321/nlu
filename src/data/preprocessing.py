@@ -563,10 +563,16 @@ def drop_bad_tokens(x: Example):
     return x
 
 
-def preprocess_for_flat_ner(x: Example):
-    """
-    1. удалить токены, которые
-    :param x:
-    :return:
-    """
-    pass
+def assign_labels_to_tokens(x: Example):
+    for entity in x.entities:
+        num_tokens = len(entity.tokens)
+        assert num_tokens > 0
+        for i in range(num_tokens):
+            if i == 0:
+                prefix = "B-"
+            else:
+                prefix = "I-"
+            label = prefix + entity.label
+            t = entity.tokens[i]
+            assert t.label is None
+            t.label = label

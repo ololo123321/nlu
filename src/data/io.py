@@ -41,7 +41,8 @@ def parse_collection(
         allow_many_entities_per_span_one_label: bool = False,
         allow_many_entities_per_span_different_labels: bool = False,
         ignore_bad_examples: bool = False,
-        read_fn: Callable = None
+        read_fn: Callable = None,
+        version: int = 1
 ) -> List[Example]:
     """
     n - сколько примеров распарсить
@@ -64,12 +65,14 @@ def parse_collection(
     else:
         tokens_expression = TOKENS_EXPRESSION
 
+    parse_fn = parse_example if version == 1 else parse_example_v2
+
     # парсим примеры для обучения
     examples = []
     error_counts = defaultdict(int)
     for filename in tqdm.tqdm(names_to_parse):
         try:
-            example = parse_example(
+            example = parse_fn(
                 data_dir=data_dir,
                 filename=filename,
                 ner_encoding=ner_encoding,
@@ -104,7 +107,7 @@ def parse_collection(
                     print("ignored due to the same as provided in args")
                     continue
                 try:
-                    example = parse_example(
+                    example = parse_fn(
                         data_dir=data_dir,
                         filename=filename,
                         ner_encoding=ner_encoding,
@@ -560,19 +563,19 @@ def parse_example_v2(
                                           f"expected entity is <bos>{expected_entity_pattern}<eos>, "
                                           f"but got <bos>{actual_entity_pattern}<eos>")
 
-                # # проверка того, что в файле .ann нет дубликатов по сущностям
-                # if entity_span in span2label:
-                #     if span2label[entity_span] == entity_label:
-                #         if not allow_many_entities_per_span_one_label:
-                #             raise EntitySpanError(f"[{filename}]: tried to assign one more label {entity_label} "
-                #                                   f"to span {entity_span}")
-                #     else:
-                #         if not allow_many_entities_per_span_different_labels:
-                #             raise EntitySpanError(f"[{filename}]: span {entity_span} has already "
-                #                                   f"label {span2label[entity_span]},"
-                #                                   f"but tried to assign also label {entity_label}")
-                # else:
-                #     span2label[entity_span] = entity_label
+                # проверка того, что в файле .ann нет дубликатов по сущностям
+                if entity_span in span2label:
+                    if span2label[entity_span] == entity_label:
+                        if not allow_many_entities_per_span_one_label:
+                            raise EntitySpanError(f"[{filename}]: tried to assign one more label {entity_label} "
+                                                  f"to span {entity_span}")
+                    else:
+                        if not allow_many_entities_per_span_different_labels:
+                            raise EntitySpanError(f"[{filename}]: span {entity_span} has already "
+                                                  f"label {span2label[entity_span]},"
+                                                  f"but tried to assign also label {entity_label}")
+                else:
+                    span2label[entity_span] = entity_label
 
                 # создание сущности
                 entity = Entity(
@@ -719,7 +722,9 @@ def parse_example_v2(
                 bad_ids_entity.append(i - start)
         entity.span = start_new, end_new
         entity.text = remove_bad_ids(entity.text, bad_ids_entity)
-        assert text_clean[start_new:end_new] == entity.text, f"{text_clean[start_new:end_new]} != {entity.text}"
+        if text_clean[start_new:end_new] != entity.text:
+            raise RegexError(f"[{filename}]  {text_clean[start_new:end_new]} != {entity.text}. "
+                             f"Check entity {entity.id} in {filename}.ann file")
 
         entity_tokens = []
         for i in range(start_new, end_new):
