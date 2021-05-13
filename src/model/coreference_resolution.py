@@ -71,9 +71,11 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
     def _build_coref_head(self):
         x_ent_train, self.num_entities = self._get_entities_representation(bert_out=self.bert_out_train)
         self.logits_train = self._get_entity_pairs_logits(x_ent_train)
+
         x_ent_pred, _ = self._get_entities_representation(bert_out=self.bert_out_pred)
-        self.logits_inference = self._get_entity_pairs_logits(x_ent_pred)
-        self.labels_pred = tf.argmax(self.logits_inference, axis=-1)  # [batch_size, num_entities]
+        self.logits_pred = self._get_entity_pairs_logits(x_ent_pred)
+
+        self.labels_pred = tf.argmax(self.logits_pred, axis=-1)  # [batch_size, num_entities]
 
     def _set_layers(self):
         super()._set_layers()
@@ -207,7 +209,7 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         for batch in gen:
             feed_dict = self._get_feed_dict(batch, mode=ModeKeys.TEST)
             re_labels_pred, re_logits_pred = self.sess.run(
-                [self.labels_pred, self.logits_inference],
+                [self.labels_pred, self.logits_pred],
                 feed_dict=feed_dict
             )
             # re_labels_pred: np.ndarray, shape [batch_size, num_entities], dtype np.int32
@@ -413,7 +415,7 @@ class BertForCoreferenceResolutionMentionPair(BaseBertForCoreferenceResolution):
         for batch in gen:
             feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
             total_loss_i, d, re_labels_pred, re_logits_pred = self.sess.run(
-                [self.total_loss, self.loss_denominator, self.labels_pred, self.logits_inference],
+                [self.total_loss, self.loss_denominator, self.labels_pred, self.logits_pred],
                 feed_dict=feed_dict
             )
             total_loss += total_loss_i
@@ -674,7 +676,7 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
         for batch in gen:
             feed_dict = self._get_feed_dict(batch, mode=ModeKeys.VALID)
             total_loss_i, d, re_labels_pred, re_logits_pred = self.sess.run(
-                [self.total_loss, self.loss_denominator, self.labels_pred, self.logits_inference],
+                [self.total_loss, self.loss_denominator, self.labels_pred, self.logits_pred],
                 feed_dict=feed_dict
             )
             total_loss += total_loss_i
@@ -837,7 +839,10 @@ class BertForCoreferenceResolutionMentionRankingNewInference(BertForCoreferenceR
             entities_emb = self._agg_embeddings(id2embeddings, example_ids)
             re_labels_pred, re_logits_pred = self.sess.run(
                 [self.labels_pred, self.logits_inference],
-                feed_dict={self.entity_emb_ph: entities_emb}
+                feed_dict={
+                    self.entity_emb_ph: entities_emb,
+                    self.training_ph: False
+                }
             )
 
             for i, x in enumerate(examples_batch):

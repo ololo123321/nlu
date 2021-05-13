@@ -797,7 +797,7 @@ class BaseModeCoreferenceResolution(BaseModel):
 
         # TENSORS
         self.logits_train = None
-        self.logits_inference = None
+        self.logits_pred = None
         self.total_loss = None
         self.loss_denominator = None
 
