@@ -70,10 +70,10 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
 
     def _build_coref_head(self):
         x_ent_train, self.num_entities = self._get_entities_representation(bert_out=self.bert_out_train)
-        self.logits_train = self._get_entity_pairs_logits(x_ent_train)
+        self.logits_train = self._get_entity_pairs_logits(x_ent_train, self.num_entities)
 
         x_ent_pred, _ = self._get_entities_representation(bert_out=self.bert_out_pred)
-        self.logits_pred = self._get_entity_pairs_logits(x_ent_pred)
+        self.logits_pred = self._get_entity_pairs_logits(x_ent_pred, self.num_entities)
 
         self.labels_pred = tf.argmax(self.logits_pred, axis=-1)  # [batch_size, num_entities]
 
@@ -110,18 +110,18 @@ class BaseBertForCoreferenceResolution(BaseModeCoreferenceResolution, BaseModelB
         )
         return x_entity, num_entities
 
-    def _get_entity_pairs_logits(self, x: tf.Tensor) -> tf.Tensor:
+    def _get_entity_pairs_logits(self, x: tf.Tensor, num_entities: tf.Tensor) -> tf.Tensor:
         batch_size = tf.shape(x)[0]
         x_root = tf.tile(self.root_emb, [batch_size, 1])
         x_root = x_root[:, None, :]
 
-        num_entities_inner = self.num_entities + tf.ones_like(self.num_entities)
+        num_entities_inner = num_entities + tf.ones_like(num_entities)
 
         # mask padding
         mask_pad = tf.sequence_mask(num_entities_inner)  # [batch_size, num_entities + 1]
 
         # mask antecedent
-        n = tf.reduce_max(self.num_entities)
+        n = tf.reduce_max(num_entities)
         mask_ant = tf.linalg.band_part(tf.ones((n, n + 1), dtype=tf.bool), -1, 0)  # lower-triangular
 
         mask = tf.logical_and(mask_pad[:, None, :], mask_ant[None, :, :])
@@ -784,21 +784,30 @@ class BertForCoreferenceResolutionMentionRankingNewInference(BertForCoreferenceR
     def __init__(self, sess: tf.Session = None, config: Dict = None):
         super().__init__(sess=sess, config=config)
 
-        self.x_ent_pred = None
         self.entity_emb_ph = None
+        self.num_entities_ph = None
+
+        self.x_ent_pred = None
+        self.logits_pred_from_emb = None
+        self.labels_pred_from_emb = None
 
     def _build_coref_head(self):
         x_ent_train, self.num_entities = self._get_entities_representation(bert_out=self.bert_out_train)
-        self.logits_train = self._get_entity_pairs_logits(x_ent_train)
+        self.logits_train = self._get_entity_pairs_logits(x_ent_train, self.num_entities)
+
         self.x_ent_pred, _ = self._get_entities_representation(bert_out=self.bert_out_pred)
-        self.logits_inference = self._get_entity_pairs_logits(self.x_ent_pred)
-        self.labels_pred = tf.argmax(self.logits_inference, axis=-1)  # [batch_size, num_entities]
+        self.logits_pred = self._get_entity_pairs_logits(self.x_ent_pred, self.num_entities)
+        self.labels_pred = tf.argmax(self.logits_pred, axis=-1)  # [batch_size, num_entities]
+
+        self.logits_pred_from_emb = self._get_entity_pairs_logits(self.entity_emb_ph, self.num_entities_ph)
+        self.labels_pred_from_emb = tf.argmax(self.logits_pred_from_emb, axis=-1)  # [batch_size, num_entities]
 
     def _set_placeholders(self):
         super()._set_placeholders()
         bert_dim = self.config["model"]["bert"]["params"]["hidden_size"]
         multiple = 2 + int(self.config["model"]["coref"]["use_attn"])
-        self.entity_emb_ph = tf.placeholder(tf.float32, shape=[None, None, bert_dim * multiple])
+        self.entity_emb_ph = tf.placeholder(tf.float32, shape=[None, None, bert_dim * multiple], name="entity_emb_ph")
+        self.num_entities_ph = tf.placeholder(tf.int32, shape=[None], name="num_entities_ph")
 
     def predict(self, examples: List[Example], flat_chains: bool = True, **kwargs) -> None:
         batch_size = 16
@@ -814,6 +823,7 @@ class BertForCoreferenceResolutionMentionRankingNewInference(BertForCoreferenceR
                 chunks_batch += x.chunks
                 id2embeddings[x.id] = {}  # (start, end) -> np.array размерности D
                 example_ids.append(x.id)
+                id_to_num_sentences[x.id] = x.tokens[-1].id_sent + 1
             gen = batches_gen(examples=chunks_batch, max_tokens_per_batch=10000, pieces_level=True)
             for batch in gen:
                 feed_dict = self._get_feed_dict(batch, mode=ModeKeys.TEST)
@@ -836,11 +846,19 @@ class BertForCoreferenceResolutionMentionRankingNewInference(BertForCoreferenceR
                             span = entity.tokens[0].index_abs, entity.tokens[-1].index_abs
                             id2embeddings[chunk.parent][span] = x_ent_pred[i, j, :]
 
+            num_entities = []
+            for x in examples_batch:
+                actual = len(id2embeddings[x.id])
+                expected = len(x.entities)
+                assert actual == expected, f"{actual} != {expected}"
+                num_entities.append(len(x.entities))
+
             entities_emb = self._agg_embeddings(id2embeddings, example_ids)
             re_labels_pred, re_logits_pred = self.sess.run(
-                [self.labels_pred, self.logits_inference],
+                [self.labels_pred_from_emb, self.logits_pred_from_emb],
                 feed_dict={
                     self.entity_emb_ph: entities_emb,
+                    self.num_entities_ph: num_entities,
                     self.training_ph: False
                 }
             )

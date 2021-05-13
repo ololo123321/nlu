@@ -44,7 +44,6 @@ def build_examples():
 
 
 examples = build_examples()
-examples_test = copy.deepcopy(examples)
 
 common_config = {
     "model": {
@@ -91,7 +90,7 @@ folds = [
 ]
 
 
-def _test_model(model_cls, config, **kwargs):
+def _test_model(model_cls, config, drop_entities: bool, **kwargs):
     tf.reset_default_graph()
     model = model_cls(sess=None, config=config, **kwargs)
     model.build()
@@ -110,8 +109,10 @@ def _test_model(model_cls, config, **kwargs):
             verbose_fn=None
         )
 
+        examples_test = copy.deepcopy(examples)
         for x in examples_test:
-            x.entities = []
+            if drop_entities:
+                x.entities = []
             x.arcs = []
             for t in x.tokens:
                 t.reset()
@@ -150,7 +151,7 @@ def test_bert_for_flat_ner():
             "recurrent_dropout": 0.0
         }
     }
-    _test_model(BertForFlatNER, config=config, ner_enc=ner_enc)
+    _test_model(BertForFlatNER, config=config, ner_enc=ner_enc, drop_entities=True)
 
 
 def test_bert_for_nested_ner():
@@ -178,7 +179,7 @@ def test_bert_for_nested_ner():
             "num_labels": len(ner_enc),
         }
     }
-    _test_model(BertForNestedNER, config=config, ner_enc=ner_enc)
+    _test_model(BertForNestedNER, config=config, ner_enc=ner_enc, drop_entities=True)
 
 
 def test_bert_for_cr_mention_pair():
@@ -217,7 +218,7 @@ def test_bert_for_cr_mention_pair():
         "path_pred": "/tmp/pred.conll",
         "scorer_path": "/home/vitaly/reference-coreference-scorers/scorer.pl"
     }
-    _test_model(BertForCoreferenceResolutionMentionPair, config=config)
+    _test_model(BertForCoreferenceResolutionMentionPair, config=config, drop_entities=False)
 
 
 def test_bert_for_cr_mention_ranking():
@@ -256,7 +257,7 @@ def test_bert_for_cr_mention_ranking():
         "path_pred": "/tmp/pred.conll",
         "scorer_path": "/home/vitaly/reference-coreference-scorers/scorer.pl"
     }
-    _test_model(BertForCoreferenceResolutionMentionRanking, config=config)
+    _test_model(BertForCoreferenceResolutionMentionRanking, config=config, drop_entities=False)
 
 
 def test_bert_for_cr_mention_ranking_new_inference():
@@ -295,7 +296,7 @@ def test_bert_for_cr_mention_ranking_new_inference():
         "path_pred": "/tmp/pred.conll",
         "scorer_path": "/home/vitaly/reference-coreference-scorers/scorer.pl"
     }
-    _test_model(BertForCoreferenceResolutionMentionRankingNewInference, config=config)
+    _test_model(BertForCoreferenceResolutionMentionRankingNewInference, config=config, drop_entities=False)
 
 
 def test_bert_for_dependency_parsing():
@@ -333,7 +334,7 @@ def test_bert_for_dependency_parsing():
         "bar": 2
     }
 
-    _test_model(BertForDependencyParsing, config=config, rel_enc=rel_enc)
+    _test_model(BertForDependencyParsing, config=config, rel_enc=rel_enc, drop_entities=True)
 
 
 def test_bert_for_relation_extraction():
@@ -368,4 +369,4 @@ def test_bert_for_relation_extraction():
         }
     }
 
-    _test_model(BertForRelationExtraction, config=config, ner_enc=ner_enc, re_enc=re_enc)
+    _test_model(BertForRelationExtraction, config=config, ner_enc=ner_enc, re_enc=re_enc, drop_entities=False)

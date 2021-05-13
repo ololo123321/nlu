@@ -541,7 +541,9 @@ class BaseModelBert(BaseModel):
             for t in x.tokens:
                 n = len(t.token_ids)
                 if n == 0:
-                    print(f"[{x.id}] [WARNING] token <bos>{t.text}<eos> could not be split by pieces")
+                    print(f"[{x.id}] [WARNING] token <bos>{t.text}<eos> "
+                          f"(span_abs: {t.span_abs}, span_rel: {t.span_rel}, "
+                          f"index_abs: {t.index_abs}, index_rel: {t.index_rel}) could not be split by pieces")
                     print(f"num chars: {len(t.text)}")
                     if len(t.text) == 1:
                         print(f"unicode code point: {ord(t.text)}")
