@@ -225,11 +225,15 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
                 ner_labels_i = []
                 for t in x.tokens:
                     label = t.labels[0]
-                    if len(t.token_ids) == 0 and label[0] == "B":
-                        # в такой ситуации нужно на этапе препроцессинга сдеать следующее:
-                        # label(t) = O
-                        # label(t + 1) = B-*
-                        raise ValueError(f"token could not be split by pieces and has label {label}")
+                    if len(t.token_ids) == 0:
+                        if label[0] == "B":
+                            # в такой ситуации нужно на этапе препроцессинга сдеать следующее:
+                            # label(t) = O
+                            # label(t + 1) = B-*
+                            raise ValueError(f"token could not be split by pieces and has label {label}, "
+                                             f"which can't be ignored")
+                        else:
+                            continue
                     id_label = self.ner_enc[label]
                     ner_labels_i.append(id_label)  # ner решается на уровне токенов!
                 ner_labels.append(ner_labels_i)
