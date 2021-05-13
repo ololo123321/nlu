@@ -781,6 +781,11 @@ class BertForCoreferenceResolutionMentionRanking(BaseBertForCoreferenceResolutio
 
 
 class BertForCoreferenceResolutionMentionRankingNewInference(BertForCoreferenceResolutionMentionRanking):
+    """
+    попытка сделать инференс сразу на уровне документа (см. predict)
+    лучше не вышло :(
+    TODO: чекнуть, нет ли ошибки
+    """
     def __init__(self, sess: tf.Session = None, config: Dict = None):
         super().__init__(sess=sess, config=config)
 
