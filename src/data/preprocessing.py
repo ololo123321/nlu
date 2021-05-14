@@ -379,17 +379,17 @@ def apply_bpe(
     for t in example.tokens:
         t.pieces = tokenizer.tokenize(t.text)
         t.token_ids = tokenizer.convert_tokens_to_ids(t.pieces)
-        num_pieces = len(t.pieces)
-        for label in t.labels:
-            # (Иван, B-PER) -> ([Ив, #ан], [B-PER, I-PER])
-            t.labels_pieces.append(label)
-            if num_pieces > 1:
-                if label[0] == "B":
-                    _, tag = label.split(ner_prefix_joiner)
-                    pad = f"I{ner_prefix_joiner}{tag}"
-                else:
-                    pad = label
-                t.labels_pieces += [pad] * (num_pieces - 1)
+        # num_pieces = len(t.pieces)
+        # for label in t.labels:
+        #     # (Иван, B-PER) -> ([Ив, #ан], [B-PER, I-PER])
+        #     t.labels_pieces.append(label)
+        #     if num_pieces > 1:
+        #         if label[0] == "B":
+        #             _, tag = label.split(ner_prefix_joiner)
+        #             pad = f"I{ner_prefix_joiner}{tag}"
+        #         else:
+        #             pad = label
+        #         t.labels_pieces += [pad] * (num_pieces - 1)
 
 
 def enumerate_entities(example: Example):
@@ -416,9 +416,11 @@ def fit_encodings(
     for x in examples:
         if ner_enc_token_level:
             for t in x.tokens:
-                for label in t.labels_pieces:
-                    if label != label_other:
-                        ner_labels[label] += 1
+                # for label in t.labels_pieces:
+                #     if label != label_other:
+                #         ner_labels[label] += 1
+                if t.label != label_other:
+                    ner_labels[t.label] += 1
         else:
             for entity in x.entities:
                 ner_labels[entity.label] += 1
@@ -452,12 +454,17 @@ def apply_encodings(
         if ner_enc_token_level:
             for t in x.tokens:
                 t.label_ids = []
-                for label in t.labels_pieces:
-                    if label in ner_enc.keys():
-                        t.label_ids.append(ner_enc[label])
-                    else:
-                        t.label_ids.append(0)
-                        unk_ner_labels[label] += 1
+                # for label in t.labels_pieces:
+                #     if label in ner_enc.keys():
+                #         t.label_ids.append(ner_enc[label])
+                #     else:
+                #         t.label_ids.append(0)
+                #         unk_ner_labels[label] += 1
+                if t.label in ner_enc.keys():
+                    t.label_ids.append(ner_enc[t.label])
+                else:
+                    t.label_ids.append(0)
+                    unk_ner_labels[t.label] += 1
         else:
             for entity in x.entities:
                 if entity.label in ner_enc.keys():
@@ -506,73 +513,3 @@ def assign_id_chain(examples: List[Example]):
             for id_entity in comp:
                 id2entity[id_entity].id_chain = id_chain
 
-
-def drop_bad_tokens(x: Example):
-    """
-    оставить только те токены, которые удалось разбить на кусочки.
-    :param x:
-    :return:
-    """
-
-    """
-            self.text = text
-        self.span_abs = span_abs
-        self.span_rel = span_rel
-        - self.index_abs = index_abs
-        - self.index_rel = index_rel  # пока не нужно
-        self.labels = labels if labels is not None else []
-        self.pieces = pieces if pieces is not None else []
-        self.token_ids = token_ids if token_ids is not None else []
-        self.id_sent = id_sent
-        self.id_head = id_head
-        self.rel = rel
-        self.pos = pos
-    """
-    tokens_new = []
-    tokens_bad = set()
-    idx = 0
-    for t in x.tokens:
-        if len(t.pieces) > 0:
-            t.index_abs = idx
-            t.index_rel = idx
-            tokens_new.append(t)
-            idx += 1
-        else:
-            assert t.id_head is None
-            if len(t.labels) > 0:
-                label = t.labels[0]
-                if label == "B":
-                    label = "I" + label[1:]
-                    t.labels = [label]
-            tokens_bad.add(t)
-    x.tokens = tokens_new
-    for entity in x.entities:
-        entity_tokens_new = []
-        for t in entity.tokens:
-            if t not in tokens_bad:
-                entity_tokens_new.append(t)
-        if len(entity_tokens_new) == 0:
-            raise
-        else:
-            t_first = entity_tokens_new[0]
-            label = t_first.labels[0]
-            if label[0] != "B":
-                label = "B" + label[1:]
-                t_first.labels = [label]
-        entity.tokens = entity_tokens_new
-    return x
-
-
-def assign_labels_to_tokens(x: Example):
-    for entity in x.entities:
-        num_tokens = len(entity.tokens)
-        assert num_tokens > 0
-        for i in range(num_tokens):
-            if i == 0:
-                prefix = "B-"
-            else:
-                prefix = "I-"
-            label = prefix + entity.label
-            t = entity.tokens[i]
-            assert t.label is None
-            t.label = label

@@ -11,7 +11,7 @@ from src.metrics import classification_report, classification_report_ner
 from src.utils import get_entity_spans, batches_gen, get_filtered_by_length_chunks, log
 
 
-class BertForFlatNER(BaseModelNER, BaseModelBert):
+class BertForNerAsSequenceLabeling(BaseModelNER, BaseModelBert):
     """
     bert -> [bilstm x N] -> logits -> [crf]
     """
@@ -111,7 +111,7 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
                 y_true_i = []
                 y_pred_i = []
                 for j, t in enumerate(x.tokens):
-                    y_true_i.append(t.labels[0])
+                    y_true_i.append(t.label)
                     y_pred_i.append(self.inv_ner_enc[ner_labels_pred[i, j]])
                 y_true.append(y_true_i)
                 y_true_flat += y_true_i
@@ -162,7 +162,7 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
             assert x.parent is not None, f"[{x.id}] parent is not set. " \
                 f"It is not a problem, but must be set for clarity"
             for t in x.tokens:
-                assert len(t.labels) == 0, f"[{x.id}] tokens are already annotated"
+                assert t.label is None, f"[{x.id}] tokens are already annotated"
 
         id2example = {x.id: x for x in examples}
         assert len(id2example) == len(examples), f"examples must have unique ids, " \
@@ -227,8 +227,7 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
             for x in examples:
                 ner_labels_i = []
                 for t in x.tokens:
-                    label = t.labels[0]
-                    id_label = self.ner_enc[label]
+                    id_label = self.ner_enc[t.label]
                     ner_labels_i.append(id_label)  # ner решается на уровне токенов!
                 ner_labels.append(ner_labels_i)
 
@@ -297,7 +296,10 @@ class BertForFlatNER(BaseModelNER, BaseModelBert):
         return logits, pred_ids, transition_params
 
 
-class BertForNestedNER(BaseModelNER, BaseModelBert):
+class BertForNerAsDependencyParsing(BaseModelNER, BaseModelBert):
+    """
+    https://arxiv.org/abs/2005.07150
+    """
     def __init__(self, sess=None, config=None, ner_enc=None):
         super().__init__(sess=sess, config=config, ner_enc=ner_enc)
 
@@ -470,9 +472,7 @@ class BertForNestedNER(BaseModelNER, BaseModelBert):
         # проверка примеров
         chunks = []
         for x in examples:
-            assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
-            for t in x.tokens:
-                assert len(t.labels) == 0, f"[{x.id}] tokens are already annotated"
+            # assert len(x.chunks) > 0, f"[{x.id}] didn't split by chunks"
             for chunk in x.chunks:
                 assert chunk.parent is not None, f"[{x.id}] parent for chunk {chunk.id} is not set. " \
                     f"It is not a problem, but must be set for clarity"

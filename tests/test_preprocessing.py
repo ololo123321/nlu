@@ -127,25 +127,25 @@ class Tokenizer:
         return [0] * len(tokens)
 
 
-@pytest.mark.parametrize("example, expected_pieces, expected_labels", [
-    pytest.param(
-        Example(
-            tokens=[
-                Token(text="мама", labels=["B-PER"]),
-                Token(text="мыла", labels=["I-PER"]),
-                Token(text="раму", labels=["O"])
-            ]
-        ),
-        ["мама", "мы", "#ла", "ра", "#м", "#у"],
-        ["B-PER", "I-PER", "I-PER", "O", "O", "O"]
-    )
-])
-def test_apply_bpe(example, expected_pieces, expected_labels):
-    apply_bpe(example=example, tokenizer=Tokenizer, ner_prefix_joiner="-", ner_encoding="bio")
-    actual_pieces = []
-    actual_labels = []
-    for t in example.tokens:
-        actual_pieces += t.pieces
-        actual_labels += t.labels_pieces
-    assert actual_pieces == expected_pieces
-    assert actual_labels == expected_labels
+# @pytest.mark.parametrize("example, expected_pieces, expected_labels", [
+#     pytest.param(
+#         Example(
+#             tokens=[
+#                 Token(text="мама", labels=["B-PER"]),
+#                 Token(text="мыла", labels=["I-PER"]),
+#                 Token(text="раму", labels=["O"])
+#             ]
+#         ),
+#         ["мама", "мы", "#ла", "ра", "#м", "#у"],
+#         ["B-PER", "I-PER", "I-PER", "O", "O", "O"]
+#     )
+# ])
+# def test_apply_bpe(example, expected_pieces, expected_labels):
+#     apply_bpe(example=example, tokenizer=Tokenizer, ner_prefix_joiner="-", ner_encoding="bio")
+#     actual_pieces = []
+#     actual_labels = []
+#     for t in example.tokens:
+#         actual_pieces += t.pieces
+#         actual_labels += t.labels_pieces
+#     assert actual_pieces == expected_pieces
+#     assert actual_labels == expected_labels

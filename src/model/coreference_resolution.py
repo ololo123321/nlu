@@ -19,9 +19,6 @@ from src.metrics import get_coreferense_resolution_metrics
 from src.utils import batches_gen, get_connected_components, parse_conll_metrics, log
 
 
-__all__ = ["BertForCoreferenceResolutionMentionPair", "BertForCoreferenceResolutionMentionRanking"]
-
-
 # TODO: span size features
 # TODO: distance features
 # TODO: s(i, eps) = 0

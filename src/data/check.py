@@ -22,8 +22,7 @@ def check_flat_ner_markup(example: Example):
     expected = len(example.entities)
     actual = 0
     for t in example.tokens:
-        for label in t.labels:
-            actual += label[0] == "B"
+        actual += t.label[0] == "B"
     assert actual == expected, \
         f"[{example.id}] number of entities ({expected}) does not match number of start tokens ({actual})"
 
@@ -96,5 +95,5 @@ def check_split(chunk: Example, window: int, fixed_sent_pointers: bool = False):
             if t.id_sent != id_sent_curr:
                 id_sent_curr = t.id_sent
                 if id_sent_curr in sent_ids_to_check:
-                    assert any(label[0] == "I" for label in t.labels), f"[{chunk.id}] expected split " \
+                    assert t.label[0] == "I", f"[{chunk.id}] expected split " \
                         f"between sentences {id_sent_curr - 1} and {id_sent_curr}"

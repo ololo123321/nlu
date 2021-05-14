@@ -1,7 +1,7 @@
 import copy
 import tensorflow as tf
 
-from src.model.ner import BertForFlatNER, BertForNestedNER
+from src.model.ner import BertForNerAsSequenceLabeling, BertForNerAsDependencyParsing
 from src.model.coreference_resolution import (
     BertForCoreferenceResolutionMentionPair,
     BertForCoreferenceResolutionMentionRanking,
@@ -129,7 +129,7 @@ def _test_model(model_cls, config, drop_entities: bool, **kwargs):
     )
 
 
-def test_bert_for_flat_ner():
+def test_bert_for_ner_as_sequence_labeling():
     ner_enc = {
         "O": 0,
         "B_FOO": 1,
@@ -151,10 +151,10 @@ def test_bert_for_flat_ner():
             "recurrent_dropout": 0.0
         }
     }
-    _test_model(BertForFlatNER, config=config, ner_enc=ner_enc, drop_entities=True)
+    _test_model(BertForNerAsSequenceLabeling, config=config, ner_enc=ner_enc, drop_entities=True)
 
 
-def test_bert_for_nested_ner():
+def test_bert_for_ner_as_dependency_parsing():
     ner_enc = {
         "O": 0,
         "FOO": 1,
@@ -179,7 +179,7 @@ def test_bert_for_nested_ner():
             "num_labels": len(ner_enc),
         }
     }
-    _test_model(BertForNestedNER, config=config, ner_enc=ner_enc, drop_entities=True)
+    _test_model(BertForNerAsDependencyParsing, config=config, ner_enc=ner_enc, drop_entities=True)
 
 
 def test_bert_for_cr_mention_pair():

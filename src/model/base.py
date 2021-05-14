@@ -358,8 +358,10 @@ class BaseModel(ABC):
         scores_valid = np.array(scores_valid)
         scores_test = np.array(scores_test)
 
-        print(f"scores valid: {scores_valid} (mean {scores_valid.mean()}, std {scores_valid.std()})")
-        print(f"scores test: {scores_test} (mean {scores_test.mean()}, std {scores_test.std()})")
+        print(f"scores valid: {[round(x, 4) for x in scores_valid]} "
+              f"(mean {round(scores_valid.mean(), 4)}, std {round(scores_valid.std(), 4)})")
+        print(f"scores test: {[round(x, 4) for x in scores_test]} "
+              f"(mean {round(scores_test.mean(), 4)}, std {round(scores_test.std(), 4)})")
 
         return scores_valid, scores_test
 
@@ -540,16 +542,8 @@ class BaseModelBert(BaseModel):
 
             for t in x.tokens:
                 n = len(t.token_ids)
-                # if n == 0:
-                #     print(f"[{x.id}] [WARNING] token <bos>{t.text}<eos> "
-                #           f"(span_abs: {t.span_abs}, span_rel: {t.span_rel}, "
-                #           f"index_abs: {t.index_abs}, index_rel: {t.index_rel}) could not be split by pieces")
-                #     print(f"num chars: {len(t.text)}")
-                #     if len(t.text) == 1:
-                #         print(f"unicode code point: {ord(t.text)}")
-                #     # без continue в first_pieces_coords_i запишется дубликат
-                #     continue
-                assert n != 0, f"[{x.id}] token {t} could not be split by pieces! code points: {[ord(c) for c in t.text]}"
+                assert n != 0, f"[{x.id}] token {t} could not be split by pieces! " \
+                    f"unicode code points: {[ord(c) for c in t.text]}"
                 first_pieces_coords_i.append((i, len(input_ids_i)))
                 input_ids_i += t.token_ids
                 input_mask_i += [1] * n

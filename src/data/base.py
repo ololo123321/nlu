@@ -1,5 +1,5 @@
 import re
-from typing import Union, List
+from typing import Union, List, Tuple
 from collections import namedtuple
 
 
@@ -76,8 +76,8 @@ class Token(ReprMixin):
             span_rel: Span = None,
             index_abs: int = None,
             index_rel: int = None,
-            labels: List[Union[str, int]] = None,
-            pieces: List[Union[str, int]] = None,  # TODO: нужно ли?
+            label: str = None,
+            pieces: List[str] = None,
             token_ids: List[int] = None,
             id_sent: int = None,
             id_head: int = None,  # for dependency parsing
@@ -91,7 +91,7 @@ class Token(ReprMixin):
         :param span_rel: относительный** спан
         :param index_abs: абсолютный* порядковый номер
         :param index_rel: относительный** порядковый номер
-        :param labels: лейблы
+        :param label: лейбл
         :param pieces: bpe-кусочки
 
         * на уровне документа
@@ -102,16 +102,13 @@ class Token(ReprMixin):
         self.span_rel = span_rel
         self.index_abs = index_abs
         self.index_rel = index_rel  # пока не нужно
-        self.labels = labels if labels is not None else []
+        self.label = label
         self.pieces = pieces if pieces is not None else []
         self.token_ids = token_ids if token_ids is not None else []
         self.id_sent = id_sent
         self.id_head = id_head
         self.rel = rel
         self.pos = pos
-
-        self.labels_pieces = []
-        self.label_ids = []
 
     @property
     def copy(self):
@@ -124,26 +121,25 @@ class Token(ReprMixin):
         return t
 
     def reset(self):
-        self.labels = []
+        self.label = None
         self.id_head = None
         self.rel = None
         self.pos = None
-        self.labels_pieces = []
-        self.label_ids = []
 
 
 class Entity(ReprMixin):
     def __init__(
             self,
-            id: Union[int, str] = None,
-            label: Union[int, str] = None,
+            id: str = None,
+            label: str = None,
             text: str = None,
             tokens: List[Token] = None,
             is_event_trigger: bool = False,
             attrs: List[Attribute] = None,  # атрибуты сущности
             comment: str = None,
             index: int = None,
-            id_chain: int = None  # для coreference resolution
+            id_chain: int = None,  # для coreference resolution
+            span: Tuple = None
     ):
         """
 
@@ -154,6 +150,7 @@ class Entity(ReprMixin):
         :param is_event_trigger:
         :param attrs:
         :param comment:
+        :param span:
         """
         self.id = id
         self.label = label
@@ -164,14 +161,13 @@ class Entity(ReprMixin):
         self.comment = comment
         self.index = index
         self.id_chain = id_chain
-
-        self.label_id = None  # deprecated
+        self.span = span
 
 
 class Event(ReprMixin):
     def __init__(
             self,
-            id: Union[str, int] = None,
+            id: str = None,
             trigger: str = None,
             label: str = None,
             args: List[EventArgument] = None,
@@ -189,7 +185,7 @@ class Event(ReprMixin):
 class Arc(ReprMixin):
     def __init__(
             self,
-            id: Union[str, int],
+            id: str,
             head: Union[str, int],  # int in case of dependency parsing
             dep: Union[str, int],  # int in case of dependency parsing
             rel: str,
