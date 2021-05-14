@@ -33,13 +33,7 @@ from src.data.exceptions import (
 def parse_collection(
         data_dir: str,
         n: int = None,
-        ner_encoding: str = NerEncodings.BIO,
-        ner_prefix_joiner: str = NerPrefixJoiners.HYPHEN,
         tokens_pattern: Union[str, Pattern] = None,
-        allow_nested_entities: bool = False,
-        allow_nested_entities_one_label: bool = False,
-        allow_many_entities_per_span_one_label: bool = False,
-        allow_many_entities_per_span_different_labels: bool = False,
         ignore_bad_examples: bool = False,
         read_fn: Callable = None
 ) -> List[Example]:
@@ -72,10 +66,7 @@ def parse_collection(
             example = parse_example(
                 data_dir=data_dir,
                 filename=filename,
-                ner_prefix_joiner=ner_prefix_joiner,
                 tokens_expression=tokens_expression,
-                allow_many_entities_per_span_one_label=allow_many_entities_per_span_one_label,
-                allow_many_entities_per_span_different_labels=allow_many_entities_per_span_different_labels,
                 read_fn=read_fn
             )
             examples.append(example)
@@ -104,10 +95,7 @@ def parse_collection(
                     example = parse_example(
                         data_dir=data_dir,
                         filename=filename,
-                        ner_prefix_joiner=ner_prefix_joiner,
                         tokens_expression=tokens_expression,
-                        allow_many_entities_per_span_one_label=allow_many_entities_per_span_one_label,
-                        allow_many_entities_per_span_different_labels=allow_many_entities_per_span_different_labels,
                         read_fn=read_fn_alt
                     )
                     examples.append(example)
@@ -153,7 +141,6 @@ def read_file_v3(f: IO) -> str:
 def parse_example(
         data_dir: str,
         filename: str,
-        ner_prefix_joiner: str = NerPrefixJoiners.HYPHEN,
         tokens_expression: Pattern = TOKENS_EXPRESSION,
         read_fn: Callable = None
 ) -> Example:
@@ -219,7 +206,8 @@ def parse_example(
                 entity_label, start_index, end_index = entity.split()
                 start_index = int(start_index)
                 end_index = int(end_index)
-                entity_label = fix_entity_label(label=entity_label, ner_prefix_joiner=ner_prefix_joiner)
+                # TODO: делать это вне этой функции
+                # entity_label = fix_entity_label(label=entity_label, ner_prefix_joiner=ner_prefix_joiner)
                 entity_span = start_index, end_index
 
                 # проверка того, что в файле .txt в спане из файла .ann находится
@@ -546,6 +534,8 @@ def simplify(example: Example):
     :param example:
     :return:
     """
+    assert isinstance(example.id, str)
+
     span_to_entities = defaultdict(set)
     span_pair_to_arcs = defaultdict(set)
 
