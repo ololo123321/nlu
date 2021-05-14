@@ -14,11 +14,11 @@ from src.data.base import Example, Entity, Token, Span, Arc
 
 def build_examples():
     tokens = [
-        Token(text="мама", labels=["B_FOO"], token_ids=[3], index_abs=0, index_rel=0, id_sent=0,
+        Token(text="мама", label="B_FOO", token_ids=[3], index_abs=0, index_rel=0, id_sent=0,
               span_abs=Span(start=0, end=4), span_rel=Span(start=0, end=4), id_head=0, rel="root"),
-        Token(text="мыла", labels=["I_FOO"], token_ids=[4, 5], index_abs=1, index_rel=1, id_sent=0,
+        Token(text="мыла", label="I_FOO", token_ids=[4, 5], index_abs=1, index_rel=1, id_sent=0,
               span_abs=Span(start=5, end=9), span_rel=Span(start=5, end=9), id_head=0, rel="foo"),
-        Token(text="раму", labels=["B_BAR"], token_ids=[6], index_abs=2, index_rel=2, id_sent=0,
+        Token(text="раму", label="B_BAR", token_ids=[6], index_abs=2, index_rel=2, id_sent=0,
               span_abs=Span(start=10, end=14), span_rel=Span(start=10, end=14), id_head=1, rel="bar")
     ]
     entities = [

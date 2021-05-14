@@ -9,7 +9,7 @@ from src.model.base import BaseModelRelationExtraction, BaseModelBert, ModeKeys,
 from src.model.layers import StackedBiRNN, GraphEncoder, GraphEncoderInputs
 from src.model.utils import upper_triangular, get_entities_representation, get_sent_pairs_to_predict_for
 from src.metrics import classification_report, classification_report_ner
-from src.model.ner import BertForFlatNER
+from src.model.ner import BertForNerAsSequenceLabeling
 from src.utils import get_entity_spans, batches_gen, get_filtered_by_length_chunks, log
 
 
