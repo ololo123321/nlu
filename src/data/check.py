@@ -29,7 +29,7 @@ def check_flat_ner_markup(example: Example):
         expected = entity.text.replace(' ', '')
         actual = ''
         for t in entity.tokens:
-            actual += t.text
+            actual += t.text.replace(' ', '')
         assert actual == expected, f"[{example.id}] {actual} != {expected}"
 
 
