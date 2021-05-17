@@ -12,19 +12,25 @@ def check_tokens(example: Example):
         entity_ids.add(entity.id)
 
     # пример не начинается в середине сущности
-    assert all(label[0] != "I" for label in example.tokens[0].labels), f"[{example.id}] contains only part of entity!"
+    assert example.tokens[0].label[0] != "I", f"[{example.id}] contains only part of entity!"
 
 
 def check_flat_ner_markup(example: Example):
     """
-    число сущностей равно числу лейблов начала сущности
+    * каждый токен размечен
+    * каждая сущность начинается с лейбла B-*
+    * токены сущности соответствуют тексту сущности
     """
-    expected = len(example.entities)
-    actual = 0
     for t in example.tokens:
-        actual += t.label[0] == "B"
-    assert actual == expected, \
-        f"[{example.id}] number of entities ({expected}) does not match number of start tokens ({actual})"
+        assert t.label is not None, f"[{example.id}] token {t} has no label!"
+    for entity in example.entities:
+        label = entity.tokens[0].label
+        assert label[0] == "B", f"[{example.id}] entity {entity.id} starts with label {label}"
+        expected = entity.text.replace(' ', '')
+        actual = ''
+        for t in entity.tokens:
+            actual += t.text
+        assert actual == expected, f"[{example.id}] {actual} != {expected}"
 
 
 def check_arcs(example: Example, one_child: bool = False, one_parent: bool = False):
