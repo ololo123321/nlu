@@ -40,6 +40,10 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
         self.entity_emb_dropout = None
         self.entity_pairs_enc = None
 
+        # DEBUG
+        self.per_example_loss = None
+        self.loss_mask = None
+
     def _build_re_head(self):
         self.logits_train, self.num_entities = self._build_re_head_fn(bert_out=self.bert_out_train)
         logits_pred, _ = self._build_re_head_fn(bert_out=self.bert_out_pred)
@@ -111,6 +115,10 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
         num_pairs = tf.maximum(num_pairs, 1.0)
         self.loss = total_loss / num_pairs
         self.total_loss = total_loss
+
+        # DEBUG
+        self.per_example_loss = per_example_loss
+        self.loss_mask = mask
 
     def _get_feed_dict(self, examples: List[Example], mode: str) -> Dict:
         assert self.ner_enc is not None
