@@ -84,8 +84,9 @@ class BertForNerAsSequenceLabeling(BaseModelNER, BaseModelBert):
 
     @log
     def evaluate(self, examples: List[Example], **kwargs) -> Dict:
-        maxlen = self.config["inference"]["maxlen"]
-        chunks = get_filtered_by_length_chunks(examples=examples, maxlen=maxlen, pieces_level=self._is_bpe_level)
+        chunks = get_filtered_by_length_chunks(
+            examples=examples, maxlen=self.config["inference"]["maxlen"], pieces_level=self._is_bpe_level
+        )
 
         y_true = []
         y_true_flat = []
