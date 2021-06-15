@@ -82,8 +82,9 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
         x = self._get_token_level_embeddings(bert_out=bert_out)  # [batch_size, num_tokens, d_bert]
 
         # entity embeddings
+        entity_emb_layer = self._entity_emb_fn if self.config["model"]["re"]["entity_emb"]["use"] else None
         x, num_entities = get_entities_representation(
-            x=x, ner_labels=self.ner_labels_ph, sparse_labels=True, ff_attn=None, entity_emb_layer=self._entity_emb_fn
+            x=x, ner_labels=self.ner_labels_ph, sparse_labels=True, ff_attn=None, entity_emb_layer=entity_emb_layer
         )  # [batch_size, num_ent, D * 3]
 
         inputs = GraphEncoderInputs(head=x, dep=x)
