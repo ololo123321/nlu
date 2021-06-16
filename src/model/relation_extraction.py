@@ -269,6 +269,10 @@ class BertForRelationExtraction(BaseModelRelationExtraction, BaseModelBert):
         no_rel_id = self.config["model"]["re"]["no_relation_id"]
         assert no_rel_id == 0
 
+        chunks = get_filtered_by_length_chunks(
+            examples=chunks, maxlen=self.config["inference"]["maxlen"], pieces_level=self._is_bpe_level
+        )
+
         gen = batches_gen(
             examples=chunks,
             max_tokens_per_batch=self.config["inference"]["max_tokens_per_batch"],
