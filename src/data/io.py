@@ -746,13 +746,9 @@ def to_conll(examples, path):
 
 
 # TODO: создавать инстансы класса Event на уровне model.predict
-# TODO: зачем copy_texts??
 def to_brat(
         examples: List[Example],
         output_dir: str,
-        copy_texts: bool = False,
-        collection_dir: str = None,
-        copy_annotation_config: bool = False,
         write_mode: str = "a"
 ):
     assert write_mode in {"a", "w"}
@@ -761,6 +757,10 @@ def to_brat(
     filenames = set()
     for x in examples:
         filenames.add(x.filename)
+
+        with open(os.path.join(output_dir, f"{x.filename}.txt"), write_mode) as f:
+            f.write(x.text)
+
         with open(os.path.join(output_dir, f"{x.filename}.ann"), write_mode) as f:
             events = {}
             # сущности
@@ -811,18 +811,6 @@ def to_brat(
                     line += ' ' + args_str
                 line += '\n'
                 f.write(line)
-
-    if copy_texts:
-        assert collection_dir is not None
-        for name in filenames:
-            shutil.copy(os.path.join(collection_dir, f"{name}.txt"), output_dir)
-    if copy_annotation_config:
-        assert collection_dir is not None
-        conf_path = os.path.join(collection_dir, "annotation.conf")
-        if os.path.exists(conf_path):
-            shutil.copy(conf_path, output_dir)
-        else:
-            print(f"there is no file annotation.conf in {collection_dir}")
 
 
 def to_brat_v2(examples: List[Example], output_dir: str,):
