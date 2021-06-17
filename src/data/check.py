@@ -1,18 +1,16 @@
 from src.data.base import Example
 
 
-def check_tokens(example: Example):
-    for i, t in enumerate(example.tokens):
-        assert t.index_rel == i, f"[{example.id}] token ids rel: {[t.index_rel for t in example.tokens]}"
-
-    # число токенов сущности больше нуля
-    entity_ids = set()
+def check_tokens_entities_alignment(example: Example):
+    """
+    * токены сущности соответствуют тексту сущности
+    """
     for entity in example.entities:
-        assert len(entity.tokens) > 0, f"[{example.id}] entity {entity.id} has no tokens!"
-        entity_ids.add(entity.id)
-
-    # пример не начинается в середине сущности
-    assert example.tokens[0].label[0] != "I", f"[{example.id}] contains only part of entity!"
+        expected = _remove_spaces(entity.text)
+        actual = ''
+        for t in entity.tokens:
+            actual += _remove_spaces(t.text)
+        assert actual == expected, f"[{example.id}] [{entity.id}] {actual} != {expected}"
 
 
 def check_flat_ner_markup(example: Example):
@@ -20,16 +18,20 @@ def check_flat_ner_markup(example: Example):
     * каждый токен размечен
     * каждая сущность начинается с лейбла B-*
     * токены сущности соответствуют тексту сущности
+    * пример начинается не в середине сущности
     """
+    assert len(example.tokens) > 0, f"[{example.id}] no tokens"
     for t in example.tokens:
-        assert t.label is not None, f"[{example.id}] token {t} has no label!"
+        assert t.label is not None, f"[{example.id}] token {t} has no label"
+    assert example.tokens[0].label[0] != "I", f"[{example.id}] starts inside entity"
     for entity in example.entities:
+        assert len(entity.tokens) > 0, f"[{example.id}] entity {entity.id} has no tokens"
         label = entity.tokens[0].label
         assert label[0] == "B", f"[{example.id}] entity {entity.id} starts with label {label}"
-        expected = entity.text.replace(' ', '')
+        expected = _remove_spaces(entity.text)
         actual = ''
         for t in entity.tokens:
-            actual += t.text.replace(' ', '')
+            actual += _remove_spaces(t.text)
         assert actual == expected, f"[{example.id}] {actual} != {expected}"
 
 
@@ -103,3 +105,11 @@ def check_split(chunk: Example, window: int, fixed_sent_pointers: bool = False):
                 if id_sent_curr in sent_ids_to_check:
                     assert t.label[0] == "I", f"[{chunk.id}] expected split " \
                         f"between sentences {id_sent_curr - 1} and {id_sent_curr}"
+
+
+def _remove_spaces(s: str) -> str:
+    s = s.replace(" ", "")
+    s = s.replace("\xa0", "")
+    s = s.replace("\n", "")
+    s = s.replace("\t", "")
+    return s
